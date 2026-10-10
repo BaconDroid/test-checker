@@ -1,5 +1,6 @@
-use test_checker::detector::{Change, TestDetector, rule_ids};
+use test_checker::detector::{Change, TestDetector};
 use test_checker::models::Finding;
+use test_checker::rules::rule_ids;
 
 fn make_change(
     path: &str,
@@ -727,7 +728,7 @@ fn detect_given_disable_file_marker_suppresses_all_rules() {
 }
 
 #[test]
-fn detect_given_allow_marker_suppresses_nearby_finding() {
+fn detect_pipeline_given_allow_marker_suppresses_nearby_finding() {
     // given
     let change = make_change(
         "tests/test_a.py",
@@ -737,9 +738,29 @@ fn detect_given_allow_marker_suppresses_nearby_finding() {
         true,
     );
 
-    // when
+    // when: detect captures the finding, then the suppression filter drops it
     let findings = TestDetector::new().detect(&change);
+    let findings = test_checker::filters::apply_filters(&findings, &change.new_text);
 
     // then
     assert_eq!(findings, Vec::<Finding>::new());
+}
+
+#[test]
+fn detect_pipeline_given_finding_far_from_marker_keeps_it() {
+    // given: the tautology is 5 lines above the only allow marker
+    let change = make_change(
+        "tests/test_a.py",
+        "python",
+        "",
+        "def test_a():\n    assert True\n\n\n\n\n# test-guard: allow\n",
+        true,
+    );
+
+    // when
+    let findings = TestDetector::new().detect(&change);
+    let findings = test_checker::filters::apply_filters(&findings, &change.new_text);
+
+    // then
+    assert!(rule_present(&findings, "tautological-assertion"));
 }

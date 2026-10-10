@@ -51,7 +51,7 @@ impl Finding {
 
 /// One entry of a `MultiEdit` payload.
 #[derive(Clone, Debug, Default, Deserialize)]
-pub struct Edit {
+pub(crate) struct Edit {
     #[serde(default)]
     pub old_string: String,
     #[serde(default)]
@@ -60,7 +60,7 @@ pub struct Edit {
 
 /// File-oriented fields of a `Write`/`Edit`/`MultiEdit` call.
 #[derive(Clone, Debug, Default, Deserialize)]
-pub struct ToolInput {
+pub(crate) struct ToolInput {
     #[serde(default)]
     pub file_path: String,
     #[serde(default)]
@@ -75,7 +75,7 @@ pub struct ToolInput {
 
 /// Full hook payload. Unknown fields are ignored on purpose.
 #[derive(Clone, Debug, Default, Deserialize)]
-pub struct Payload {
+pub(crate) struct Payload {
     #[serde(default)]
     pub tool_name: String,
     #[serde(default)]
