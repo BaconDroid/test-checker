@@ -3,6 +3,8 @@
 //! No regex engine is involved: every predicate is a small, auditable string
 //! scan, mirroring the reference implementation's filters.
 
+use crate::models::Finding;
+
 /// `test-guard: allow` window, in lines, on each side of a finding.
 const BYPASS_WINDOW: usize = 2;
 
@@ -26,6 +28,17 @@ pub fn within_bypass(text: &str, line: usize) -> bool {
             .get(index)
             .is_some_and(|candidate| has_allow_marker(candidate))
     })
+}
+
+/// Drops every finding whose line sits within a `test-guard: allow` window in
+/// `source`, preserving the input order of the survivors.
+#[must_use]
+pub fn apply_filters(findings: &[Finding], source: &str) -> Vec<Finding> {
+    findings
+        .iter()
+        .filter(|finding| !within_bypass(source, finding.line))
+        .cloned()
+        .collect()
 }
 
 /// Reports whether a line contains the `test-guard:\s*allow\b` marker: the

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::detector::{Change, TestDetector};
-use crate::language::language_for_path;
+use crate::language::{language_for_path, plugin_language};
 use crate::models::Payload;
 use crate::output::format_hook_message;
 use crate::testpath::is_test_path;
@@ -69,13 +69,14 @@ pub fn check_hook_input(input: &str, custom_prompt: &str) -> HookCheckResult {
 
     let change = Change {
         file_path: file_path.to_owned(),
-        language: spec.plugin,
+        language: plugin_language(spec.name),
         new_text,
         old_text,
         is_new,
         is_test_file,
     };
     let findings = TestDetector::new().detect(&change);
+    let findings = crate::filters::apply_filters(&findings, &change.new_text);
     if findings.is_empty() {
         return HookCheckResult::pass(SUCCESS_MESSAGE);
     }
@@ -99,13 +100,14 @@ pub fn detect_findings_json(content: &str, file_path: &str, is_test_file: bool) 
     };
     let change = Change {
         file_path: file_path.to_owned(),
-        language: spec.plugin,
+        language: plugin_language(spec.name),
         new_text: content.to_owned(),
         old_text: String::new(),
         is_new: true,
         is_test_file,
     };
     let findings = TestDetector::new().detect(&change);
+    let findings = crate::filters::apply_filters(&findings, &change.new_text);
     serde_json::to_string(&findings).unwrap_or_else(|_| String::from("[]"))
 }
 
@@ -144,4 +146,84 @@ fn skip(reason: &str) -> HookCheckResult {
 
 fn fallback_json() -> String {
     String::from("{\"exitCode\":0,\"message\":\"[test-checker] Skipping: Invalid arguments\"}")
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::models::Payload;
+
+    #[test]
+    fn payload_given_write_input_deserializes_tool_fields() {
+        // given
+        let json = r#"{
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": "src/app.py",
+                "content": "print(1)",
+                "old_string": "old",
+                "new_string": "new",
+                "edits": [{ "old_string": "x", "new_string": "y" }]
+            }
+        }"#;
+
+        // when
+        let payload: Payload = serde_json::from_str(json).unwrap();
+
+        // then
+        assert_eq!(payload.tool_name, "Write");
+        assert_eq!(payload.tool_input.file_path, "src/app.py");
+        assert_eq!(payload.tool_input.content, "print(1)");
+        assert_eq!(payload.tool_input.old_string, "old");
+        assert_eq!(payload.tool_input.new_string, "new");
+        assert_eq!(payload.tool_input.edits.len(), 1);
+        assert_eq!(payload.tool_input.edits[0].old_string, "x");
+        assert_eq!(payload.tool_input.edits[0].new_string, "y");
+    }
+
+    #[test]
+    fn payload_given_absent_is_test_file_is_none() {
+        // given
+        let json = r#"{"tool_name":"Write","tool_input":{"file_path":"a.py"}}"#;
+
+        // when
+        let payload: Payload = serde_json::from_str(json).unwrap();
+
+        // then
+        assert_eq!(payload.is_test_file, None);
+    }
+
+    #[test]
+    fn payload_given_explicit_is_test_file_is_some() {
+        // given
+        let truthy =
+            r#"{"tool_name":"Write","tool_input":{"file_path":"a.py"},"is_test_file":true}"#;
+        let falsy =
+            r#"{"tool_name":"Write","tool_input":{"file_path":"a.py"},"is_test_file":false}"#;
+
+        // when / then
+        assert_eq!(
+            serde_json::from_str::<Payload>(truthy)
+                .unwrap()
+                .is_test_file,
+            Some(true)
+        );
+        assert_eq!(
+            serde_json::from_str::<Payload>(falsy).unwrap().is_test_file,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn payload_given_unknown_fields_ignores_them() {
+        // given
+        let json =
+            r#"{"tool_name":"Edit","unexpected":1,"tool_input":{"file_path":"a.py","extra":true}}"#;
+
+        // when
+        let payload: Payload = serde_json::from_str(json).unwrap();
+
+        // then
+        assert_eq!(payload.tool_name, "Edit");
+        assert_eq!(payload.tool_input.file_path, "a.py");
+    }
 }

@@ -7,6 +7,12 @@ use test_checker::detector::{Change, TestDetector};
 const PYTHON_TEST: &str =
     "def test_add():\n    assert add(1, 2) == 3\n\ndef test_weakened():\n    assert True\n";
 
+const GO_TEST: &str = "package foo\n\nfunc TestAdd(t *testing.T) {\n\tif add(1, 2) != 3 {\n\t\tt.Fatalf(\"want 3\")\n\t}\n}\n";
+
+const RUST_TEST: &str = "#[test]\nfn test_add() {\n    assert_eq!(add(1, 2), 3);\n}\n";
+
+const JAVASCRIPT_TEST: &str = "it('adds', () => {\n  expect(add(1, 2)).toBe(3);\n});\n";
+
 const TYPESCRIPT_TEST: &str = "it('adds', () => {\n  expect(add(1, 2)).toBe(3);\n});\n";
 
 fn change(file_path: &str, language: &'static str, old_text: &str, new_text: &str) -> Change {
@@ -29,6 +35,26 @@ fn benchmark_detector(criterion: &mut Criterion) {
                 "python",
                 "",
                 black_box(PYTHON_TEST),
+            )))
+        });
+    });
+    criterion.bench_function("detect_go", |bencher| {
+        bencher.iter(|| {
+            black_box(detector.detect(&change("pkg/foo_test.go", "go", "", black_box(GO_TEST))))
+        });
+    });
+    criterion.bench_function("detect_rust", |bencher| {
+        bencher.iter(|| {
+            black_box(detector.detect(&change("src/foo_test.rs", "rust", "", black_box(RUST_TEST))))
+        });
+    });
+    criterion.bench_function("detect_javascript", |bencher| {
+        bencher.iter(|| {
+            black_box(detector.detect(&change(
+                "sample.test.js",
+                "js",
+                "",
+                black_box(JAVASCRIPT_TEST),
             )))
         });
     });

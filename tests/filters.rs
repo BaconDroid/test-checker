@@ -1,7 +1,8 @@
+use test_checker::detector::{Change, TestDetector};
 use test_checker::filters::{
-    code_text, count_real_lines, is_conditional_skip, is_file_disabled, is_test_declaration,
-    is_trivial_body, mock_identifier_hit, normalize_assertion, normalize_body, skip_focus_hit,
-    strip_comments, strip_string_literals, tautological_hit, within_bypass,
+    apply_filters, code_text, count_real_lines, is_conditional_skip, is_file_disabled,
+    is_test_declaration, is_trivial_body, mock_identifier_hit, normalize_assertion, normalize_body,
+    skip_focus_hit, strip_comments, strip_string_literals, tautological_hit, within_bypass,
 };
 
 // --- Comment / code text helpers -------------------------------------------
@@ -337,4 +338,51 @@ fn is_trivial_body_given_empty_bodies_returns_true() {
 fn is_trivial_body_given_executable_body_returns_false() {
     // given / when / then
     assert!(!is_trivial_body("assert x == 1"));
+}
+
+// --- Suppression at the finding boundary -----------------------------------
+
+#[test]
+fn apply_filters_given_js_finding_near_allow_marker_drops_it() {
+    // given: a tautological assertion two lines below an allow marker
+    let change = Change {
+        file_path: "src/app.test.ts".to_owned(),
+        language: "ts",
+        new_text: "it(\"a\", () => {\n  // test-guard: allow\n  expect(true).toBe(true);\n});\n"
+            .to_owned(),
+        old_text: String::new(),
+        is_new: true,
+        is_test_file: true,
+    };
+
+    // when: detect captures the finding, then the suppression filter drops it
+    let findings = TestDetector::new().detect(&change);
+    let findings = apply_filters(&findings, &change.new_text);
+
+    // then: the allow filter removes the finding the classifier would emit
+    assert_eq!(findings, Vec::new());
+}
+
+#[test]
+fn apply_filters_given_finding_far_from_marker_keeps_it() {
+    // given: a tautological assertion 5 lines above the only allow marker
+    let change = Change {
+        file_path: "tests/test_a.py".to_owned(),
+        language: "python",
+        new_text: "def test_a():\n    assert True\n\n\n\n\n# test-guard: allow\n".to_owned(),
+        old_text: String::new(),
+        is_new: true,
+        is_test_file: true,
+    };
+
+    // when
+    let findings = TestDetector::new().detect(&change);
+    let findings = apply_filters(&findings, &change.new_text);
+
+    // then: the far marker does not suppress the finding
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "tautological-assertion")
+    );
 }
