@@ -37,16 +37,16 @@ ignored (exit 0).
 
 ## Rules
 
-Deterministic: `protected-paths`, `skip-focus-added`, `tautological-assertion`,
-`empty-test`, `unknown-test`, `gutted-test`, `matcher-loosened`,
-`swallowed-error`, `duplicate-test`, `forced-success`, `mock-of-sut`.
-
-Advisory: `over-mocking`, `assertion-roulette`, `redundant-assertion`,
-`weakened-config`, `tests-not-run`, `expected-from-sut`,
-`negative-control-unrelated`.
+`skip-focus-added`, `tautological-assertion`, `empty-test`, `unknown-test`,
+`gutted-test`, `swallowed-error`, `duplicate-test`, `mock-of-sut`,
+`over-mocking`, `assertion-roulette`, `redundant-assertion`.
 
 Only added lines are candidates, comments are stripped, the `is_test_file` gate
 applies, and every failure path degrades to no findings (fail-open).
+
+The library also exposes `detect_findings_json(content, file_path, is_test_file)`
+(sibling of comment-checker's `detect_comments_json`), returning the findings as
+a JSON array.
 
 ## Development
 

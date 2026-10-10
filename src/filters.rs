@@ -6,24 +6,6 @@
 /// `test-guard: allow` window, in lines, on each side of a finding.
 const BYPASS_WINDOW: usize = 2;
 
-/// The plugin's `DEFAULT_TEST_PATTERNS`, in declaration order.
-const DEFAULT_TEST_PATTERNS: &[&str] = &[
-    "**/*.test.*",
-    "**/*_test.*",
-    "**/test_*.py",
-    "**/tests/**",
-    "**/__tests__/**",
-    "**/*.spec.*",
-];
-
-#[must_use]
-pub fn is_test_path(file_path: &str) -> bool {
-    let normalized = file_path.replace('\\', "/");
-    DEFAULT_TEST_PATTERNS
-        .iter()
-        .any(|pattern| glob_match(pattern, &normalized))
-}
-
 #[must_use]
 pub fn is_file_disabled(text: &str) -> bool {
     contains_ignore_ascii_case(text, "test-guard-disable-file")
@@ -188,48 +170,6 @@ pub fn normalize_body<'a>(lines: impl IntoIterator<Item = &'a str>, language: &s
     parts.join("\n")
 }
 
-/// Matches the "after" form of a loosening, used to locate the added line.
-#[must_use]
-pub fn matches_loosening_after(code: &str, message: &str) -> bool {
-    let squashed: String = code.chars().filter(|c| !c.is_whitespace()).collect();
-    match message {
-        "assertEqual loosened to assertTrue" => has_call(&squashed, "assertTrue"),
-        "toBe loosened to toBeTruthy" => has_call(&squashed, ".toBeTruthy"),
-        "toBe loosened to toBeDefined" => has_call(&squashed, ".toBeDefined"),
-        "assertRaises narrowed to Exception" => {
-            squashed.contains("assertRaises(Exception)")
-                || squashed.contains("assertRaises(BaseException)")
-        }
-        "toThrow inverted to not.toThrow" => squashed.contains(".not.toThrow"),
-        _ => false,
-    }
-}
-
-#[must_use]
-pub fn matches_loosening_before(code: &str, message: &str) -> bool {
-    let squashed: String = code.chars().filter(|c| !c.is_whitespace()).collect();
-    match message {
-        "assertEqual loosened to assertTrue" => has_call(&squashed, "assertEqual"),
-        "toBe loosened to toBeTruthy" | "toBe loosened to toBeDefined" => {
-            has_call(&squashed, ".toBe")
-        }
-        "assertRaises narrowed to Exception" => has_call(&squashed, "assertRaises"),
-        "toThrow inverted to not.toThrow" => has_call(&squashed, ".toThrow"),
-        _ => false,
-    }
-}
-
-#[must_use]
-pub const fn matcher_loosening_messages() -> &'static [&'static str] {
-    &[
-        "assertEqual loosened to assertTrue",
-        "toBe loosened to toBeTruthy",
-        "toBe loosened to toBeDefined",
-        "assertRaises narrowed to Exception",
-        "toThrow inverted to not.toThrow",
-    ]
-}
-
 // --- Rule predicates -------------------------------------------------------
 
 #[must_use]
@@ -337,122 +277,6 @@ pub fn has_assertion_message(body: &str) -> bool {
 pub fn is_trivial_body(body: &str) -> bool {
     let trimmed = body.trim();
     trimmed.is_empty() || trimmed == "pass" || trimmed == "..."
-}
-
-#[must_use]
-pub fn forced_success_hit(code: &str) -> bool {
-    if let Some(index) = code.rfind("||") {
-        let rest = code[index + 2..].trim();
-        if rest == "true" || rest == ":" {
-            return true;
-        }
-    }
-    if let Some(rest) = after_word(code, "exit") {
-        let trimmed = rest.trim_start();
-        if trimmed.len() < rest.len() {
-            if let Some(after_zero) = trimmed.strip_prefix('0') {
-                if after_zero.is_empty() || !is_word_byte(after_zero.as_bytes()[0]) {
-                    return true;
-                }
-            }
-        }
-    }
-    let squashed: String = code.chars().filter(|c| !c.is_whitespace()).collect();
-    squashed.contains("sys.exit(0)")
-        || squashed.contains("process.exit(0)")
-        || squashed.contains("continue-on-error:true")
-        || code.contains("--passWithNoTests")
-}
-
-#[must_use]
-pub fn weakened_config_hit(code: &str) -> bool {
-    code.contains("@ts-nocheck")
-        || code.contains("--no-verify")
-        || has_ruff_noqa(code)
-        || threshold_is_zero(code)
-}
-
-#[must_use]
-pub fn parse_threshold(line: &str) -> Option<f64> {
-    let lower = line.to_ascii_lowercase();
-    let bytes = lower.as_bytes();
-    let mut start = None;
-    'keys: for key in ["fail_under", "cov-fail-under"] {
-        let mut cursor = 0;
-        while let Some(offset) = lower[cursor..].find(key) {
-            let index = cursor + offset;
-            if index == 0 || !is_word_byte(bytes[index - 1]) {
-                start = Some(index + key.len());
-                break 'keys;
-            }
-            cursor = index + key.len();
-        }
-    }
-    let start = start?;
-    let rest = line[start..].trim_start();
-    let rest = rest.strip_prefix(['=', ':'])?.trim_start();
-    let digits: String = rest
-        .chars()
-        .take_while(|c| c.is_ascii_digit() || *c == '.')
-        .collect();
-    if digits.is_empty() {
-        return None;
-    }
-    digits.parse::<f64>().ok()
-}
-
-#[must_use]
-pub fn tests_not_run_hit(code: &str) -> bool {
-    has_delimited(code, "--ignore", &['=', ' ', '\t'])
-        || contains_word(code, "--exclude")
-        || contains_word(code, "--deselect")
-        || has_k_not(code)
-        || code.contains("--testPathIgnorePatterns")
-        || code.contains("--passWithNoTests")
-}
-
-#[must_use]
-pub fn negative_control_hit(code: &str, plugin: &str) -> bool {
-    let squashed: String = code.chars().filter(|c| !c.is_whitespace()).collect();
-    match plugin {
-        "python" => {
-            squashed.contains("pytest.raises(Exception)")
-                || squashed.contains("pytest.raises(BaseException)")
-                || squashed.contains("assertRaises(Exception)")
-                || squashed.contains("assertRaises(BaseException)")
-                || squashed.contains("assertRaisesRegex(Exception")
-                || squashed.contains("assertRaisesRegex(BaseException")
-        }
-        "js" | "ts" => {
-            squashed.contains(".toThrow()")
-                || squashed.contains(".toThrow(Error)")
-                || squashed.contains(".not.toThrow()")
-        }
-        _ => false,
-    }
-}
-
-#[must_use]
-pub fn expected_from_sut_hit(code: &str) -> bool {
-    let gated = contains_word(code, "assert")
-        || has_call(code, "expect")
-        || code.contains("require.")
-        || contains_word(code, "should");
-    if !gated {
-        return false;
-    }
-    let mut counts: Vec<(&str, usize)> = Vec::new();
-    for name in call_identifiers(code) {
-        if is_assertion_framework_call(name) {
-            continue;
-        }
-        if let Some(entry) = counts.iter_mut().find(|(existing, _)| *existing == name) {
-            entry.1 += 1;
-        } else {
-            counts.push((name, 1));
-        }
-    }
-    counts.iter().any(|(_, count)| *count >= 2)
 }
 
 #[must_use]
@@ -599,55 +423,6 @@ fn has_assert_call(code: &str) -> bool {
     false
 }
 
-/// Recognizes `--flag` followed by one of the given delimiters.
-fn has_delimited(code: &str, flag: &str, delimiters: &[char]) -> bool {
-    let mut start = 0;
-    while let Some(offset) = code[start..].find(flag) {
-        let index = start + offset;
-        let rest = &code[index + flag.len()..];
-        if rest.starts_with(delimiters) {
-            return true;
-        }
-        start = index + flag.len();
-    }
-    false
-}
-
-fn has_k_not(code: &str) -> bool {
-    let mut start = 0;
-    while let Some(offset) = code[start..].find("-k") {
-        let index = start + offset;
-        let rest = code[index + 2..].trim_start();
-        let rest = rest.trim_start_matches(['"', '\'']);
-        if let Some(after) = rest.strip_prefix("not") {
-            if after.is_empty() || !is_word_byte(after.as_bytes()[0]) {
-                return true;
-            }
-        }
-        start = index + 2;
-    }
-    false
-}
-
-fn has_ruff_noqa(code: &str) -> bool {
-    let mut start = 0;
-    while let Some(offset) = code[start..].find('#') {
-        let index = start + offset;
-        let rest = code[index + 1..].trim_start();
-        if let Some(after) = rest.strip_prefix("ruff:") {
-            if after.trim_start().starts_with("noqa") {
-                return true;
-            }
-        }
-        start = index + 1;
-    }
-    false
-}
-
-fn threshold_is_zero(code: &str) -> bool {
-    parse_threshold(code).is_some_and(|value| value == 0.0)
-}
-
 fn identifier(value: &str) -> Option<&str> {
     let value = value.trim();
     if !value.is_empty()
@@ -678,51 +453,6 @@ fn parse_assert_eqeq(code: &str) -> Option<(String, String)> {
     let left = identifier(left)?;
     let right = identifier(right)?;
     Some((left.to_owned(), right.to_owned()))
-}
-
-fn call_identifiers(code: &str) -> Vec<&str> {
-    let bytes = code.as_bytes();
-    let mut names = Vec::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if byte.is_ascii_alphabetic() || byte == b'_' {
-            let start = index;
-            while index < bytes.len() && is_word_byte(bytes[index]) {
-                index += 1;
-            }
-            let name = &code[start..index];
-            if code[index..].trim_start().starts_with('(') {
-                names.push(name);
-            }
-        } else {
-            index += 1;
-        }
-    }
-    names
-}
-
-fn is_assertion_framework_call(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "expect"
-            | "tobe"
-            | "toequal"
-            | "tobetruthy"
-            | "tobedefined"
-            | "tothrow"
-            | "tocontain"
-            | "tomatch"
-            | "tomatchobject"
-            | "should"
-            | "require"
-            | "equal"
-            | "errorf"
-            | "fatalf"
-    ) || lower.starts_with("assert")
-        || lower.starts_with("expect")
-        || lower.starts_with("require")
 }
 
 fn has_mock_prefix(code: &str) -> bool {
@@ -947,26 +677,7 @@ fn glob_match_bytes(pattern: &[u8], path: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        code_text, count_real_lines, glob_match, is_test_path, normalize_assertion, strip_comments,
-        within_bypass,
-    };
-
-    #[test]
-    fn glob_supports_double_star_and_extension_wildcards() {
-        assert!(glob_match("**/*.test.*", "src/a.test.ts"));
-        assert!(glob_match("**/*_test.*", "pkg/a_test.go"));
-        assert!(glob_match("**/test_*.py", "tests/test_a.py"));
-        assert!(glob_match("**/tests/**", "tests/deep/a.py"));
-        assert!(!glob_match("**/*.test.*", "src/a.ts"));
-    }
-
-    #[test]
-    fn is_test_path_recognizes_default_patterns() {
-        assert!(is_test_path("src/a.test.ts"));
-        assert!(is_test_path("src/a.spec.ts"));
-        assert!(!is_test_path("src/a.ts"));
-    }
+    use super::{code_text, count_real_lines, normalize_assertion, strip_comments, within_bypass};
 
     #[test]
     fn strip_comments_removes_line_and_block_comments() {

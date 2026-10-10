@@ -1,15 +1,30 @@
-//! The test-weakening detector: tree-sitter parsing plus the 18 rule ids.
+//! The test-weakening detector: tree-sitter parsing plus the 11 rule ids.
 //!
 //! Only added lines are candidates, comments are stripped, the `is_test_file`
 //! gate applies, and every failure path degrades to no findings (fail-open).
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, LazyLock, Mutex};
 
-use tree_sitter::{Node, Parser};
+use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
 use crate::filters;
-use crate::language::language_for_path;
+use crate::language::{LanguageSpec, language_for_path};
 use crate::models::{Confidence, Finding};
+
+/// A parsed grammar plus its test-body query, built once per language.
+struct Runtime {
+    language: tree_sitter::Language,
+    test_query: Query,
+}
+
+static RUNTIMES: LazyLock<Mutex<HashMap<&'static str, Arc<Runtime>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+thread_local! {
+    static PARSERS: RefCell<HashMap<&'static str, Parser>> = RefCell::new(HashMap::new());
+}
 
 /// The derived diff the rules operate on.
 #[derive(Clone, Debug)]
@@ -31,11 +46,15 @@ pub struct TestBlock {
     pub lines: Vec<String>,
 }
 
-/// Everything a rule needs for one changed file.
+/// Everything a rule needs for one changed file, precomputed once.
 struct Derived<'a> {
     change: &'a Change,
     added: Vec<String>,
     removed: Vec<String>,
+    added_code: Vec<String>,
+    removed_code: Vec<String>,
+    /// Raw added lines, retained for rules that need the original text.
+    added_raw: Vec<String>,
     blocks: Vec<TestBlock>,
 }
 
@@ -53,11 +72,6 @@ struct Rule {
 }
 
 const RULES: &[Rule] = &[
-    Rule {
-        id: "protected-paths",
-        confidence: Confidence::High,
-        run: run_protected_paths,
-    },
     Rule {
         id: "skip-focus-added",
         confidence: Confidence::High,
@@ -84,11 +98,6 @@ const RULES: &[Rule] = &[
         run: run_gutted_test,
     },
     Rule {
-        id: "matcher-loosened",
-        confidence: Confidence::High,
-        run: run_matcher_loosened,
-    },
-    Rule {
         id: "swallowed-error",
         confidence: Confidence::Medium,
         run: run_swallowed_error,
@@ -97,11 +106,6 @@ const RULES: &[Rule] = &[
         id: "duplicate-test",
         confidence: Confidence::Medium,
         run: run_duplicate_test,
-    },
-    Rule {
-        id: "forced-success",
-        confidence: Confidence::High,
-        run: run_forced_success,
     },
     Rule {
         id: "mock-of-sut",
@@ -122,26 +126,6 @@ const RULES: &[Rule] = &[
         id: "redundant-assertion",
         confidence: Confidence::Low,
         run: run_redundant_assertion,
-    },
-    Rule {
-        id: "weakened-config",
-        confidence: Confidence::Medium,
-        run: run_weakened_config,
-    },
-    Rule {
-        id: "tests-not-run",
-        confidence: Confidence::Medium,
-        run: run_tests_not_run,
-    },
-    Rule {
-        id: "expected-from-sut",
-        confidence: Confidence::Medium,
-        run: run_expected_from_sut,
-    },
-    Rule {
-        id: "negative-control-unrelated",
-        confidence: Confidence::Medium,
-        run: run_negative_control_unrelated,
     },
 ];
 
@@ -169,22 +153,32 @@ impl TestDetector {
         let Some(spec) = language_for_path(&change.file_path) else {
             return Vec::new();
         };
-        let Ok(grammar) = tree_sitter_language_pack::get_language(spec.name) else {
+        let Some(runtime) = runtime_for(spec) else {
             return Vec::new();
         };
-        let mut parser = Parser::new();
-        if parser.set_language(&grammar).is_err() {
-            return Vec::new();
-        }
-        let Some(tree) = parser.parse(change.new_text.as_bytes(), None) else {
+        let source = change.new_text.as_bytes();
+        let Some(tree) = parse_with_runtime(&runtime, spec.name, source) else {
             return Vec::new();
         };
         let (added, removed) = diff_lines(&change.old_text, &change.new_text);
-        let blocks = find_test_blocks(&tree, change.new_text.as_bytes(), change.language);
+        let language = change.language;
+        let added_code = added
+            .iter()
+            .map(|line| filters::code_text(line, language))
+            .collect();
+        let removed_code = removed
+            .iter()
+            .map(|line| filters::code_text(line, language))
+            .collect();
+        let added_raw = added.clone();
+        let blocks = find_test_blocks(&runtime, &tree, source, spec);
         let derived = Derived {
             change,
             added,
             removed,
+            added_code,
+            removed_code,
+            added_raw,
             blocks,
         };
         let mut findings: Vec<Finding> = Vec::new();
@@ -199,20 +193,48 @@ impl TestDetector {
     }
 }
 
-// --- Rules -----------------------------------------------------------------
+// --- Runtime cache ---------------------------------------------------------
 
-fn run_protected_paths(d: &Derived<'_>) -> Vec<Finding> {
-    if !d.change.is_test_file || d.change.is_new {
-        return Vec::new();
+fn runtime_for(spec: LanguageSpec) -> Option<Arc<Runtime>> {
+    let Ok(mut runtimes) = RUNTIMES.lock() else {
+        return None;
+    };
+    if let Some(runtime) = runtimes.get(spec.name) {
+        return Some(Arc::clone(runtime));
     }
-    vec![Finding::new(
-        &d.change.file_path,
-        0,
-        "protected-paths",
-        "Edit of an existing test file.",
-        Confidence::High,
-    )]
+
+    let language = tree_sitter_language_pack::get_language(spec.name).ok()?;
+    let test_query = Query::new(&language, spec.test_query).ok()?;
+    let runtime = Arc::new(Runtime {
+        language,
+        test_query,
+    });
+    runtimes.insert(spec.name, Arc::clone(&runtime));
+    Some(runtime)
 }
+
+fn parse_with_runtime(
+    runtime: &Runtime,
+    language_name: &'static str,
+    source: &[u8],
+) -> Option<tree_sitter::Tree> {
+    PARSERS.with(|parsers| {
+        let mut parsers = parsers.borrow_mut();
+        if let Some(parser) = parsers.get_mut(language_name) {
+            parser.parse(source, None)
+        } else {
+            let mut parser = Parser::new();
+            if parser.set_language(&runtime.language).is_err() {
+                return None;
+            }
+            let tree = parser.parse(source, None);
+            parsers.insert(language_name, parser);
+            tree
+        }
+    })
+}
+
+// --- Rules -----------------------------------------------------------------
 
 fn run_skip_focus_added(d: &Derived<'_>) -> Vec<Finding> {
     if !d.change.is_test_file {
@@ -232,15 +254,14 @@ fn run_skip_focus_added(d: &Derived<'_>) -> Vec<Finding> {
 
 fn run_tautological(d: &Derived<'_>) -> Vec<Finding> {
     let mut out = Vec::new();
-    for line in &d.added {
-        let code = filters::code_text(line, d.language());
-        if code.trim().is_empty() || !filters::tautological_hit(&code) {
+    for (raw, code) in d.added.iter().zip(&d.added_code) {
+        if code.trim().is_empty() || !filters::tautological_hit(code) {
             continue;
         }
         push_if_allowed(
             &mut out,
             d,
-            line,
+            raw,
             "tautological-assertion",
             "Assertion is tautological (always true).",
             Confidence::High,
@@ -299,8 +320,8 @@ fn run_unknown_test(d: &Derived<'_>) -> Vec<Finding> {
 }
 
 fn run_gutted_test(d: &Derived<'_>) -> Vec<Finding> {
-    let removed = unique_assertions(&d.removed, d.language());
-    if removed.is_empty() || !unique_assertions(&d.added, d.language()).is_empty() {
+    let removed = unique_assertions(&d.removed_code);
+    if removed.is_empty() || !unique_assertions(&d.added_code).is_empty() {
         return Vec::new();
     }
     let declaration = declaration_pattern(d.language());
@@ -322,7 +343,9 @@ fn run_gutted_test(d: &Derived<'_>) -> Vec<Finding> {
     let sample = d
         .removed
         .iter()
-        .find(|line| filters::is_assertion_line(&filters::code_text(line, d.language())));
+        .zip(&d.removed_code)
+        .find(|(_, code)| filters::is_assertion_line(code))
+        .map(|(raw, _)| raw);
     let Some(sample) = sample else {
         return Vec::new();
     };
@@ -335,52 +358,17 @@ fn run_gutted_test(d: &Derived<'_>) -> Vec<Finding> {
     )]
 }
 
-fn run_matcher_loosened(d: &Derived<'_>) -> Vec<Finding> {
-    if d.added.is_empty() || d.removed.is_empty() {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    for message in filters::matcher_loosening_messages() {
-        let removed_hit = d.removed.iter().any(|line| {
-            let code = filters::code_text(line, d.language());
-            filters::matches_loosening_before(&code, message)
-                && !filters::matches_loosening_after(&code, message)
-        });
-        if !removed_hit {
-            continue;
-        }
-        let added_hit = d.added.iter().find(|line| {
-            filters::matches_loosening_after(&filters::code_text(line, d.language()), message)
-        });
-        let Some(added_hit) = added_hit else {
-            continue;
-        };
-        push_if_allowed(
-            &mut out,
-            d,
-            added_hit,
-            "matcher-loosened",
-            message,
-            Confidence::High,
-        );
-    }
-    out
-}
-
 fn run_swallowed_error(d: &Derived<'_>) -> Vec<Finding> {
-    let joined = d
-        .added
-        .iter()
-        .map(|line| filters::code_text(line, d.language()))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let joined = d.added_code.join("\n");
     if !swallowed_error_hit(&joined, d.language()) {
         return Vec::new();
     }
     let sample = d
         .added
         .iter()
-        .find(|line| swallowed_error_hit(&filters::code_text(line, d.language()), d.language()))
+        .zip(&d.added_code)
+        .find(|(_, code)| swallowed_error_hit(code, d.language()))
+        .map(|(raw, _)| raw)
         .or_else(|| d.added.first());
     let Some(sample) = sample else {
         return Vec::new();
@@ -427,19 +415,6 @@ fn run_duplicate_test(d: &Derived<'_>) -> Vec<Finding> {
     out
 }
 
-fn run_forced_success(d: &Derived<'_>) -> Vec<Finding> {
-    added_line_findings(
-        d,
-        FindingSpec {
-            rule: "forced-success",
-            confidence: Confidence::High,
-            message: "Test command forced to succeed regardless of outcome.",
-        },
-        filters::forced_success_hit,
-        |_| false,
-    )
-}
-
 fn run_mock_of_sut(d: &Derived<'_>) -> Vec<Finding> {
     if !d.change.is_test_file {
         return Vec::new();
@@ -458,7 +433,7 @@ fn mock_of_sut_javascript(d: &Derived<'_>) -> Vec<Finding> {
     }
     let imported = imported_names_from_stem(&d.change.new_text, &stem, d.language());
     let mut out = Vec::new();
-    for line in &d.added {
+    for line in &d.added_raw {
         let code = filters::strip_comments(line, d.language());
         let code = code.trim();
         if code.is_empty() {
@@ -488,7 +463,7 @@ fn mock_of_sut_python(d: &Derived<'_>) -> Vec<Finding> {
         return Vec::new();
     }
     let mut out = Vec::new();
-    for line in &d.added {
+    for line in &d.added_raw {
         let code = filters::strip_comments(line, d.language());
         let code = code.trim();
         if code.is_empty() {
@@ -517,14 +492,14 @@ const MOCK_OF_SUT_MESSAGE: &str =
 
 fn run_over_mocking(d: &Derived<'_>) -> Vec<Finding> {
     let added = d
-        .added
+        .added_code
         .iter()
-        .filter(|line| filters::mock_identifier_hit(&filters::code_text(line, d.language())))
+        .filter(|code| filters::mock_identifier_hit(code))
         .count();
     let removed = d
-        .removed
+        .removed_code
         .iter()
-        .filter(|line| filters::mock_identifier_hit(&filters::code_text(line, d.language())))
+        .filter(|code| filters::mock_identifier_hit(code))
         .count();
     if added <= removed {
         return Vec::new();
@@ -532,7 +507,9 @@ fn run_over_mocking(d: &Derived<'_>) -> Vec<Finding> {
     let sample = d
         .added
         .iter()
-        .find(|line| filters::mock_identifier_hit(&filters::code_text(line, d.language())));
+        .zip(&d.added_code)
+        .find(|(_, code)| filters::mock_identifier_hit(code))
+        .map(|(raw, _)| raw);
     let Some(sample) = sample else {
         return Vec::new();
     };
@@ -608,112 +585,6 @@ fn run_redundant_assertion(d: &Derived<'_>) -> Vec<Finding> {
     out
 }
 
-fn run_weakened_config(d: &Derived<'_>) -> Vec<Finding> {
-    let mut out = added_line_findings(
-        d,
-        FindingSpec {
-            rule: "weakened-config",
-            confidence: Confidence::Medium,
-            message: "Configuration weakens test enforcement.",
-        },
-        filters::weakened_config_hit,
-        |_| false,
-    );
-    out.extend(weakened_threshold(d));
-    out
-}
-
-fn weakened_threshold(d: &Derived<'_>) -> Vec<Finding> {
-    let removed: Vec<f64> = d
-        .removed
-        .iter()
-        .filter_map(|line| filters::parse_threshold(line))
-        .collect();
-    let added: Vec<f64> = d
-        .added
-        .iter()
-        .filter_map(|line| filters::parse_threshold(line))
-        .collect();
-    if removed.is_empty() || added.is_empty() {
-        return Vec::new();
-    }
-    let previous = removed.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let next = added.iter().copied().fold(f64::INFINITY, f64::min);
-    if next >= previous {
-        return Vec::new();
-    }
-    let sample = d
-        .added
-        .iter()
-        .find(|line| filters::parse_threshold(line).is_some());
-    let Some(sample) = sample else {
-        return Vec::new();
-    };
-    let line_number = locate_line(&d.change.new_text, sample);
-    if filters::within_bypass(&d.change.new_text, line_number) {
-        return Vec::new();
-    }
-    vec![Finding::new(
-        &d.change.file_path,
-        line_number,
-        "weakened-config",
-        format!("Coverage/test threshold lowered from {previous} to {next}."),
-        Confidence::Medium,
-    )]
-}
-
-fn run_tests_not_run(d: &Derived<'_>) -> Vec<Finding> {
-    added_line_findings(
-        d,
-        FindingSpec {
-            rule: "tests-not-run",
-            confidence: Confidence::Medium,
-            message: "A test command excludes or skips tests.",
-        },
-        filters::tests_not_run_hit,
-        |_| false,
-    )
-}
-
-fn run_expected_from_sut(d: &Derived<'_>) -> Vec<Finding> {
-    let mut out = Vec::new();
-    for line in &d.added {
-        let code = filters::code_text(line, d.language());
-        if code.trim().is_empty() || !filters::expected_from_sut_hit(&code) {
-            continue;
-        }
-        push_if_allowed(
-            &mut out,
-            d,
-            line,
-            "expected-from-sut",
-            "Expected value is produced by the code under test; the assertion may be self-referential.",
-            Confidence::Medium,
-        );
-    }
-    out
-}
-
-fn run_negative_control_unrelated(d: &Derived<'_>) -> Vec<Finding> {
-    let mut out = Vec::new();
-    for line in &d.added {
-        let code = filters::strip_comments(line, d.language());
-        let code = code.trim();
-        if code.is_empty() || !filters::negative_control_hit(code, d.language()) {
-            continue;
-        }
-        push_if_allowed(
-            &mut out,
-            d,
-            line,
-            "negative-control-unrelated",
-            "Negative control is too broad and can pass for an unrelated reason.",
-            Confidence::Medium,
-        );
-    }
-    out
-}
-
 // --- Shared rule plumbing --------------------------------------------------
 
 #[derive(Clone, Copy)]
@@ -734,22 +605,11 @@ where
     S: Fn(&str) -> bool,
 {
     let mut out = Vec::new();
-    for line in &d.added {
-        let code = filters::code_text(line, d.language());
-        if code.trim().is_empty() || skip(line) || !predicate(&code) {
+    for (raw, code) in d.added.iter().zip(&d.added_code) {
+        if code.trim().is_empty() || skip(raw) || !predicate(code) {
             continue;
         }
-        let line_number = locate_line(&d.change.new_text, line);
-        if filters::within_bypass(&d.change.new_text, line_number) {
-            continue;
-        }
-        out.push(Finding::new(
-            &d.change.file_path,
-            line_number,
-            spec.rule,
-            spec.message,
-            spec.confidence,
-        ));
+        push_if_allowed(&mut out, d, raw, spec.rule, spec.message, spec.confidence);
     }
     out
 }
@@ -779,11 +639,10 @@ fn declaration_pattern(language: &str) -> bool {
     matches!(language, "js" | "ts" | "python" | "go" | "rust")
 }
 
-fn unique_assertions(lines: &[String], language: &str) -> Vec<String> {
+fn unique_assertions(code_lines: &[String]) -> Vec<String> {
     let mut set: HashSet<String> = HashSet::new();
-    for line in lines {
-        let code = filters::code_text(line, language);
-        let code = code.trim();
+    for raw in code_lines {
+        let code = raw.trim();
         if code.is_empty() || !filters::is_assertion_line(code) {
             continue;
         }
@@ -852,68 +711,72 @@ fn has_empty_err_arm(text: &str) -> bool {
 
 // --- Test block extraction -------------------------------------------------
 
-fn find_test_blocks(tree: &tree_sitter::Tree, source: &[u8], plugin: &str) -> Vec<TestBlock> {
+fn find_test_blocks(
+    runtime: &Runtime,
+    tree: &tree_sitter::Tree,
+    source: &[u8],
+    spec: LanguageSpec,
+) -> Vec<TestBlock> {
+    let names = runtime.test_query.capture_names();
+    let mut cursor = QueryCursor::new();
     let mut blocks = Vec::new();
-    collect_blocks(tree.root_node(), source, plugin, &mut blocks);
+    let mut matches = cursor.matches(&runtime.test_query, tree.root_node(), source);
+    while let Some(query_match) = matches.next() {
+        let mut name_node: Option<Node<'_>> = None;
+        let mut body_node: Option<Node<'_>> = None;
+        let mut call_node: Option<Node<'_>> = None;
+        for capture in query_match.captures {
+            match names.get(capture.index as usize).copied() {
+                Some("test.name") => name_node = Some(capture.node),
+                Some("test.body") => body_node = Some(capture.node),
+                Some("test.call") => call_node = Some(capture.node),
+                _ => {}
+            }
+        }
+        match spec.plugin {
+            "python" => {
+                if let (Some(name), Some(body)) = (name_node, body_node) {
+                    if node_text(name, source).starts_with("test_") {
+                        blocks.push(make_block(name, body, source, false));
+                    }
+                }
+            }
+            "go" => {
+                if let (Some(name), Some(body)) = (name_node, body_node) {
+                    if node_text(name, source).starts_with("Test") {
+                        blocks.push(make_block(body, body, source, true));
+                    }
+                }
+            }
+            "rust" => {
+                if let (Some(name), Some(body)) = (name_node, body_node) {
+                    if let Some(function) = name.parent() {
+                        if rust_has_attribute(function, source, "test") {
+                            blocks.push(make_block(body, body, source, true));
+                        }
+                    }
+                }
+            }
+            "js" | "ts" => {
+                if let Some(call) = call_node {
+                    collect_js(call, source, spec.plugin, &mut blocks);
+                }
+            }
+            _ => {}
+        }
+    }
     blocks
 }
 
-fn collect_blocks(root: Node<'_>, source: &[u8], plugin: &str, out: &mut Vec<TestBlock>) {
-    let mut stack: Vec<Node<'_>> = vec![root];
-    while let Some(node) = stack.pop() {
-        match plugin {
-            "python" => collect_python(node, source, out),
-            "go" => collect_go(node, source, out),
-            "rust" => collect_rust(node, source, out),
-            "js" | "ts" => collect_js(node, source, plugin, out),
-            _ => {}
-        }
-        let mut cursor = node.walk();
-        let mut children: Vec<Node<'_>> = node.children(&mut cursor).collect();
-        children.reverse();
-        stack.extend(children);
-    }
-}
-
-fn collect_python(node: Node<'_>, source: &[u8], out: &mut Vec<TestBlock>) {
-    if node.kind() != "function_definition" || !node_name(node, source).starts_with("test_") {
-        return;
-    }
-    if let Some(body) = node.child_by_field_name("body") {
-        out.push(make_block(node, body, source, false));
-    }
-}
-
-fn collect_go(node: Node<'_>, source: &[u8], out: &mut Vec<TestBlock>) {
-    if node.kind() != "function_declaration" || !node_name(node, source).starts_with("Test") {
-        return;
-    }
-    if let Some(body) = node.child_by_field_name("body") {
-        out.push(make_block(body, body, source, true));
-    }
-}
-
-fn collect_rust(node: Node<'_>, source: &[u8], out: &mut Vec<TestBlock>) {
-    if node.kind() != "function_item" || !rust_has_attribute(node, source, "test") {
-        return;
-    }
-    if let Some(body) = node.child_by_field_name("body") {
-        out.push(make_block(body, body, source, true));
-    }
-}
-
-fn collect_js(node: Node<'_>, source: &[u8], plugin: &str, out: &mut Vec<TestBlock>) {
-    if node.kind() != "call_expression" {
-        return;
-    }
-    let Some(function) = node.child_by_field_name("function") else {
+fn collect_js(call: Node<'_>, source: &[u8], plugin: &str, out: &mut Vec<TestBlock>) {
+    let Some(function) = call.child_by_field_name("function") else {
         return;
     };
     let function_text = format!("{}(", node_text(function, source));
     if !filters::is_test_declaration(&function_text, plugin) {
         return;
     }
-    let Some(callback) = js_callback(node) else {
+    let Some(callback) = js_callback(call) else {
         return;
     };
     let Some(body) = callback.child_by_field_name("body") else {
@@ -985,12 +848,6 @@ fn rust_attribute_name(attribute: &str) -> String {
     let value = value.trim();
     let end = value.find(['(', ' ', '=']).unwrap_or(value.len());
     value[..end].trim().to_lowercase()
-}
-
-fn node_name(node: Node<'_>, source: &[u8]) -> String {
-    node.child_by_field_name("name")
-        .map(|name| node_text(name, source).to_owned())
-        .unwrap_or_default()
 }
 
 fn node_text<'a>(node: Node<'_>, source: &'a [u8]) -> &'a str {
@@ -1272,10 +1129,9 @@ mod tests {
     #[test]
     fn rule_ids_match_the_plugin_contract() {
         let ids = rule_ids();
-        assert_eq!(ids.len(), 18);
-        assert_eq!(ids[0], "protected-paths");
-        assert_eq!(ids[10], "mock-of-sut");
-        assert_eq!(ids[17], "negative-control-unrelated");
+        assert_eq!(ids.len(), 11);
+        assert_eq!(ids[0], "skip-focus-added");
+        assert_eq!(ids[10], "redundant-assertion");
         let _: &[Rule] = super::RULES;
     }
 }
