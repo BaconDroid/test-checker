@@ -35,6 +35,26 @@ fn rule_ids_given_catalog_returns_eighteen_ordered_ids() {
     assert_eq!(ids.last().copied(), Some("negative-control-unrelated"));
 }
 
+// --- Traversal robustness --------------------------------------------------
+
+#[test]
+fn detect_given_deeply_nested_parentheses_returns_without_aborting() {
+    // given: deeply nested input that previously overflowed the recursive walk
+    let depth = 30_000;
+    let payload = format!(
+        "def test_deep():\n    assert {}{}\n",
+        "(".repeat(depth),
+        ")".repeat(depth)
+    );
+    let change = make_change("tests/test_deep.py", "python", "", &payload, true);
+
+    // when: iterative traversal must not abort the process
+    let findings: Vec<Finding> = TestDetector::new().detect(&change);
+
+    // then: the call returns a finding list rather than crashing
+    assert!(!rule_present(&findings, "swallowed-error"));
+}
+
 // --- protected-paths -------------------------------------------------------
 
 #[test]
@@ -310,7 +330,7 @@ fn swallowed_error_given_python_except_pass_reports_rule() {
         "tests/test_a.py",
         "python",
         "",
-        "def test_a():\n    try:\n        do_work()\n    except ValueError:\n        pass\n",
+        "def test_a():\n    try:\n        do_work()\n    except Exception:\n        pass\n",
         true,
     );
 
@@ -322,13 +342,49 @@ fn swallowed_error_given_python_except_pass_reports_rule() {
 }
 
 #[test]
+fn swallowed_error_given_python_bare_except_pass_reports_rule() {
+    // given
+    let change = make_change(
+        "tests/test_a.py",
+        "python",
+        "",
+        "def test_a():\n    try:\n        do_work()\n    except:\n        pass\n",
+        true,
+    );
+
+    // when
+    let findings = TestDetector::new().detect(&change);
+
+    // then
+    assert!(rule_present(&findings, "swallowed-error"));
+}
+
+#[test]
+fn swallowed_error_given_named_exception_with_pass_does_not_fire() {
+    // given
+    let change = make_change(
+        "tests/test_a.py",
+        "python",
+        "",
+        "def test_a():\n    try:\n        do_work()\n    except ValidationError:\n        password = x\n",
+        true,
+    );
+
+    // when
+    let findings = TestDetector::new().detect(&change);
+
+    // then
+    assert!(!rule_present(&findings, "swallowed-error"));
+}
+
+#[test]
 fn swallowed_error_given_python_except_reraise_skips_rule() {
     // given
     let change = make_change(
         "tests/test_a.py",
         "python",
         "",
-        "def test_a():\n    try:\n        do_work()\n    except ValueError:\n        raise\n",
+        "def test_a():\n    try:\n        do_work()\n    except Exception:\n        raise\n",
         true,
     );
 
@@ -441,6 +497,42 @@ fn mock_of_sut_given_unrelated_module_skips_rule() {
     assert!(!rule_present(&findings, "mock-of-sut"));
 }
 
+#[test]
+fn mock_of_sut_given_spy_on_imported_name_reports_rule() {
+    // given
+    let change = make_change(
+        "src/foo.test.ts",
+        "ts",
+        "",
+        "import { helper } from './foo';\nvi.spyOn(helper, 'run');\n",
+        true,
+    );
+
+    // when
+    let findings = TestDetector::new().detect(&change);
+
+    // then
+    assert!(rule_present(&findings, "mock-of-sut"));
+}
+
+#[test]
+fn mock_of_sut_given_spy_on_unimported_name_skips_rule() {
+    // given
+    let change = make_change(
+        "src/foo.test.ts",
+        "ts",
+        "",
+        "import { helper } from './foo';\nvi.spyOn(other, 'run');\n",
+        true,
+    );
+
+    // when
+    let findings = TestDetector::new().detect(&change);
+
+    // then
+    assert!(!rule_present(&findings, "mock-of-sut"));
+}
+
 // --- over-mocking ----------------------------------------------------------
 
 #[test]
@@ -469,6 +561,24 @@ fn over_mocking_given_added_plain_identifier_skips_rule() {
         "ts",
         "",
         "const client = createClient();",
+        true,
+    );
+
+    // when
+    let findings = TestDetector::new().detect(&change);
+
+    // then
+    assert!(!rule_present(&findings, "over-mocking"));
+}
+
+#[test]
+fn over_mocking_given_dispatch_call_skips_rule() {
+    // given: `dispatch` merely contains `patch`; it is not a `patch(` call
+    let change = make_change(
+        "src/service.test.ts",
+        "ts",
+        "",
+        "const result = dispatch(event);",
         true,
     );
 
@@ -559,14 +669,32 @@ fn redundant_assertion_given_distinct_lines_skips_rule() {
 
 #[test]
 fn weakened_config_given_disable_directive_reports_rule() {
-    // given
-    let change = make_change("tests/test_a.py", "python", "", "# @ts-nocheck\n", true);
+    // given: a bare directive present in code text (not a comment)
+    let change = make_change("src/app.test.ts", "ts", "", "@ts-nocheck\n", true);
 
     // when
     let findings = TestDetector::new().detect(&change);
 
     // then
     assert!(rule_present(&findings, "weakened-config"));
+}
+
+#[test]
+fn weakened_config_given_threshold_in_comment_does_not_fire() {
+    // given: a threshold-looking comment must not be treated as code
+    let change = make_change(
+        "src/app.test.ts",
+        "ts",
+        "",
+        "// fail_under = 0\nit('a', () => { expect(x).toBe(1); });\n",
+        true,
+    );
+
+    // when
+    let findings = TestDetector::new().detect(&change);
+
+    // then
+    assert!(!rule_present(&findings, "weakened-config"));
 }
 
 #[test]

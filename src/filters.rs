@@ -42,8 +42,28 @@ pub fn within_bypass(text: &str, line: usize) -> bool {
     (from..to).any(|index| {
         lines
             .get(index)
-            .is_some_and(|candidate| contains_ignore_ascii_case(candidate, "test-guard: allow"))
+            .is_some_and(|candidate| has_allow_marker(candidate))
     })
+}
+
+/// Reports whether a line contains the `test-guard:\s*allow\b` marker: the
+/// `test-guard:` key is matched case-insensitively, ASCII whitespace is
+/// skipped, then `allow` must be followed by a non-word byte (or end of line).
+fn has_allow_marker(line: &str) -> bool {
+    const KEY: &str = "test-guard:";
+    let lower = line.to_ascii_lowercase();
+    let mut start = 0;
+    while let Some(offset) = lower[start..].find(KEY) {
+        let index = start + offset;
+        let rest = lower[index + KEY.len()..].trim_start_matches(|c: char| c.is_ascii_whitespace());
+        if let Some(after) = rest.strip_prefix("allow") {
+            if after.is_empty() || !is_word_byte(after.as_bytes()[0]) {
+                return true;
+            }
+        }
+        start = index + KEY.len();
+    }
+    false
 }
 
 /// Strips block comments, Python triple-quoted strings, shebangs and trailing
@@ -244,7 +264,10 @@ pub fn is_conditional_skip(line: &str) -> bool {
     lower.contains("skipif")
         || lower.contains("skipunless")
         || lower.contains("skip_if")
-        || (lower.contains("if") && lower.contains("skip"))
+        || lower
+            .find("if")
+            .zip(lower.find("skip"))
+            .is_some_and(|(if_index, skip_index)| if_index < skip_index)
 }
 
 #[must_use]
@@ -326,15 +349,17 @@ pub fn forced_success_hit(code: &str) -> bool {
     }
     if let Some(rest) = after_word(code, "exit") {
         let trimmed = rest.trim_start();
-        if let Some(after_zero) = trimmed.strip_prefix('0') {
-            if after_zero.is_empty() || !is_word_byte(after_zero.as_bytes()[0]) {
-                return true;
+        if trimmed.len() < rest.len() {
+            if let Some(after_zero) = trimmed.strip_prefix('0') {
+                if after_zero.is_empty() || !is_word_byte(after_zero.as_bytes()[0]) {
+                    return true;
+                }
             }
         }
     }
     let squashed: String = code.chars().filter(|c| !c.is_whitespace()).collect();
-    squashed.contains("sys.exit(0")
-        || squashed.contains("process.exit(0")
+    squashed.contains("sys.exit(0)")
+        || squashed.contains("process.exit(0)")
         || squashed.contains("continue-on-error:true")
         || code.contains("--passWithNoTests")
 }
@@ -350,10 +375,20 @@ pub fn weakened_config_hit(code: &str) -> bool {
 #[must_use]
 pub fn parse_threshold(line: &str) -> Option<f64> {
     let lower = line.to_ascii_lowercase();
-    let key = ["fail_under", "cov-fail-under"]
-        .iter()
-        .find(|candidate| lower.contains(**candidate))?;
-    let start = lower.find(key)? + key.len();
+    let bytes = lower.as_bytes();
+    let mut start = None;
+    'keys: for key in ["fail_under", "cov-fail-under"] {
+        let mut cursor = 0;
+        while let Some(offset) = lower[cursor..].find(key) {
+            let index = cursor + offset;
+            if index == 0 || !is_word_byte(bytes[index - 1]) {
+                start = Some(index + key.len());
+                break 'keys;
+            }
+            cursor = index + key.len();
+        }
+    }
+    let start = start?;
     let rest = line[start..].trim_start();
     let rest = rest.strip_prefix(['=', ':'])?.trim_start();
     let digits: String = rest
@@ -422,7 +457,7 @@ pub fn expected_from_sut_hit(code: &str) -> bool {
 
 #[must_use]
 pub fn mock_identifier_hit(code: &str) -> bool {
-    has_mock_prefix(code) || contains_word(code, "monkeypatch") || has_call(code, "patch")
+    has_mock_prefix(code) || contains_word(code, "monkeypatch") || has_word_call(code, "patch")
 }
 
 #[must_use]
@@ -454,7 +489,7 @@ fn char_len(text: &str, index: usize) -> usize {
     text[index..].chars().next().map_or(1, char::len_utf8)
 }
 
-const fn is_word_byte(byte: u8) -> bool {
+pub(crate) const fn is_word_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 

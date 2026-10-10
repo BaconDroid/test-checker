@@ -224,7 +224,6 @@ fn run_skip_focus_added(d: &Derived<'_>) -> Vec<Finding> {
             rule: "skip-focus-added",
             confidence: Confidence::High,
             message: "A test was disabled or focused (.skip/.only/.todo, xit/xdescribe, skip marker, #[ignore], t.Skip).",
-            mode: LineMode::Code,
         },
         |code| filters::skip_focus_hit(code, d.language()),
         filters::is_conditional_skip,
@@ -381,9 +380,7 @@ fn run_swallowed_error(d: &Derived<'_>) -> Vec<Finding> {
     let sample = d
         .added
         .iter()
-        .find(|line| {
-            swallowed_error_line_hit(&filters::code_text(line, d.language()), d.language())
-        })
+        .find(|line| swallowed_error_hit(&filters::code_text(line, d.language()), d.language()))
         .or_else(|| d.added.first());
     let Some(sample) = sample else {
         return Vec::new();
@@ -437,7 +434,6 @@ fn run_forced_success(d: &Derived<'_>) -> Vec<Finding> {
             rule: "forced-success",
             confidence: Confidence::High,
             message: "Test command forced to succeed regardless of outcome.",
-            mode: LineMode::Code,
         },
         filters::forced_success_hit,
         |_| false,
@@ -619,7 +615,6 @@ fn run_weakened_config(d: &Derived<'_>) -> Vec<Finding> {
             rule: "weakened-config",
             confidence: Confidence::Medium,
             message: "Configuration weakens test enforcement.",
-            mode: LineMode::Raw,
         },
         filters::weakened_config_hit,
         |_| false,
@@ -674,7 +669,6 @@ fn run_tests_not_run(d: &Derived<'_>) -> Vec<Finding> {
             rule: "tests-not-run",
             confidence: Confidence::Medium,
             message: "A test command excludes or skips tests.",
-            mode: LineMode::Code,
         },
         filters::tests_not_run_hit,
         |_| false,
@@ -723,24 +717,10 @@ fn run_negative_control_unrelated(d: &Derived<'_>) -> Vec<Finding> {
 // --- Shared rule plumbing --------------------------------------------------
 
 #[derive(Clone, Copy)]
-enum LineMode {
-    Code,
-    Raw,
-}
-
-#[derive(Clone, Copy)]
 struct FindingSpec {
     rule: &'static str,
     confidence: Confidence,
     message: &'static str,
-    mode: LineMode,
-}
-
-fn transform(line: &str, language: &str, mode: LineMode) -> String {
-    match mode {
-        LineMode::Code => filters::code_text(line, language),
-        LineMode::Raw => line.to_owned(),
-    }
 }
 
 fn added_line_findings<F, S>(
@@ -755,7 +735,7 @@ where
 {
     let mut out = Vec::new();
     for line in &d.added {
-        let code = transform(line, d.language(), spec.mode);
+        let code = filters::code_text(line, d.language());
         if code.trim().is_empty() || skip(line) || !predicate(&code) {
             continue;
         }
@@ -821,10 +801,6 @@ fn swallowed_error_hit(joined: &str, language: &str) -> bool {
     }
 }
 
-fn swallowed_error_line_hit(code: &str, language: &str) -> bool {
-    swallowed_error_hit(code, language)
-}
-
 fn has_empty_catch(text: &str) -> bool {
     let mut start = 0;
     while let Some(offset) = text[start..].find("catch") {
@@ -854,9 +830,14 @@ fn has_except_pass(text: &str) -> bool {
     while let Some(offset) = text[start..].find("except") {
         let index = start + offset;
         let rest = &text[index + "except".len()..];
-        if let Some((_, tail)) = rest.split_once(':') {
-            if tail.trim_start().starts_with("pass") {
-                return true;
+        if let Some((clause, tail)) = rest.split_once(':') {
+            let clause = clause.trim();
+            if matches!(clause, "" | "Exception" | "BaseException") {
+                if let Some(after) = tail.trim_start().strip_prefix("pass") {
+                    if after.is_empty() || !filters::is_word_byte(after.as_bytes()[0]) {
+                        return true;
+                    }
+                }
             }
         }
         start = index + "except".len();
@@ -877,17 +858,20 @@ fn find_test_blocks(tree: &tree_sitter::Tree, source: &[u8], plugin: &str) -> Ve
     blocks
 }
 
-fn collect_blocks(node: Node<'_>, source: &[u8], plugin: &str, out: &mut Vec<TestBlock>) {
-    match plugin {
-        "python" => collect_python(node, source, out),
-        "go" => collect_go(node, source, out),
-        "rust" => collect_rust(node, source, out),
-        "js" | "ts" => collect_js(node, source, plugin, out),
-        _ => {}
-    }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_blocks(child, source, plugin, out);
+fn collect_blocks(root: Node<'_>, source: &[u8], plugin: &str, out: &mut Vec<TestBlock>) {
+    let mut stack: Vec<Node<'_>> = vec![root];
+    while let Some(node) = stack.pop() {
+        match plugin {
+            "python" => collect_python(node, source, out),
+            "go" => collect_go(node, source, out),
+            "rust" => collect_rust(node, source, out),
+            "js" | "ts" => collect_js(node, source, plugin, out),
+            _ => {}
+        }
+        let mut cursor = node.walk();
+        let mut children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+        children.reverse();
+        stack.extend(children);
     }
 }
 

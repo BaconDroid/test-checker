@@ -15,7 +15,7 @@ pub fn build_findings_xml(findings: &[Finding], file_path: &str) -> String {
     }
     let mut output = String::with_capacity(32 + file_path.len() + findings.len() * 64);
     output.push_str("<findings file=\"");
-    output.push_str(file_path);
+    push_escaped_attr(&mut output, file_path);
     output.push_str("\">\n");
     let mut line_number = itoa::Buffer::new();
     for finding in findings {
@@ -89,6 +89,24 @@ fn push_escaped(output: &mut String, value: &str) {
             '&' => output.push_str("&amp;"),
             '<' => output.push_str("&lt;"),
             '>' => output.push_str("&gt;"),
+            _ => output.push(ch),
+        }
+    }
+}
+
+/// Escapes a payload-controlled attribute value, additionally folding `"` so
+/// it cannot close the surrounding XML attribute.
+fn push_escaped_attr(output: &mut String, value: &str) {
+    if !value.contains(['&', '<', '>', '"']) {
+        output.push_str(value);
+        return;
+    }
+    for ch in value.chars() {
+        match ch {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            '"' => output.push_str("&quot;"),
             _ => output.push(ch),
         }
     }

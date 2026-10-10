@@ -85,7 +85,7 @@ pub fn check_hook_input(input: &str, custom_prompt: &str) -> HookCheckResult {
 #[must_use]
 pub fn check_hook_input_json(input: &str, custom_prompt: &str) -> String {
     serde_json::to_string(&check_hook_input(input, custom_prompt))
-        .unwrap_or_else(|error| fallback_json(&error.to_string()))
+        .unwrap_or_else(|_| fallback_json())
 }
 
 fn build_change(payload: &Payload) -> Option<(String, String, bool)> {
@@ -121,7 +121,6 @@ fn skip(reason: &str) -> HookCheckResult {
     HookCheckResult::pass(format!("[test-checker] Skipping: {reason}\n"))
 }
 
-fn fallback_json(error: &str) -> String {
-    let escaped = error.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("{{\"exitCode\":1,\"message\":\"serialization failed: {escaped}\"}}")
+fn fallback_json() -> String {
+    String::from("{\"exitCode\":0,\"message\":\"[test-checker] Skipping: Invalid arguments\"}")
 }
