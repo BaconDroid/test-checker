@@ -28,8 +28,6 @@ pub fn run(args: &Args) -> i32 {
 pub struct Args {
     #[arg(long)]
     pub prompt: Option<String>,
-    #[arg()]
-    pub command: Option<String>,
 }
 
 #[must_use]

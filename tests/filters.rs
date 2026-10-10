@@ -179,6 +179,47 @@ fn within_bypass_given_marker_outside_window_returns_false() {
 }
 
 #[test]
+fn within_bypass_given_marker_two_lines_away_returns_true() {
+    // given
+    let text = "test-guard: allow\nm2\nm3\nm4\nm5";
+
+    // when / then
+    assert!(within_bypass(text, 3));
+}
+
+#[test]
+fn within_bypass_given_marker_three_lines_away_returns_false() {
+    // given
+    let text = "test-guard: allow\nm2\nm3\nm4\nm5";
+
+    // when / then
+    assert!(!within_bypass(text, 4));
+}
+
+#[test]
+fn within_bypass_given_allow_with_varied_spacing_returns_true() {
+    // given / when / then
+    for marker in [
+        "# test-guard: allow",
+        "# test-guard:  allow",
+        "# test-guard:\tallow",
+        "# test-guard:allow",
+    ] {
+        let text = format!("{marker}\ncode");
+        assert!(within_bypass(&text, 1), "marker: {marker}");
+    }
+}
+
+#[test]
+fn within_bypass_given_allowed_or_allowance_returns_false() {
+    // given / when / then
+    for marker in ["# test-guard: allowed", "# test-guard: allowance"] {
+        let text = format!("{marker}\ncode");
+        assert!(!within_bypass(&text, 1), "marker: {marker}");
+    }
+}
+
+#[test]
 fn is_file_disabled_given_marker_returns_true() {
     // given / when / then
     assert!(is_file_disabled("// test-guard-disable-file\nx = 1"));
@@ -248,6 +289,18 @@ fn is_conditional_skip_given_plain_skip_returns_false() {
     assert!(!is_conditional_skip("it.skip(\"x\", () => {})"));
 }
 
+#[test]
+fn is_conditional_skip_given_if_after_skip_returns_false() {
+    // given / when / then
+    assert!(!is_conditional_skip("t.Skip(\"we skip if X\")"));
+}
+
+#[test]
+fn is_conditional_skip_given_if_before_skip_returns_true() {
+    // given / when / then
+    assert!(is_conditional_skip("if slow: t.Skip(\"x\")"));
+}
+
 // --- Assertion shapes ------------------------------------------------------
 
 #[test]
@@ -283,6 +336,14 @@ fn forced_success_given_failing_exit_or_false_default_returns_false() {
 }
 
 #[test]
+fn forced_success_given_malformed_zero_forms_returns_false() {
+    // given / when / then
+    assert!(!forced_success_hit("exit0(1);"));
+    assert!(!forced_success_hit("sys.exit(01)"));
+    assert!(!forced_success_hit("process.exit(0x"));
+}
+
+#[test]
 fn weakened_config_given_disable_directives_returns_true() {
     // given / when / then
     assert!(weakened_config_hit("@ts-nocheck"));
@@ -313,6 +374,21 @@ fn parse_threshold_given_coverage_key_returns_value() {
 fn parse_threshold_given_unrelated_key_returns_none() {
     // given / when / then
     assert!(parse_threshold("coverage = 85").is_none());
+}
+
+#[test]
+fn parse_threshold_given_prefixed_key_returns_none() {
+    // given / when / then
+    assert!(parse_threshold("my_fail_under = 0").is_none());
+}
+
+#[test]
+fn mock_identifier_given_dispatch_call_returns_false() {
+    // given / when / then
+    assert!(!mock_identifier_hit("const result = dispatch(event);"));
+    assert!(!mock_identifier_hit("despatch(x);"));
+    assert!(mock_identifier_hit("mocker.patch('module.fn')"));
+    assert!(mock_identifier_hit("patch('module.fn')"));
 }
 
 // --- Command / config rules ------------------------------------------------

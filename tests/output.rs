@@ -45,6 +45,20 @@ fn build_findings_xml_given_special_characters_escapes_message() {
 }
 
 #[test]
+fn build_findings_xml_given_special_characters_escapes_file_attribute() {
+    // given: the file attribute is payload-controlled and must be escaped
+    let file = "src/a&b<c>d\"e.py";
+    let findings = [Finding::new(file, 1, "empty-test", "msg", Confidence::Low)];
+
+    // when
+    let xml = build_findings_xml(&findings, file);
+
+    // then
+    assert!(xml.contains("<findings file=\"src/a&amp;b&lt;c&gt;d&quot;e.py\">"));
+    assert!(!xml.contains("file=\"src/a&b<c>d\"e.py\">"));
+}
+
+#[test]
 fn build_findings_xml_given_empty_findings_returns_empty_string() {
     // given / when
     let xml = build_findings_xml(&[], "src/app.py");
