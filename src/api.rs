@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::detector::{Change, TestDetector};
-use crate::filters;
 use crate::language::language_for_path;
 use crate::models::Payload;
 use crate::output::format_hook_message;
+use crate::testpath::is_test_path;
 
 pub const EXIT_PASS: i32 = 0;
 pub const EXIT_BLOCK: i32 = 2;
@@ -59,7 +59,7 @@ pub fn check_hook_input(input: &str, custom_prompt: &str) -> HookCheckResult {
     }
     let is_test_file = payload
         .is_test_file
-        .unwrap_or_else(|| filters::is_test_path(file_path));
+        .unwrap_or_else(|| is_test_path(file_path));
     if !is_test_file {
         return skip("Non-test file");
     }
@@ -86,6 +86,27 @@ pub fn check_hook_input(input: &str, custom_prompt: &str) -> HookCheckResult {
 pub fn check_hook_input_json(input: &str, custom_prompt: &str) -> String {
     serde_json::to_string(&check_hook_input(input, custom_prompt))
         .unwrap_or_else(|_| fallback_json())
+}
+
+/// Runs the detector over a whole file's content, returning findings as JSON.
+///
+/// Mirrors comment-checker's `detect_comments_json`. Unsupported extensions
+/// yield `[]`; serialization never panics.
+#[must_use]
+pub fn detect_findings_json(content: &str, file_path: &str, is_test_file: bool) -> String {
+    let Some(spec) = language_for_path(file_path) else {
+        return String::from("[]");
+    };
+    let change = Change {
+        file_path: file_path.to_owned(),
+        language: spec.plugin,
+        new_text: content.to_owned(),
+        old_text: String::new(),
+        is_new: true,
+        is_test_file,
+    };
+    let findings = TestDetector::new().detect(&change);
+    serde_json::to_string(&findings).unwrap_or_else(|_| String::from("[]"))
 }
 
 fn build_change(payload: &Payload) -> Option<(String, String, bool)> {

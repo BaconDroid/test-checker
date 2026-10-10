@@ -21,7 +21,7 @@ impl Confidence {
 }
 
 /// A single test-weakening signal, rendered into a `<finding>` element.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Finding {
     pub file: String,
     pub line: usize,

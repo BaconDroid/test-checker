@@ -1,5 +1,5 @@
 use serde_json::Value;
-use test_checker::api::{check_hook_input, check_hook_input_json};
+use test_checker::api::{check_hook_input, check_hook_input_json, detect_findings_json};
 
 #[test]
 fn check_hook_input_given_clean_python_write_returns_success() {
@@ -124,5 +124,47 @@ fn check_hook_input_json_given_findings_returns_camel_case_exit_code() -> serde_
             .and_then(Value::as_str)
             .is_some_and(|message| message.contains("<findings"))
     );
+    Ok(())
+}
+
+#[test]
+fn detect_findings_json_given_clean_content_returns_empty_json_array() -> serde_json::Result<()> {
+    // given / when
+    let json: Value = serde_json::from_str(&detect_findings_json(
+        "assert foo() == 1\n",
+        "tests/test_a.py",
+        true,
+    ))?;
+
+    // then
+    assert_eq!(json, Value::Array(Vec::new()));
+    Ok(())
+}
+
+#[test]
+fn detect_findings_json_given_weakening_content_returns_findings() -> serde_json::Result<()> {
+    // given / when
+    let json: Value = serde_json::from_str(&detect_findings_json(
+        "def test_a():\n    assert True\n",
+        "tests/test_a.py",
+        true,
+    ))?;
+
+    // then
+    let findings = json.as_array().expect("array");
+    assert!(findings.iter().any(
+        |finding| finding.get("rule").and_then(Value::as_str) == Some("tautological-assertion")
+    ));
+    Ok(())
+}
+
+#[test]
+fn detect_findings_json_given_unsupported_extension_returns_empty_json_array()
+-> serde_json::Result<()> {
+    // given / when
+    let json: Value = serde_json::from_str(&detect_findings_json("x", "foo.xyz", true))?;
+
+    // then
+    assert_eq!(json, Value::Array(Vec::new()));
     Ok(())
 }

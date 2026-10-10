@@ -1,9 +1,12 @@
-/// Canonical grammar name (for `tree-sitter-language-pack`) plus the consumer
-/// plugin's language key. TSX shares the TypeScript rule table.
+/// Canonical grammar name plus the consumer plugin's language key.
+///
+/// TSX shares the TypeScript rule table. `test_query` is the tree-sitter query
+/// that captures whole test bodies for the grammar.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LanguageSpec {
     pub name: &'static str,
     pub plugin: &'static str,
+    pub test_query: &'static str,
 }
 
 #[must_use]
@@ -16,16 +19,32 @@ pub fn language_for_path(file_path: &str) -> Option<LanguageSpec> {
 #[must_use]
 pub fn language_for_extension(extension: &str) -> Option<LanguageSpec> {
     let ext = extension.trim_start_matches('.').to_ascii_lowercase();
-    let (name, plugin) = match ext.as_str() {
-        "py" | "pyi" => ("python", "python"),
-        "js" | "jsx" | "mjs" | "cjs" => ("javascript", "js"),
-        "ts" | "mts" | "cts" => ("typescript", "ts"),
-        "tsx" => ("tsx", "ts"),
-        "go" => ("go", "go"),
-        "rs" => ("rust", "rust"),
+    let (name, plugin, test_query) = match ext.as_str() {
+        "py" | "pyi" => (
+            "python",
+            "python",
+            "(function_definition name: (identifier) @test.name body: (block) @test.body)",
+        ),
+        "js" | "jsx" | "mjs" | "cjs" => ("javascript", "js", "(call_expression) @test.call"),
+        "ts" | "mts" | "cts" => ("typescript", "ts", "(call_expression) @test.call"),
+        "tsx" => ("tsx", "ts", "(call_expression) @test.call"),
+        "go" => (
+            "go",
+            "go",
+            "(function_declaration name: (identifier) @test.name body: (block) @test.body)",
+        ),
+        "rs" => (
+            "rust",
+            "rust",
+            "(function_item name: (identifier) @test.name body: (block) @test.body)",
+        ),
         _ => return None,
     };
-    Some(LanguageSpec { name, plugin })
+    Some(LanguageSpec {
+        name,
+        plugin,
+        test_query,
+    })
 }
 
 #[cfg(test)]
@@ -74,6 +93,17 @@ mod tests {
         for (ext, plugin) in aliases {
             let spec = language_for_extension(ext);
             assert_eq!(spec.map(|s| s.plugin), Some(plugin), "alias {ext}");
+        }
+    }
+
+    #[test]
+    fn language_for_extension_exposes_a_test_query_per_language() {
+        for ext in ["py", "js", "ts", "tsx", "go", "rs"] {
+            let spec = language_for_extension(ext);
+            assert!(
+                spec.is_some_and(|s| !s.test_query.is_empty()),
+                "alias {ext}"
+            );
         }
     }
 }

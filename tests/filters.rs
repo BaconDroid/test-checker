@@ -1,9 +1,7 @@
 use test_checker::filters::{
-    code_text, count_real_lines, expected_from_sut_hit, forced_success_hit, glob_match,
-    is_conditional_skip, is_file_disabled, is_test_declaration, is_test_path, is_trivial_body,
-    matches_loosening_after, matches_loosening_before, mock_identifier_hit, negative_control_hit,
-    normalize_assertion, normalize_body, parse_threshold, skip_focus_hit, strip_comments,
-    strip_string_literals, tautological_hit, tests_not_run_hit, weakened_config_hit, within_bypass,
+    code_text, count_real_lines, is_conditional_skip, is_file_disabled, is_test_declaration,
+    is_trivial_body, mock_identifier_hit, normalize_assertion, normalize_body, skip_focus_hit,
+    strip_comments, strip_string_literals, tautological_hit, within_bypass,
 };
 
 // --- Comment / code text helpers -------------------------------------------
@@ -110,43 +108,6 @@ fn normalize_body_given_code_lines_keeps_them_in_order() {
 
     // then
     assert_eq!(normalized, "x = 1\ny = 2");
-}
-
-// --- Paths -----------------------------------------------------------------
-
-#[test]
-fn glob_match_given_double_star_matches_nested_test_file() {
-    // given / when / then
-    assert!(glob_match("**/*.test.*", "src/a.test.ts"));
-    assert!(glob_match("**/*_test.*", "pkg/a_test.go"));
-}
-
-#[test]
-fn glob_match_given_double_star_rejects_plain_source_file() {
-    // given / when / then
-    assert!(!glob_match("**/*.test.*", "src/a.ts"));
-}
-
-#[test]
-fn glob_match_given_single_star_respects_path_separator() {
-    // given / when / then
-    assert!(glob_match("src/*.rs", "src/main.rs"));
-    assert!(!glob_match("src/*.rs", "src/deep/main.rs"));
-}
-
-#[test]
-fn is_test_path_given_test_layouts_returns_true() {
-    // given / when / then
-    assert!(is_test_path("src/a.test.ts"));
-    assert!(is_test_path("tests/test_a.py"));
-    assert!(is_test_path("pkg/foo_test.go"));
-}
-
-#[test]
-fn is_test_path_given_source_layout_returns_false() {
-    // given / when / then
-    assert!(!is_test_path("src/a.ts"));
-    assert!(!is_test_path("README.md"));
 }
 
 // --- Suppression markers ---------------------------------------------------
@@ -319,144 +280,6 @@ fn tautological_given_meaningful_assertions_returns_false() {
     assert!(!tautological_hit("expect(value).toBe(1)"));
 }
 
-#[test]
-fn forced_success_given_forced_exit_or_or_true_returns_true() {
-    // given / when / then
-    assert!(forced_success_hit("process.exit(0);"));
-    assert!(forced_success_hit("sys.exit(0)"));
-    assert!(forced_success_hit("run_tests || true"));
-    assert!(forced_success_hit("--passWithNoTests"));
-}
-
-#[test]
-fn forced_success_given_failing_exit_or_false_default_returns_false() {
-    // given / when / then
-    assert!(!forced_success_hit("process.exit(1);"));
-    assert!(!forced_success_hit("const ok = value || false;"));
-}
-
-#[test]
-fn forced_success_given_malformed_zero_forms_returns_false() {
-    // given / when / then
-    assert!(!forced_success_hit("exit0(1);"));
-    assert!(!forced_success_hit("sys.exit(01)"));
-    assert!(!forced_success_hit("process.exit(0x"));
-}
-
-#[test]
-fn weakened_config_given_disable_directives_returns_true() {
-    // given / when / then
-    assert!(weakened_config_hit("@ts-nocheck"));
-    assert!(weakened_config_hit("--no-verify"));
-    assert!(weakened_config_hit("fail_under = 0"));
-    assert!(weakened_config_hit("# ruff: noqa"));
-}
-
-#[test]
-fn weakened_config_given_nonzero_threshold_returns_false() {
-    // given / when / then
-    assert!(!weakened_config_hit("fail_under = 80"));
-    assert!(!weakened_config_hit("const value = compute();"));
-}
-
-#[test]
-fn parse_threshold_given_coverage_key_returns_value() {
-    // given
-    let simple = parse_threshold("fail_under = 85");
-    let hyphenated = parse_threshold("cov-fail-under=90");
-
-    // when / then
-    assert!(simple.is_some_and(|value| (value - 85.0).abs() < f64::EPSILON));
-    assert!(hyphenated.is_some_and(|value| (value - 90.0).abs() < f64::EPSILON));
-}
-
-#[test]
-fn parse_threshold_given_unrelated_key_returns_none() {
-    // given / when / then
-    assert!(parse_threshold("coverage = 85").is_none());
-}
-
-#[test]
-fn parse_threshold_given_prefixed_key_returns_none() {
-    // given / when / then
-    assert!(parse_threshold("my_fail_under = 0").is_none());
-}
-
-#[test]
-fn mock_identifier_given_dispatch_call_returns_false() {
-    // given / when / then
-    assert!(!mock_identifier_hit("const result = dispatch(event);"));
-    assert!(!mock_identifier_hit("despatch(x);"));
-    assert!(mock_identifier_hit("mocker.patch('module.fn')"));
-    assert!(mock_identifier_hit("patch('module.fn')"));
-}
-
-// --- Command / config rules ------------------------------------------------
-
-#[test]
-fn tests_not_run_given_exclusion_flags_returns_true() {
-    // given / when / then
-    assert!(tests_not_run_hit("pytest --ignore=tests/slow.py"));
-    assert!(tests_not_run_hit("pytest -k \"not slow\""));
-    assert!(tests_not_run_hit("pytest --deselect tests/test_a.py"));
-}
-
-#[test]
-fn tests_not_run_given_plain_command_returns_false() {
-    // given / when / then
-    assert!(!tests_not_run_hit("pytest tests/unit"));
-}
-
-#[test]
-fn negative_control_given_python_broad_exception_returns_true() {
-    // given / when / then
-    assert!(negative_control_hit("pytest.raises(Exception)", "python"));
-    assert!(negative_control_hit(
-        "assertRaises(BaseException)",
-        "python"
-    ));
-}
-
-#[test]
-fn negative_control_given_python_specific_exception_returns_false() {
-    // given / when / then
-    assert!(!negative_control_hit("pytest.raises(ValueError)", "python"));
-}
-
-#[test]
-fn negative_control_given_javascript_broad_throw_returns_true() {
-    // given / when / then
-    assert!(negative_control_hit("expect(fn).toThrow()", "js"));
-    assert!(negative_control_hit("expect(fn).not.toThrow()", "js"));
-}
-
-#[test]
-fn negative_control_given_javascript_specific_throw_returns_false() {
-    // given / when / then
-    assert!(!negative_control_hit(
-        "expect(fn).toThrow(ValueError)",
-        "js"
-    ));
-}
-
-#[test]
-fn expected_from_sut_given_repeated_call_under_assert_returns_true() {
-    // given / when / then
-    assert!(expected_from_sut_hit("assert compute(x) == compute(y)"));
-}
-
-#[test]
-fn expected_from_sut_given_single_call_returns_false() {
-    // given / when / then
-    assert!(!expected_from_sut_hit("assert compute(x) == expected"));
-}
-
-#[test]
-fn expected_from_sut_given_ungated_comparison_returns_false() {
-    // given / when / then
-    assert!(!expected_from_sut_hit("compute(x) == compute(y)"));
-}
-
 // --- Declaration / body ----------------------------------------------------
 
 #[test]
@@ -473,6 +296,13 @@ fn mock_identifier_given_mock_names_returns_true() {
 fn mock_identifier_given_plain_names_returns_false() {
     // given / when / then
     assert!(!mock_identifier_hit("const client = createClient();"));
+}
+
+#[test]
+fn mock_identifier_given_dispatch_call_returns_false() {
+    // given / when / then
+    assert!(!mock_identifier_hit("const result = dispatch(event);"));
+    assert!(!mock_identifier_hit("despatch(x);"));
 }
 
 #[test]
@@ -507,50 +337,4 @@ fn is_trivial_body_given_empty_bodies_returns_true() {
 fn is_trivial_body_given_executable_body_returns_false() {
     // given / when / then
     assert!(!is_trivial_body("assert x == 1"));
-}
-
-// --- Matcher loosening -----------------------------------------------------
-
-#[test]
-fn matcher_loosening_given_assert_equal_before_and_assert_true_after_splits() {
-    // given
-    let before = "self.assertEqual(foo, bar)";
-    let after = "self.assertTrue(foo)";
-    let message = "assertEqual loosened to assertTrue";
-
-    // when / then
-    assert!(matches_loosening_before(before, message));
-    assert!(!matches_loosening_after(before, message));
-    assert!(!matches_loosening_before(after, message));
-    assert!(matches_loosening_after(after, message));
-}
-
-#[test]
-fn matcher_loosening_given_to_be_variants_splits() {
-    // given
-    let message = "toBe loosened to toBeTruthy";
-
-    // when / then
-    assert!(matches_loosening_before("expect(x).toBe(y)", message));
-    assert!(matches_loosening_after("expect(x).toBeTruthy()", message));
-}
-
-#[test]
-fn matcher_loosening_given_to_throw_inversion_splits() {
-    // given
-    let message = "toThrow inverted to not.toThrow";
-
-    // when / then
-    assert!(matches_loosening_before("expect(fn).toThrow()", message));
-    assert!(matches_loosening_after("expect(fn).not.toThrow()", message));
-}
-
-#[test]
-fn matcher_loosening_given_unrelated_line_returns_false() {
-    // given
-    let message = "assertEqual loosened to assertTrue";
-
-    // when / then
-    assert!(!matches_loosening_before("plain_call()", message));
-    assert!(!matches_loosening_after("plain_call()", message));
 }

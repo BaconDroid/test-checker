@@ -25,14 +25,28 @@ fn rule_present(findings: &[Finding], rule: &str) -> bool {
 // --- Catalog ---------------------------------------------------------------
 
 #[test]
-fn rule_ids_given_catalog_returns_eighteen_ordered_ids() {
+fn rule_ids_given_catalog_returns_eleven_ordered_ids() {
     // given / when
     let ids = rule_ids();
 
     // then
-    assert_eq!(ids.len(), 18);
-    assert_eq!(ids.first().copied(), Some("protected-paths"));
-    assert_eq!(ids.last().copied(), Some("negative-control-unrelated"));
+    assert_eq!(ids.len(), 11);
+    assert_eq!(
+        ids,
+        vec![
+            "skip-focus-added",
+            "tautological-assertion",
+            "empty-test",
+            "unknown-test",
+            "gutted-test",
+            "swallowed-error",
+            "duplicate-test",
+            "mock-of-sut",
+            "over-mocking",
+            "assertion-roulette",
+            "redundant-assertion",
+        ]
+    );
 }
 
 // --- Traversal robustness --------------------------------------------------
@@ -53,44 +67,6 @@ fn detect_given_deeply_nested_parentheses_returns_without_aborting() {
 
     // then: the call returns a finding list rather than crashing
     assert!(!rule_present(&findings, "swallowed-error"));
-}
-
-// --- protected-paths -------------------------------------------------------
-
-#[test]
-fn protected_paths_given_existing_edit_reports_rule() {
-    // given
-    let change = make_change(
-        "src/app.test.ts",
-        "ts",
-        "it('a', () => { expect(x).toBe(1); });",
-        "it('a', () => { expect(x).toBe(2); });",
-        false,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(rule_present(&findings, "protected-paths"));
-}
-
-#[test]
-fn protected_paths_given_new_file_skips_rule() {
-    // given
-    let change = make_change(
-        "src/app.test.ts",
-        "ts",
-        "",
-        "it('a', () => { expect(x).toBe(1); });",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(!rule_present(&findings, "protected-paths"));
 }
 
 // --- skip-focus-added ------------------------------------------------------
@@ -207,6 +183,116 @@ fn empty_test_given_assertion_body_skips_rule() {
     assert!(!rule_present(&findings, "empty-test"));
 }
 
+// --- Block extraction for every grammar ------------------------------------
+
+#[test]
+fn empty_test_given_go_empty_body_reports_rule() {
+    // given
+    let change = make_change(
+        "pkg/foo_test.go",
+        "go",
+        "",
+        "package foo\n\nfunc TestA(t *testing.T) {\n}\n",
+        true,
+    );
+
+    // when
+    let findings = TestDetector::new().detect(&change);
+
+    // then
+    assert!(rule_present(&findings, "empty-test"));
+}
+
+#[test]
+fn unknown_test_given_go_assertion_free_body_reports_rule() {
+    // given
+    let change = make_change(
+        "pkg/foo_test.go",
+        "go",
+        "",
+        "package foo\n\nfunc TestA(t *testing.T) {\n\tdowork()\n}\n",
+        true,
+    );
+
+    // when
+    let findings = TestDetector::new().detect(&change);
+
+    // then
+    assert!(rule_present(&findings, "unknown-test"));
+}
+
+#[test]
+fn empty_test_given_rust_empty_body_reports_rule() {
+    // given
+    let change = make_change(
+        "src/foo_test.rs",
+        "rust",
+        "",
+        "#[test]\nfn t() {\n}\n",
+        true,
+    );
+
+    // when
+    let findings = TestDetector::new().detect(&change);
+
+    // then
+    assert!(rule_present(&findings, "empty-test"));
+}
+
+#[test]
+fn unknown_test_given_rust_assertion_free_body_reports_rule() {
+    // given
+    let change = make_change(
+        "src/foo_test.rs",
+        "rust",
+        "",
+        "#[test]\nfn t() {\n    do_work();\n}\n",
+        true,
+    );
+
+    // when
+    let findings = TestDetector::new().detect(&change);
+
+    // then
+    assert!(rule_present(&findings, "unknown-test"));
+}
+
+#[test]
+fn empty_test_given_js_empty_body_reports_rule() {
+    // given
+    let change = make_change(
+        "src/foo.test.ts",
+        "ts",
+        "",
+        "it(\"a\", () => {\n});\n",
+        true,
+    );
+
+    // when
+    let findings = TestDetector::new().detect(&change);
+
+    // then
+    assert!(rule_present(&findings, "empty-test"));
+}
+
+#[test]
+fn unknown_test_given_js_assertion_free_body_reports_rule() {
+    // given
+    let change = make_change(
+        "src/foo.test.ts",
+        "ts",
+        "",
+        "it(\"a\", () => {\n  doWork();\n});\n",
+        true,
+    );
+
+    // when
+    let findings = TestDetector::new().detect(&change);
+
+    // then
+    assert!(rule_present(&findings, "unknown-test"));
+}
+
 // --- unknown-test ----------------------------------------------------------
 
 #[test]
@@ -281,44 +367,6 @@ fn gutted_test_given_replaced_assertion_skips_rule() {
 
     // then
     assert!(!rule_present(&findings, "gutted-test"));
-}
-
-// --- matcher-loosened ------------------------------------------------------
-
-#[test]
-fn matcher_loosened_given_assert_equal_to_assert_true_reports_rule() {
-    // given
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "self.assertEqual(foo, bar)",
-        "self.assertTrue(foo)",
-        false,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(rule_present(&findings, "matcher-loosened"));
-}
-
-#[test]
-fn matcher_loosened_given_equal_to_equal_skips_rule() {
-    // given
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "self.assertEqual(foo, bar)",
-        "self.assertEqual(baz, qux)",
-        false,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(!rule_present(&findings, "matcher-loosened"));
 }
 
 // --- swallowed-error -------------------------------------------------------
@@ -431,32 +479,6 @@ fn duplicate_test_given_distinct_bodies_skips_rule() {
 
     // then
     assert!(!rule_present(&findings, "duplicate-test"));
-}
-
-// --- forced-success --------------------------------------------------------
-
-#[test]
-fn forced_success_given_zero_exit_reports_rule() {
-    // given
-    let change = make_change("src/app.test.ts", "ts", "", "process.exit(0);", true);
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(rule_present(&findings, "forced-success"));
-}
-
-#[test]
-fn forced_success_given_nonzero_exit_skips_rule() {
-    // given
-    let change = make_change("src/app.test.ts", "ts", "", "process.exit(1);", true);
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(!rule_present(&findings, "forced-success"));
 }
 
 // --- mock-of-sut -----------------------------------------------------------
@@ -663,164 +685,6 @@ fn redundant_assertion_given_distinct_lines_skips_rule() {
 
     // then
     assert!(!rule_present(&findings, "redundant-assertion"));
-}
-
-// --- weakened-config -------------------------------------------------------
-
-#[test]
-fn weakened_config_given_disable_directive_reports_rule() {
-    // given: a bare directive present in code text (not a comment)
-    let change = make_change("src/app.test.ts", "ts", "", "@ts-nocheck\n", true);
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(rule_present(&findings, "weakened-config"));
-}
-
-#[test]
-fn weakened_config_given_threshold_in_comment_does_not_fire() {
-    // given: a threshold-looking comment must not be treated as code
-    let change = make_change(
-        "src/app.test.ts",
-        "ts",
-        "",
-        "// fail_under = 0\nit('a', () => { expect(x).toBe(1); });\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(!rule_present(&findings, "weakened-config"));
-}
-
-#[test]
-fn weakened_config_given_plain_line_skips_rule() {
-    // given
-    let change = make_change(
-        "src/app.test.ts",
-        "ts",
-        "",
-        "const value = compute();",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(!rule_present(&findings, "weakened-config"));
-}
-
-// --- tests-not-run ---------------------------------------------------------
-
-#[test]
-fn tests_not_run_given_ignore_flag_reports_rule() {
-    // given
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "",
-        "pytest --ignore=tests/slow.py",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(rule_present(&findings, "tests-not-run"));
-}
-
-#[test]
-fn tests_not_run_given_plain_command_skips_rule() {
-    // given
-    let change = make_change("tests/test_a.py", "python", "", "pytest tests/unit", true);
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(!rule_present(&findings, "tests-not-run"));
-}
-
-// --- expected-from-sut -----------------------------------------------------
-
-#[test]
-fn expected_from_sut_given_repeated_call_reports_rule() {
-    // given
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "",
-        "def test_a():\n    assert compute(x) == compute(y)\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(rule_present(&findings, "expected-from-sut"));
-}
-
-#[test]
-fn expected_from_sut_given_single_call_skips_rule() {
-    // given
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "",
-        "def test_a():\n    assert compute(x) == expected\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(!rule_present(&findings, "expected-from-sut"));
-}
-
-// --- negative-control-unrelated --------------------------------------------
-
-#[test]
-fn negative_control_unrelated_given_broad_exception_reports_rule() {
-    // given
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "",
-        "with pytest.raises(Exception):\n    run()\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(rule_present(&findings, "negative-control-unrelated"));
-}
-
-#[test]
-fn negative_control_unrelated_given_specific_exception_skips_rule() {
-    // given
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "",
-        "with pytest.raises(ValueError):\n    run()\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(!rule_present(&findings, "negative-control-unrelated"));
 }
 
 // --- Cross-cutting gates ---------------------------------------------------

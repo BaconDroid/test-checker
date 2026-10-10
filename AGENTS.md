@@ -2,7 +2,7 @@
 
 The Rust crate at the repository root (`src/`, `tests/`, `benches/`) is the only implementation. There is no `bindings/`, `npm/`, or `go/` tree here: this repo is the standalone Rust hook crate.
 
-The binary reads a JSON hook payload on stdin, inspects the added lines of a test file, and reports test-weakening findings on stderr (exit 2) or exits clean (exit 0). `src/detector.rs` owns the 18-rule catalog and the tree-sitter parsing; `src/filters.rs` owns the plain-text predicates and suppression markers; `src/output.rs` renders the grouped `<findings>` XML.
+The binary reads a JSON hook payload on stdin, inspects the added lines of a test file, and reports test-weakening findings on stderr (exit 2) or exits clean (exit 0). `src/detector.rs` owns the 11-rule catalog and the tree-sitter parsing; `src/filters.rs` owns the plain-text predicates and suppression markers; `src/testpath.rs` owns the test-path globs; `src/output.rs` renders the grouped `<findings>` XML.
 
 ## Commands (the same ones CI runs)
 - Format: `cargo fmt --all -- --check`
