@@ -1,76 +1,28 @@
-use test_checker::models::{Confidence, Payload};
+use std::path::Path;
+
+use test_checker::input::{read_file, read_string};
+use test_checker::models::{Confidence, Finding};
 
 #[test]
-fn payload_given_write_input_deserializes_tool_fields() {
+fn finding_given_populated_value_serializes_wire_fields() {
     // given
-    let json = r#"{
-        "tool_name": "Write",
-        "tool_input": {
-            "file_path": "src/app.py",
-            "content": "print(1)",
-            "old_string": "old",
-            "new_string": "new",
-            "edits": [{ "old_string": "x", "new_string": "y" }]
-        }
-    }"#;
-
-    // when
-    let payload: Payload = serde_json::from_str(json).unwrap();
-
-    // then
-    assert_eq!(payload.tool_name, "Write");
-    assert_eq!(payload.tool_input.file_path, "src/app.py");
-    assert_eq!(payload.tool_input.content, "print(1)");
-    assert_eq!(payload.tool_input.old_string, "old");
-    assert_eq!(payload.tool_input.new_string, "new");
-    assert_eq!(payload.tool_input.edits.len(), 1);
-    assert_eq!(payload.tool_input.edits[0].old_string, "x");
-    assert_eq!(payload.tool_input.edits[0].new_string, "y");
-}
-
-#[test]
-fn payload_given_absent_is_test_file_is_none() {
-    // given
-    let json = r#"{"tool_name":"Write","tool_input":{"file_path":"a.py"}}"#;
-
-    // when
-    let payload: Payload = serde_json::from_str(json).unwrap();
-
-    // then
-    assert_eq!(payload.is_test_file, None);
-}
-
-#[test]
-fn payload_given_explicit_is_test_file_is_some() {
-    // given
-    let truthy = r#"{"tool_name":"Write","tool_input":{"file_path":"a.py"},"is_test_file":true}"#;
-    let falsy = r#"{"tool_name":"Write","tool_input":{"file_path":"a.py"},"is_test_file":false}"#;
-
-    // when / then
-    assert_eq!(
-        serde_json::from_str::<Payload>(truthy)
-            .unwrap()
-            .is_test_file,
-        Some(true)
+    let finding = Finding::new(
+        "tests/test_a.py",
+        3,
+        "tautological-assertion",
+        "Assertion is tautological (always true).",
+        Confidence::High,
     );
-    assert_eq!(
-        serde_json::from_str::<Payload>(falsy).unwrap().is_test_file,
-        Some(false)
-    );
-}
-
-#[test]
-fn payload_given_unknown_fields_ignores_them() {
-    // given
-    let json =
-        r#"{"tool_name":"Edit","unexpected":1,"tool_input":{"file_path":"a.py","extra":true}}"#;
 
     // when
-    let payload: Payload = serde_json::from_str(json).unwrap();
+    let json = serde_json::to_value(&finding).unwrap();
 
     // then
-    assert_eq!(payload.tool_name, "Edit");
-    assert_eq!(payload.tool_input.file_path, "a.py");
+    assert_eq!(json["file"], "tests/test_a.py");
+    assert_eq!(json["line"], 3);
+    assert_eq!(json["rule"], "tautological-assertion");
+    assert_eq!(json["message"], "Assertion is tautological (always true).");
+    assert_eq!(json["confidence"], "high");
 }
 
 #[test]
@@ -79,4 +31,41 @@ fn confidence_given_variants_returns_lowercase_names() {
     assert_eq!(Confidence::High.as_str(), "high");
     assert_eq!(Confidence::Medium.as_str(), "medium");
     assert_eq!(Confidence::Low.as_str(), "low");
+}
+
+#[test]
+fn confidence_given_variants_serializes_lowercase() {
+    // given / when / then
+    assert_eq!(serde_json::to_value(Confidence::High).unwrap(), "high");
+    assert_eq!(serde_json::to_value(Confidence::Medium).unwrap(), "medium");
+    assert_eq!(serde_json::to_value(Confidence::Low).unwrap(), "low");
+}
+
+#[test]
+fn read_string_given_content_returns_owned_copy() {
+    // given / when / then
+    assert_eq!(
+        read_string("def test_a():\n    pass\n"),
+        "def test_a():\n    pass\n"
+    );
+}
+
+#[test]
+fn read_file_given_existing_path_returns_utf8_content() {
+    // given
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test_a.py");
+    std::fs::write(&path, "def test_a():\n    pass\n").unwrap();
+
+    // when / then
+    assert_eq!(read_file(&path), "def test_a():\n    pass\n");
+}
+
+#[test]
+fn read_file_given_missing_path_returns_empty() {
+    // given / when / then
+    assert_eq!(
+        read_file(Path::new("/nonexistent/test-checker/missing.py")),
+        ""
+    );
 }
