@@ -1,0 +1,151 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  TSLP_LINK_MODE: static
+
+jobs:
+  qa:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        run: rustup component add rustfmt clippy
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --all-targets --all-features
+
+      - name: Compile benchmarks
+        run: cargo bench --bench detector --no-run
+
+  build:
+    needs: qa
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            os_name: darwin
+            arch: amd64
+            binary_name: test-checker
+            archive_ext: tar.gz
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            os_name: darwin
+            arch: arm64
+            binary_name: test-checker
+            archive_ext: tar.gz
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            os_name: linux
+            arch: amd64
+            binary_name: test-checker
+            archive_ext: tar.gz
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            os_name: linux
+            arch: arm64
+            binary_name: test-checker
+            archive_ext: tar.gz
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            os_name: windows
+            arch: amd64
+            binary_name: test-checker.exe
+            archive_ext: zip
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            os_name: windows
+            arch: arm64
+            binary_name: test-checker.exe
+            archive_ext: zip
+
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package Unix artifact
+        if: matrix.archive_ext == 'tar.gz'
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact="test-checker_${{ github.ref_name }}_${{ matrix.os_name }}_${{ matrix.arch }}.tar.gz"
+          mkdir -p package
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" package/test-checker
+          chmod +x package/test-checker
+          cp LICENSE README.md package/
+          tar -czf "$artifact" -C package test-checker LICENSE README.md
+
+      - name: Package Windows artifact
+        if: matrix.archive_ext == 'zip'
+        shell: pwsh
+        run: |
+          $artifact = "test-checker_${{ github.ref_name }}_${{ matrix.os_name }}_${{ matrix.arch }}.zip"
+          New-Item -ItemType Directory -Force -Path package | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" package/
+          Copy-Item LICENSE, README.md package/
+          Compress-Archive -Path package/* -DestinationPath $artifact -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-checker_${{ matrix.os_name }}_${{ matrix.arch }}
+          path: test-checker_*.${{ matrix.archive_ext }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create checksums
+        run: |
+          cd artifacts
+          sha256sum -- ./*.tar.gz ./*.zip > checksums.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/*.tar.gz
+            artifacts/*.zip
+            artifacts/checksums.txt
+          body: |
+            ## Installation
+
+            Download the appropriate native binary for your platform from the assets below.
+
+            **Supported Platforms:**
+            - macOS (arm64, x64)
+            - Linux (arm64, x64)
+            - Windows (arm64, x64)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
