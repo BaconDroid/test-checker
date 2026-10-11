@@ -48,9 +48,9 @@ pub fn check_hook_input(input: &str, custom_prompt: &str) -> HookCheckResult {
     if file_path.is_empty() {
         return skip("No file path provided");
     }
-    if language_for_path(file_path).is_none() {
+    let Some(spec) = language_for_path(file_path) else {
         return skip("Unsupported file extension");
-    }
+    };
     let Some((old_text, new_text, is_new)) = build_change(&payload) else {
         return skip("No content to check");
     };
@@ -63,9 +63,6 @@ pub fn check_hook_input(input: &str, custom_prompt: &str) -> HookCheckResult {
     if !is_test_file {
         return skip("Non-test file");
     }
-    let Some(spec) = language_for_path(file_path) else {
-        return skip("Unsupported file extension");
-    };
 
     let change = Change {
         file_path: file_path.to_owned(),
