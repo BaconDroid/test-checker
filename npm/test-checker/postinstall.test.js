@@ -1,0 +1,162 @@
+const assert = require("node:assert/strict");
+const { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
+const { tmpdir } = require("node:os");
+const { join } = require("node:path");
+const { Readable } = require("node:stream");
+const { test } = require("node:test");
+
+const postinstall = require("./postinstall");
+
+function tempDir() {
+  return mkdtempSync(join(tmpdir(), "test-checker-postinstall-"));
+}
+
+test("download waits for archive bytes before resolving", async () => {
+  // given
+  const root = tempDir();
+  try {
+    const archivePath = join(root, "archive.bin");
+    let requestedUrl = "";
+    const request = async (url) => {
+      requestedUrl = url;
+      const response = Readable.from(["first-", "second"]);
+      response.statusCode = 200;
+      response.headers = {};
+      return response;
+    };
+
+    // when
+    await postinstall.downloadFile("https://example.test/archive.bin", archivePath, { request });
+
+    // then
+    assert.equal(requestedUrl, "https://example.test/archive.bin");
+    assert.equal(readFileSync(archivePath, "utf8"), "first-second");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("extractZip failure surfaces inherited stdio command failure", () => {
+  // given
+  const calls = [];
+  const runCommand = (command, args, options) => {
+    calls.push({ command, args, options });
+    throw new Error("powershell failed");
+  };
+
+  // when
+  assert.throws(
+    () =>
+      postinstall.extractZip("C:\\tmp\\archive.zip", "C:\\tmp\\bin", {
+        platform: "win32",
+        runCommand,
+      }),
+    /powershell failed/
+  );
+
+  // then
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, "powershell");
+  assert.deepEqual(calls[0].options, { stdio: "inherit" });
+  assert.ok(calls[0].args.includes("Expand-Archive"));
+});
+
+test("main exits non-zero when installation fails", async () => {
+  // given
+  const root = tempDir();
+  const exits = [];
+  const errors = [];
+
+  try {
+    // when
+    await postinstall.main({
+      arch: "x64",
+      baseDir: root,
+      downloadFile: async () => {
+        throw new Error("download failed");
+      },
+      exit: (code) => {
+        exits.push(code);
+      },
+      extractTarGz: () => {},
+      extractZip: () => {},
+      getPackageVersion: () => "0.7.0",
+      log: () => {},
+      mkdir: () => {},
+      platform: "linux",
+      stderr: {
+        error: (message) => {
+          errors.push(message);
+        },
+      },
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // then
+  assert.deepEqual(exits, [1]);
+  assert.match(errors.join("\n"), /Failed to install binary/);
+  assert.match(errors.join("\n"), /download failed/);
+});
+
+test("install skips download when the platform package is installed", async () => {
+  // given
+  const root = tempDir();
+  const logs = [];
+  try {
+    const baseDir = join(root, "node_modules", "@bacondroid", "test-checker");
+    const platformDir = join(root, "node_modules", "@bacondroid", "test-checker-linux-x64");
+    mkdirSync(baseDir, { recursive: true });
+    mkdirSync(join(platformDir, "bin"), { recursive: true });
+    writeFileSync(join(platformDir, "package.json"), "{}");
+    writeFileSync(join(platformDir, "bin", "test-checker"), "");
+
+    // when
+    await postinstall.install({
+      arch: "x64",
+      baseDir,
+      downloadFile: async () => {
+        throw new Error("download should not run");
+      },
+      log: (message) => {
+        logs.push(message);
+      },
+      platform: "linux",
+    });
+
+    // then
+    assert.match(logs.join("\n"), /Using linux-x64 binary from .*test-checker-linux-x64/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("install skips download when bundled binary exists", async () => {
+  // given
+  const root = tempDir();
+  const logs = [];
+  try {
+    const vendorDir = join(root, "vendor", "linux-x64");
+    mkdirSync(vendorDir, { recursive: true });
+    writeFileSync(join(vendorDir, "test-checker"), "");
+
+    // when
+    await postinstall.install({
+      arch: "x64",
+      baseDir: root,
+      downloadFile: async () => {
+        throw new Error("download should not run");
+      },
+      log: (message) => {
+        logs.push(message);
+      },
+      platform: "linux",
+    });
+
+    // then
+    assert.match(logs.join("\n"), /Bundled linux-x64 binary already exists/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

@@ -1,7 +1,6 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
-/// Confidence attached to a finding, mirroring the plugin's severity mapping.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Confidence {
     High,
@@ -20,68 +19,85 @@ impl Confidence {
     }
 }
 
-/// A single test-weakening signal, rendered into a `<finding>` element.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Finding {
-    pub file: String,
-    pub line: usize,
-    pub rule: &'static str,
-    pub message: String,
+    pub file_path: String,
+    pub line_number: usize,
+    pub rule: String,
     pub confidence: Confidence,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub text: String,
 }
 
 impl Finding {
     #[must_use]
     pub fn new(
-        file: impl Into<String>,
-        line: usize,
-        rule: &'static str,
-        message: impl Into<String>,
+        rule: impl Into<String>,
         confidence: Confidence,
+        message: impl Into<String>,
+        line_number: usize,
+        file_path: impl Into<String>,
+        text: impl Into<String>,
     ) -> Self {
         Self {
-            file: file.into(),
-            line,
-            rule,
-            message: message.into(),
+            file_path: file_path.into(),
+            line_number,
+            rule: rule.into(),
             confidence,
+            message: message.into(),
+            text: text.into(),
         }
+    }
+
+    #[must_use]
+    pub fn normalized_text(&self) -> String {
+        self.text.trim().to_lowercase()
     }
 }
 
-/// One entry of a `MultiEdit` payload.
-#[derive(Clone, Debug, Default, Deserialize)]
-pub(crate) struct Edit {
-    #[serde(default)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+pub struct Edit {
+    #[serde(default, alias = "oldString", deserialize_with = "null_default")]
     pub old_string: String,
-    #[serde(default)]
+    #[serde(default, alias = "newString", deserialize_with = "null_default")]
     pub new_string: String,
 }
 
-/// File-oriented fields of a `Write`/`Edit`/`MultiEdit` call.
-#[derive(Clone, Debug, Default, Deserialize)]
-pub(crate) struct ToolInput {
-    #[serde(default)]
-    pub file_path: String,
-    #[serde(default)]
-    pub content: String,
-    #[serde(default)]
-    pub new_string: String,
-    #[serde(default)]
-    pub old_string: String,
-    #[serde(default)]
-    pub edits: Vec<Edit>,
+pub(crate) fn null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
-/// Full hook payload. Unknown fields are ignored on purpose.
-#[derive(Clone, Debug, Default, Deserialize)]
-pub(crate) struct Payload {
-    #[serde(default)]
-    pub tool_name: String,
-    #[serde(default)]
-    pub tool_input: ToolInput,
-    /// Optional caller-supplied test-file classification; `None` falls back to
-    /// the built-in test-path matcher.
-    #[serde(default)]
-    pub is_test_file: Option<bool>,
+#[cfg(test)]
+mod tests {
+    use super::{Confidence, Finding};
+
+    #[test]
+    fn finding_round_trips_through_json() -> serde_json::Result<()> {
+        // given
+        let finding = Finding::new(
+            "skip-added",
+            Confidence::High,
+            "A test skip marker was added.",
+            7,
+            "tests/test_app.py",
+            "",
+        );
+
+        // when
+        let encoded = serde_json::to_string(&finding)?;
+        let decoded: Finding = serde_json::from_str(&encoded)?;
+
+        // then
+        assert_eq!(decoded, finding);
+        assert!(encoded.contains("\"lineNumber\":7"));
+        assert!(encoded.contains("\"confidence\":\"high\""));
+        assert!(!encoded.contains("\"text\""), "empty text is omitted");
+        Ok(())
+    }
 }

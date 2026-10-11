@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -21,17 +22,25 @@ jobs:
       - name: Set up Rust
         run: rustup component add rustfmt clippy
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
       - name: Format
         run: cargo fmt --all -- --check
 
-      - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Clippy core
+        run: cargo clippy -p test-checker --all-targets --all-features -- -D warnings
 
-      - name: Test
-        run: cargo test --all-targets --all-features
+      - name: Test Rust
+        run: cargo test -p test-checker --all-targets --all-features
 
       - name: Compile benchmarks
-        run: cargo bench --bench detector --no-run
+        run: cargo bench -p test-checker --bench test_checker --no-run
+
+      - name: Test npm package
+        run: node --test npm/test-checker/*.test.js
 
   build:
     needs: qa
@@ -69,12 +78,6 @@ jobs:
             arch: amd64
             binary_name: test-checker.exe
             archive_ext: zip
-          - runner: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            os_name: windows
-            arch: arm64
-            binary_name: test-checker.exe
-            archive_ext: zip
 
     runs-on: ${{ matrix.runner }}
     steps:
@@ -84,7 +87,22 @@ jobs:
         run: rustup target add ${{ matrix.target }}
 
       - name: Build release binary
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: cargo build -p test-checker --release --locked --target ${{ matrix.target }}
+
+      - name: Sign and notarize macOS binary
+        if: matrix.os_name == 'darwin'
+        timeout-minutes: 75
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          MACOS_SIGNING_REQUIRED: ${{ vars.MACOS_SIGNING_REQUIRED }}
+          BINARY: target/${{ matrix.target }}/release/${{ matrix.binary_name }}
+        run: |
+          bash .github/scripts/macos-sign-and-notarize.sh --identifier com.bacondroid.test-checker "$BINARY"
+          printf '%s' '{"tool_name":"Write","tool_input":{"file_path":"a.ts","content":"const a = 1 // one"}}' | "$BINARY" > /dev/null || [ "$?" -eq 2 ]
 
       - name: Package Unix artifact
         if: matrix.archive_ext == 'tar.gz'
@@ -141,11 +159,148 @@ jobs:
           body: |
             ## Installation
 
-            Download the appropriate native binary for your platform from the assets below.
+            ### npm (Recommended)
+            ```bash
+            npm install -g @bacondroid/test-checker
+            # or
+            bun add -g @bacondroid/test-checker
+            ```
+
+            ### Homebrew (macOS)
+            ```bash
+            brew tap BaconDroid/tap
+            brew install test-checker
+            ```
+
+            ### Manual Download
+            Download the appropriate Rust native binary for your platform from the assets below.
 
             **Supported Platforms:**
             - macOS (arm64, x64)
             - Linux (arm64, x64)
-            - Windows (arm64, x64)
+            - Windows (x64)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download darwin-arm64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: test-checker_darwin_arm64
+          path: artifacts
+
+      - name: Download darwin-amd64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: test-checker_darwin_amd64
+          path: artifacts
+
+      - name: Get checksums
+        id: checksums
+        run: |
+          ARM64_SHA=$(sha256sum "artifacts/test-checker_${{ github.ref_name }}_darwin_arm64.tar.gz" | cut -d ' ' -f 1)
+          AMD64_SHA=$(sha256sum "artifacts/test-checker_${{ github.ref_name }}_darwin_amd64.tar.gz" | cut -d ' ' -f 1)
+          echo "arm64_sha=$ARM64_SHA" >> "$GITHUB_OUTPUT"
+          echo "amd64_sha=$AMD64_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Update Homebrew Formula
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION=${VERSION#v}
+
+          cat > formula.rb << 'EOF'
+          class TestChecker < Formula
+            desc "Multi-language test-weakening detection hook for Claude Code and OpenCode"
+            homepage "https://github.com/BaconDroid/test-checker"
+            version "VERSION_PLACEHOLDER"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/BaconDroid/test-checker/releases/download/vVERSION_PLACEHOLDER/test-checker_vVERSION_PLACEHOLDER_darwin_arm64.tar.gz"
+                sha256 "ARM64_SHA_PLACEHOLDER"
+              else
+                url "https://github.com/BaconDroid/test-checker/releases/download/vVERSION_PLACEHOLDER/test-checker_vVERSION_PLACEHOLDER_darwin_amd64.tar.gz"
+                sha256 "AMD64_SHA_PLACEHOLDER"
+              end
+            end
+
+            def install
+              bin.install "test-checker"
+            end
+
+            test do
+              system "#{bin}/test-checker", "--help"
+            end
+          end
+          EOF
+
+          sed -i "s/VERSION_PLACEHOLDER/$VERSION/g" formula.rb
+          sed -i "s/ARM64_SHA_PLACEHOLDER/${{ steps.checksums.outputs.arm64_sha }}/g" formula.rb
+          sed -i "s/AMD64_SHA_PLACEHOLDER/${{ steps.checksums.outputs.amd64_sha }}/g" formula.rb
+
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/BaconDroid/homebrew-tap.git"
+          mkdir -p homebrew-tap/Formula
+          cp formula.rb homebrew-tap/Formula/test-checker.rb
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/test-checker.rb
+          git commit -m "Update test-checker to v$VERSION"
+          git push
+
+  npm-publish:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Upgrade npm for OIDC trusted publishing
+        run: npm install -g npm@latest
+
+      - name: Configure npm registry
+        run: npm config set registry https://registry.npmjs.org
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION=${VERSION#v}
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare npm packages
+        run: bash .github/scripts/prepare-npm-packages.sh "${{ steps.version.outputs.version }}" "${{ github.ref_name }}" artifacts
+
+      - name: Test npm package
+        run: node --test npm/test-checker/*.test.js
+
+      - name: Verify npm package contents
+        run: bash .github/scripts/verify-npm-packages.sh "${{ steps.version.outputs.version }}"
+
+      - name: Publish npm packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: true
+        run: bash .github/scripts/publish-npm-packages.sh "${{ steps.version.outputs.version }}"

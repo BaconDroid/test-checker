@@ -1,15 +1,16 @@
 use serde::{Deserialize, Serialize};
 
-use crate::detector::{Change, TestDetector};
-use crate::language::{is_test_path, language_for_path, plugin_language};
-use crate::models::Payload;
+use crate::detector::TestDetector;
+use crate::filters::{SuppressionFilter, apply_filters};
+use crate::language::{is_test_path, language_for_path};
+use crate::models::{Edit, null_default};
 use crate::output::format_hook_message;
+use crate::rules;
 
 pub const EXIT_PASS: i32 = 0;
 pub const EXIT_BLOCK: i32 = 2;
-pub const SUCCESS_MESSAGE: &str = "[test-checker] Success: No problematic tests found\n";
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HookCheckResult {
     pub exit_code: i32,
@@ -34,105 +35,209 @@ impl HookCheckResult {
     }
 }
 
-/// Core entry point: parse a hook payload and return the hook verdict.
+#[derive(Debug, Default, Deserialize)]
+struct ToolInput {
+    #[serde(default, alias = "filePath", deserialize_with = "null_default")]
+    file_path: String,
+    #[serde(default, deserialize_with = "null_default")]
+    content: String,
+    #[serde(default, alias = "newString", deserialize_with = "null_default")]
+    new_string: String,
+    #[serde(default, alias = "oldString", deserialize_with = "null_default")]
+    old_string: String,
+    #[serde(default, deserialize_with = "null_default")]
+    edits: Vec<Edit>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HookInput {
+    #[serde(default, alias = "toolName", deserialize_with = "null_default")]
+    tool_name: String,
+    #[serde(default, alias = "toolInput", deserialize_with = "null_default")]
+    tool_input: ToolInput,
+    #[serde(default, alias = "isTestFile")]
+    is_test_file: Option<bool>,
+}
+
 #[must_use]
 pub fn check_hook_input(input: &str, custom_prompt: &str) -> HookCheckResult {
+    check_hook_input_with_options(input, custom_prompt, true, true)
+}
+
+/// Same as [`check_hook_input`], with the include toggles threaded through, mirroring
+/// `comment-checker`'s `include_docstrings`.
+#[must_use]
+pub fn check_hook_input_with_options(
+    input: &str,
+    custom_prompt: &str,
+    include_commented_out_tests: bool,
+    include_body_tests: bool,
+) -> HookCheckResult {
     if input.is_empty() {
         return skip("No input provided");
     }
-    let Ok(payload) = serde_json::from_str::<Payload>(input) else {
-        return skip("Invalid input format");
-    };
-    let file_path = payload.tool_input.file_path.trim();
+
+    serde_json::from_str::<HookInput>(input).map_or_else(
+        |_| skip("Invalid input format"),
+        |hook_input| {
+            evaluate(
+                &hook_input,
+                custom_prompt,
+                include_commented_out_tests,
+                include_body_tests,
+            )
+        },
+    )
+}
+
+#[must_use]
+pub fn check_hook_input_from_reader<R: std::io::Read>(
+    reader: R,
+    custom_prompt: &str,
+) -> HookCheckResult {
+    serde_json::from_reader::<R, HookInput>(reader).map_or_else(
+        |_| skip("Invalid input format"),
+        |hook_input| evaluate(&hook_input, custom_prompt, true, true),
+    )
+}
+
+fn evaluate(
+    hook_input: &HookInput,
+    custom_prompt: &str,
+    include_commented_out_tests: bool,
+    include_body_tests: bool,
+) -> HookCheckResult {
+    let file_path = hook_input.tool_input.file_path.as_str();
     if file_path.is_empty() {
         return skip("No file path provided");
     }
-    let Some(spec) = language_for_path(file_path) else {
-        return skip("Unsupported file extension");
-    };
-    let Some((old_text, new_text, is_new)) = build_change(&payload) else {
-        return skip("No content to check");
-    };
-    if new_text.trim().is_empty() {
-        return skip("No content to check");
+    if language_for_path(file_path).is_none() {
+        return skip("Non-code file");
     }
-    let is_test_file = payload
+    let is_test = hook_input
         .is_test_file
         .unwrap_or_else(|| is_test_path(file_path));
-    if !is_test_file {
+    if !is_test {
         return skip("Non-test file");
     }
 
-    let change = Change {
-        file_path: file_path.to_owned(),
-        language: plugin_language(spec.name),
-        new_text,
-        old_text,
-        is_new,
-        is_test_file,
+    let suppression = SuppressionFilter;
+    let suppressed = match hook_input.tool_name.as_str() {
+        "Edit" => suppression.is_file_suppressed(&hook_input.tool_input.new_string),
+        "MultiEdit" => hook_input
+            .tool_input
+            .edits
+            .iter()
+            .any(|edit| suppression.is_file_suppressed(&edit.new_string)),
+        _ => suppression.is_file_suppressed(get_content_to_check(hook_input)),
     };
-    let findings = TestDetector::new().detect(&change);
-    let findings = crate::filters::apply_filters(&findings, &change.new_text);
-    if findings.is_empty() {
-        return HookCheckResult::pass(SUCCESS_MESSAGE);
+    if suppressed {
+        return skip("Suppressed by test-checker: allow");
     }
-    HookCheckResult::block(format_hook_message(&findings, custom_prompt))
+
+    let detector = TestDetector::new();
+    let findings = match hook_input.tool_name.as_str() {
+        "Edit" => {
+            let old_string = hook_input.tool_input.old_string.as_str();
+            let new_string = hook_input.tool_input.new_string.as_str();
+            if new_string.is_empty() {
+                if old_string.is_empty() {
+                    return skip("No content to check");
+                }
+                // A deletion edit has no new content to parse, but it can still remove assertions.
+                if include_body_tests {
+                    rules::diff_findings(old_string, "", file_path)
+                } else {
+                    Vec::new()
+                }
+            } else {
+                detector.detect_edit(
+                    old_string,
+                    new_string,
+                    file_path,
+                    include_commented_out_tests,
+                    include_body_tests,
+                )
+            }
+        }
+        "MultiEdit" => {
+            if hook_input.tool_input.edits.is_empty() {
+                return skip("No content to check");
+            }
+            let mut findings = Vec::new();
+            for edit in &hook_input.tool_input.edits {
+                if edit.new_string.is_empty() {
+                    continue;
+                }
+                findings.extend(detector.detect_edit(
+                    &edit.old_string,
+                    &edit.new_string,
+                    file_path,
+                    include_commented_out_tests,
+                    include_body_tests,
+                ));
+            }
+            findings
+        }
+        _ => {
+            let content = get_content_to_check(hook_input);
+            if content.is_empty() {
+                return skip("No content to check");
+            }
+            detector.detect(
+                content,
+                file_path,
+                include_commented_out_tests,
+                include_body_tests,
+            )
+        }
+    };
+
+    if findings.is_empty() {
+        return success();
+    }
+
+    let filtered = apply_filters(&findings);
+    if filtered.is_empty() {
+        return success();
+    }
+
+    HookCheckResult::block(format_hook_message(&filtered, custom_prompt))
 }
 
 #[must_use]
 pub fn check_hook_input_json(input: &str, custom_prompt: &str) -> String {
-    serde_json::to_string(&check_hook_input(input, custom_prompt))
-        .unwrap_or_else(|_| fallback_json())
+    result_json(&check_hook_input(input, custom_prompt))
 }
 
-/// Runs the detector over a whole file's content, returning findings as JSON.
-///
-/// Mirrors comment-checker's `detect_comments_json`. Unsupported extensions
-/// yield `[]`; serialization never panics.
 #[must_use]
-pub fn detect_findings_json(content: &str, file_path: &str, is_test_file: bool) -> String {
-    let Some(spec) = language_for_path(file_path) else {
-        return String::from("[]");
-    };
-    let change = Change {
-        file_path: file_path.to_owned(),
-        language: plugin_language(spec.name),
-        new_text: content.to_owned(),
-        old_text: String::new(),
-        is_new: true,
-        is_test_file,
-    };
-    let findings = TestDetector::new().detect(&change);
-    let findings = crate::filters::apply_filters(&findings, &change.new_text);
-    serde_json::to_string(&findings).unwrap_or_else(|_| String::from("[]"))
+pub fn detect_findings_json(
+    content: &str,
+    file_path: &str,
+    include_commented_out_tests: bool,
+    include_body_tests: bool,
+) -> String {
+    if language_for_path(file_path).is_none() || !is_test_path(file_path) {
+        return "[]".to_string();
+    }
+    let detector = TestDetector::new();
+    let findings = detector.detect(
+        content,
+        file_path,
+        include_commented_out_tests,
+        include_body_tests,
+    );
+    match serde_json::to_string(&findings) {
+        Ok(json) => json,
+        Err(error) => fallback_json(&error.to_string()),
+    }
 }
 
-fn build_change(payload: &Payload) -> Option<(String, String, bool)> {
-    let input = &payload.tool_input;
-    if !input.edits.is_empty() {
-        let mut old_text = String::new();
-        let mut new_text = String::new();
-        for edit in &input.edits {
-            old_text.push_str(&edit.old_string);
-            old_text.push('\n');
-            new_text.push_str(&edit.new_string);
-            new_text.push('\n');
-        }
-        return Some((old_text, new_text, false));
-    }
-    match payload.tool_name.trim().to_lowercase().as_str() {
-        "write" | "create" => return Some((String::new(), input.content.clone(), true)),
-        "edit" | "patch" => {
-            return Some((input.old_string.clone(), input.new_string.clone(), false));
-        }
-        _ => {}
-    }
-    if !input.new_string.is_empty() {
-        Some((input.old_string.clone(), input.new_string.clone(), false))
-    } else if !input.content.is_empty() {
-        Some((String::new(), input.content.clone(), true))
+fn get_content_to_check(input: &HookInput) -> &str {
+    if input.tool_input.content.is_empty() {
+        input.tool_input.new_string.as_str()
     } else {
-        None
+        input.tool_input.content.as_str()
     }
 }
 
@@ -140,86 +245,21 @@ fn skip(reason: &str) -> HookCheckResult {
     HookCheckResult::pass(format!("[test-checker] Skipping: {reason}\n"))
 }
 
-fn fallback_json() -> String {
-    String::from("{\"exitCode\":0,\"message\":\"[test-checker] Skipping: Invalid arguments\"}")
+fn success() -> HookCheckResult {
+    HookCheckResult::pass("[test-checker] Success: No problematic tests found\n")
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::models::Payload;
-
-    #[test]
-    fn payload_given_write_input_deserializes_tool_fields() {
-        // given
-        let json = r#"{
-            "tool_name": "Write",
-            "tool_input": {
-                "file_path": "src/app.py",
-                "content": "print(1)",
-                "old_string": "old",
-                "new_string": "new",
-                "edits": [{ "old_string": "x", "new_string": "y" }]
-            }
-        }"#;
-
-        // when
-        let payload: Payload = serde_json::from_str(json).unwrap();
-
-        // then
-        assert_eq!(payload.tool_name, "Write");
-        assert_eq!(payload.tool_input.file_path, "src/app.py");
-        assert_eq!(payload.tool_input.content, "print(1)");
-        assert_eq!(payload.tool_input.old_string, "old");
-        assert_eq!(payload.tool_input.new_string, "new");
-        assert_eq!(payload.tool_input.edits.len(), 1);
-        assert_eq!(payload.tool_input.edits[0].old_string, "x");
-        assert_eq!(payload.tool_input.edits[0].new_string, "y");
+fn result_json(result: &HookCheckResult) -> String {
+    match serde_json::to_string(result) {
+        Ok(json) => json,
+        Err(error) => fallback_json(&error.to_string()),
     }
+}
 
-    #[test]
-    fn payload_given_absent_is_test_file_is_none() {
-        // given
-        let json = r#"{"tool_name":"Write","tool_input":{"file_path":"a.py"}}"#;
-
-        // when
-        let payload: Payload = serde_json::from_str(json).unwrap();
-
-        // then
-        assert_eq!(payload.is_test_file, None);
-    }
-
-    #[test]
-    fn payload_given_explicit_is_test_file_is_some() {
-        // given
-        let truthy =
-            r#"{"tool_name":"Write","tool_input":{"file_path":"a.py"},"is_test_file":true}"#;
-        let falsy =
-            r#"{"tool_name":"Write","tool_input":{"file_path":"a.py"},"is_test_file":false}"#;
-
-        // when / then
-        assert_eq!(
-            serde_json::from_str::<Payload>(truthy)
-                .unwrap()
-                .is_test_file,
-            Some(true)
-        );
-        assert_eq!(
-            serde_json::from_str::<Payload>(falsy).unwrap().is_test_file,
-            Some(false)
-        );
-    }
-
-    #[test]
-    fn payload_given_unknown_fields_ignores_them() {
-        // given
-        let json =
-            r#"{"tool_name":"Edit","unexpected":1,"tool_input":{"file_path":"a.py","extra":true}}"#;
-
-        // when
-        let payload: Payload = serde_json::from_str(json).unwrap();
-
-        // then
-        assert_eq!(payload.tool_name, "Edit");
-        assert_eq!(payload.tool_input.file_path, "a.py");
-    }
+fn fallback_json(error: &str) -> String {
+    serde_json::json!({
+        "exitCode": 1,
+        "message": format!("serialization failed: {error}"),
+    })
+    .to_string()
 }

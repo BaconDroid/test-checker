@@ -1,1053 +1,370 @@
-use test_checker::detector::{Change, TestDetector};
-use test_checker::models::Finding;
-use test_checker::rules::rule_ids;
+use test_checker::detector::{TestDetector, supports_test_bodies};
+use test_checker::language::language_for_path;
 
-fn make_change(
-    path: &str,
-    language: &'static str,
-    before: &str,
-    after: &str,
-    is_new: bool,
-) -> Change {
-    Change {
-        file_path: path.to_owned(),
-        language,
-        new_text: after.to_owned(),
-        old_text: before.to_owned(),
-        is_new,
-        is_test_file: true,
+const FRAMEWORK_CASES: [(&str, &str); 15] = [
+    (
+        "tests/test_app.py",
+        "def test_sums():\n    assert add(1, 2) == 3\n",
+    ),
+    (
+        "tests/app.test.js",
+        "it('sums', () => {\n  expect(add(1, 2)).toBe(3);\n});\n",
+    ),
+    (
+        "tests/app.test.ts",
+        "it('sums', () => {\n  expect(add(1, 2)).toBe(3);\n});\n",
+    ),
+    (
+        "tests/app.test.tsx",
+        "it('sums', () => {\n  expect(add(1, 2)).toBe(3);\n});\n",
+    ),
+    (
+        "tests/app_test.go",
+        "package app\n\nfunc TestSums(t *testing.T) {\n\tif got := add(1, 2); got != 3 {\n\t\tt.Errorf(\"got %d\", got)\n\t}\n}\n",
+    ),
+    (
+        "src/lib_test.rs",
+        "#[test]\nfn sums() {\n    assert_eq!(add(1, 2), 3);\n}\n",
+    ),
+    (
+        "test/app_test.rb",
+        "def test_sums\n  assert_equal 3, add(1, 2)\nend\n",
+    ),
+    (
+        "src/test/java/AppTest.java",
+        "class AppTest {\n  @Test\n  void sums() {\n    assertEquals(3, add(1, 2));\n  }\n}\n",
+    ),
+    (
+        "tests/AppTest.cs",
+        "class AppTest {\n  [Fact]\n  public void Sums() {\n    Assert.Equal(3, Add(1, 2));\n  }\n}\n",
+    ),
+    (
+        "tests/AppTest.php",
+        "<?php\nclass AppTest {\n  public function testSums() {\n    $this->assertEquals(3, add(1, 2));\n  }\n}\n",
+    ),
+    (
+        "src/test/kotlin/AppTest.kt",
+        "class AppTest {\n  @Test\n  fun sums() {\n    assertEquals(3, add(1, 2))\n  }\n}\n",
+    ),
+    (
+        "Tests/AppTests.swift",
+        "func testSums() {\n  XCTAssertEqual(add(1, 2), 3)\n}\n",
+    ),
+    (
+        "src/test/scala/AppSpec.scala",
+        "class AppSpec {\n  it(\"sums\") {\n    assert(add(1, 2) == 3)\n  }\n}\n",
+    ),
+    (
+        "test/sums_test.exs",
+        "defmodule SumsTest do\n  test \"sums\" do\n    assert add(1, 2) == 3\n  end\nend\n",
+    ),
+    (
+        "spec/sums_spec.lua",
+        "describe(\"sums\", function()\n  it(\"sums\", function()\n    assert.are.equal(3, add(1, 2))\n  end)\nend)\n",
+    ),
+];
+
+const WEAKEN_CASES: [(&str, &str); 15] = [
+    (
+        "tests/test_app.py",
+        "@pytest.mark.skip(reason=\"later\")\ndef test_sums():\n    assert add(1, 2) == 3\n",
+    ),
+    (
+        "tests/app.test.js",
+        "it.skip('sums', () => {\n  expect(add(1, 2)).toBe(3);\n});\n",
+    ),
+    (
+        "tests/app.test.ts",
+        "it.skip('sums', () => {\n  expect(add(1, 2)).toBe(3);\n});\n",
+    ),
+    (
+        "tests/app.test.tsx",
+        "it.skip('sums', () => {\n  expect(add(1, 2)).toBe(3);\n});\n",
+    ),
+    (
+        "tests/app_test.go",
+        "package app\n\nfunc TestSums(t *testing.T) {\n\tt.Skip(\"later\")\n\tif got := add(1, 2); got != 3 {\n\t\tt.Errorf(\"got %d\", got)\n\t}\n}\n",
+    ),
+    (
+        "src/lib_test.rs",
+        "#[test]\n#[ignore]\nfn sums() {\n    assert_eq!(add(1, 2), 3);\n}\n",
+    ),
+    (
+        "test/app_test.rb",
+        "xit(\"sums\") do\n  expect(add(1, 2)).to eq(3)\nend\n",
+    ),
+    (
+        "src/test/java/AppTest.java",
+        "class AppTest {\n  @Test\n  @Disabled\n  void sums() {\n    assertEquals(3, add(1, 2));\n  }\n}\n",
+    ),
+    (
+        "tests/AppTest.cs",
+        "class AppTest {\n  [Fact]\n  [Ignore]\n  public void Sums() {\n    Assert.Equal(3, Add(1, 2));\n  }\n}\n",
+    ),
+    (
+        "tests/AppTest.php",
+        "<?php\nclass AppTest {\n  public function testSums() {\n    $this->markTestSkipped('later');\n    $this->assertEquals(3, add(1, 2));\n  }\n}\n",
+    ),
+    (
+        "src/test/kotlin/AppTest.kt",
+        "class AppTest {\n  @Test\n  @Ignore\n  fun sums() {\n    assertEquals(3, add(1, 2))\n  }\n}\n",
+    ),
+    (
+        "Tests/AppTests.swift",
+        "func testSums() throws {\n  throw XCTSkip(\"later\")\n  XCTAssertEqual(add(1, 2), 3)\n}\n",
+    ),
+    (
+        "src/test/scala/AppSpec.scala",
+        "class AppSpec {\n  it(\"sums\") {\n    cancel(\"later\")\n    assert(add(1, 2) == 3)\n  }\n}\n",
+    ),
+    (
+        "test/sums_test.exs",
+        "defmodule SumsTest do\n  @tag :skip\n  test \"sums\" do\n    assert add(1, 2) == 3\n  end\nend\n",
+    ),
+    (
+        "spec/sums_spec.lua",
+        "describe(\"sums\", function()\n  it(\"sums\", function()\n    pending()\n    assert.are.equal(3, add(1, 2))\n  end)\nend)\n",
+    ),
+];
+
+const NON_FRAMEWORK_CASES: [(&str, &str); 16] = [
+    ("tests/clean.sh", "echo hello\n"),
+    ("tests/clean.c", "int main(void) { return 0; }\n"),
+    ("tests/clean.cpp", "int main() { return 0; }\n"),
+    ("tests/clean.css", "body { color: red; }\n"),
+    ("tests/clean.cue", "package x\n"),
+    ("Dockerfile", "FROM debian\n"),
+    ("tests/clean.elm", "module Main exposing (..)\n"),
+    ("tests/clean.groovy", "def x = 1\n"),
+    ("tests/clean.hcl", "resource \"x\" \"y\" {}\n"),
+    ("tests/clean.html", "<html><body></body></html>\n"),
+    ("tests/clean.ml", "let x = 1\n"),
+    ("tests/clean.proto", "message X {}\n"),
+    ("tests/clean.sql", "SELECT 1;\n"),
+    ("tests/clean.svelte", "<div></div>\n"),
+    ("tests/clean.toml", "x = 1\n"),
+    ("tests/clean.yaml", "x: 1\n"),
+];
+
+#[test]
+fn detect_given_python_clean_test_returns_no_findings() {
+    // given
+    let detector = TestDetector::new();
+
+    // when
+    let findings = detector.detect(FRAMEWORK_CASES[0].1, "tests/test_app.py", true, true);
+
+    // then
+    assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+}
+
+#[test]
+fn detect_given_commented_out_test_reports_commented_out_test() {
+    // given
+    let detector = TestDetector::new();
+    let source = "def test_sums():\n    x = 1\n    # assert x == 2\n";
+
+    // when
+    let findings = detector.detect(source, "tests/test_app.py", true, true);
+
+    // then
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "commented-out-test")
+    );
+}
+
+#[test]
+fn detect_given_commented_out_tests_disabled_ignores_comments() {
+    // given
+    let detector = TestDetector::new();
+    let source = "def test_sums():\n    x = 1\n    # assert x == 2\n";
+
+    // when
+    let findings = detector.detect(source, "tests/test_app.py", false, true);
+
+    // then
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "commented-out-test")
+    );
+}
+
+#[test]
+fn detect_given_body_tests_disabled_ignores_weakening() {
+    // given
+    let detector = TestDetector::new();
+    let source = "def test_sums():\n    @pytest.mark.skip\n    assert add(1, 2) == 3\n";
+
+    // when
+    let findings = detector.detect(source, "tests/test_app.py", true, false);
+
+    // then
+    assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+}
+
+#[test]
+fn detect_edit_given_removed_assertion_reports_assertion_removed() {
+    // given
+    let detector = TestDetector::new();
+    let old = "def test_sums():\n    assert add(1, 2) == 3\n    assert add(2, 2) == 4\n";
+    let new = "def test_sums():\n    assert add(1, 2) == 3\n";
+
+    // when
+    let findings = detector.detect_edit(old, new, "tests/test_app.py", true, true);
+
+    // then
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "assertion-removed")
+    );
+}
+
+#[test]
+fn detect_edit_given_unchanged_content_returns_no_findings() {
+    // given
+    let detector = TestDetector::new();
+    let source = "def test_sums():\n    assert add(1, 2) == 3\n";
+
+    // when
+    let findings = detector.detect_edit(source, source, "tests/test_app.py", true, true);
+
+    // then
+    assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+}
+
+#[test]
+fn detect_given_commented_out_test_inside_html_script_reports_it() {
+    // given
+    let detector = TestDetector::new();
+    let source = "<html><body>\n<script>\n// it('sums', () => { expect(add(1, 2)).toBe(3); });\n</script>\n</body></html>";
+
+    // when
+    let findings = detector.detect(source, "tests/page.html", true, true);
+
+    // then
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "commented-out-test"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_given_python_decorator_skip_reports_skip_added() {
+    // given
+    let detector = TestDetector::new();
+    let source = "@pytest.mark.skip\ndef test_sums():\n    assert add(1, 2) == 3\n";
+
+    // when
+    let findings = detector.detect(source, "tests/test_app.py", true, true);
+
+    // then
+    assert!(findings.iter().any(|finding| finding.rule == "skip-added"));
+}
+
+#[test]
+fn detect_edit_given_same_line_added_to_two_tests_does_not_report_duplicate() {
+    // given
+    let detector = TestDetector::new();
+    let old = "def test_a():\n    a()\ndef test_b():\n    b()\n";
+    let new = "def test_a():\n    a()\n    bump()\ndef test_b():\n    b()\n    bump()\n";
+
+    // when
+    let findings = detector.detect_edit(old, new, "tests/test_app.py", true, true);
+
+    // then
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "duplicate-test"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_given_two_identical_tests_reports_duplicate_test() {
+    // given
+    let detector = TestDetector::new();
+    let source =
+        "def test_a():\n    assert compute() == 1\ndef test_b():\n    assert compute() == 1\n";
+
+    // when
+    let findings = detector.detect(source, "tests/test_app.py", true, true);
+
+    // then
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "duplicate-test"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn pipeline_coverage_given_every_language_parses_and_clean_fixtures_report_nothing() {
+    // given
+    let detector = TestDetector::new();
+    let mut failures = Vec::new();
+
+    // when
+    for (path, source) in FRAMEWORK_CASES.iter().chain(NON_FRAMEWORK_CASES.iter()) {
+        if language_for_path(path).is_none() {
+            failures.push(format!("{path}: grammar did not resolve"));
+            continue;
+        }
+        let findings = detector.detect(source, path, true, true);
+        if !findings.is_empty() {
+            failures.push(format!("{path}: clean fixture produced {findings:?}"));
+        }
     }
-}
-
-fn rule_present(findings: &[Finding], rule: &str) -> bool {
-    findings.iter().any(|finding| finding.rule == rule)
-}
-
-// --- Catalog ---------------------------------------------------------------
-
-#[test]
-fn rule_ids_given_catalog_returns_eleven_ordered_ids() {
-    // given / when
-    let ids = rule_ids();
 
     // then
-    assert_eq!(ids.len(), 11);
-    assert_eq!(
-        ids,
-        vec![
-            "skip-focus-added",
-            "tautological-assertion",
-            "empty-test",
-            "unknown-test",
-            "gutted-test",
-            "swallowed-error",
-            "duplicate-test",
-            "mock-of-sut",
-            "over-mocking",
-            "assertion-roulette",
-            "redundant-assertion",
-        ]
-    );
+    assert!(failures.is_empty(), "coverage failures: {failures:#?}");
 }
 
-// --- Traversal robustness --------------------------------------------------
-
 #[test]
-fn detect_given_deeply_nested_parentheses_returns_without_aborting() {
-    // given: deeply nested input that previously overflowed the recursive walk
-    let depth = 30_000;
-    let payload = format!(
-        "def test_deep():\n    assert {}{}\n",
-        "(".repeat(depth),
-        ")".repeat(depth)
-    );
-    let change = make_change("tests/test_deep.py", "python", "", &payload, true);
-
-    // when: iterative traversal must not abort the process
-    let findings: Vec<Finding> = TestDetector::new().detect(&change);
-
-    // then: the call returns a finding list rather than crashing
-    assert!(!rule_present(&findings, "swallowed-error"));
-}
-
-// --- skip-focus-added ------------------------------------------------------
-
-#[test]
-fn skip_focus_added_given_skipped_test_reports_rule() {
+fn pipeline_coverage_given_framework_languages_the_test_body_query_compiles_and_captures() {
     // given
-    let change = make_change(
-        "src/app.test.ts",
-        "ts",
-        "",
-        "it.skip(\"a\", () => {});",
-        true,
-    );
+    let detector = TestDetector::new();
+    let mut failures = Vec::new();
 
     // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(rule_present(&findings, "skip-focus-added"));
-}
-
-#[test]
-fn skip_focus_added_given_plain_test_skips_rule() {
-    // given
-    let change = make_change(
-        "src/app.test.ts",
-        "ts",
-        "",
-        "it(\"a\", () => { expect(x).toBe(1); });",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(!rule_present(&findings, "skip-focus-added"));
-}
-
-// --- tautological-assertion ------------------------------------------------
-
-#[test]
-fn tautological_assertion_given_always_true_reports_rule() {
-    // given
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "",
-        "def test_a():\n    assert True\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(rule_present(&findings, "tautological-assertion"));
-}
-
-#[test]
-fn tautological_assertion_given_comparison_skips_rule() {
-    // given
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "",
-        "def test_a():\n    assert foo() == bar()\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(!rule_present(&findings, "tautological-assertion"));
-}
-
-#[test]
-fn tautological_assertion_given_two_identical_added_lines_reports_each_line() {
-    // given: the same tautology added in two separate tests
-    let change = make_change(
-        "tests/test_two.py",
-        "python",
-        "",
-        "def test_a():\n    assert True\n\ndef test_b():\n    assert True\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then: each added occurrence keeps its own line, so neither collapses
-    let lines: Vec<usize> = findings
-        .iter()
-        .filter(|finding| finding.rule == "tautological-assertion")
-        .map(|finding| finding.line)
-        .collect();
-    assert_eq!(lines, vec![2, 5]);
-}
-
-// --- empty-test ------------------------------------------------------------
-
-#[test]
-fn empty_test_given_pass_body_reports_rule() {
-    // given
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "",
-        "def test_a():\n    pass\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(rule_present(&findings, "empty-test"));
-}
-
-#[test]
-fn empty_test_given_assertion_body_skips_rule() {
-    // given
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "",
-        "def test_a():\n    assert foo() == bar()\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(!rule_present(&findings, "empty-test"));
-}
-
-// --- Block extraction for every grammar ------------------------------------
-
-#[test]
-fn empty_test_given_go_empty_body_reports_rule() {
-    // given
-    let change = make_change(
-        "pkg/foo_test.go",
-        "go",
-        "",
-        "package foo\n\nfunc TestA(t *testing.T) {\n}\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(rule_present(&findings, "empty-test"));
-}
-
-#[test]
-fn unknown_test_given_go_assertion_free_body_reports_rule() {
-    // given
-    let change = make_change(
-        "pkg/foo_test.go",
-        "go",
-        "",
-        "package foo\n\nfunc TestA(t *testing.T) {\n\tdowork()\n}\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(rule_present(&findings, "unknown-test"));
-}
-
-#[test]
-fn empty_test_given_rust_empty_body_reports_rule() {
-    // given
-    let change = make_change(
-        "src/foo_test.rs",
-        "rust",
-        "",
-        "#[test]\nfn t() {\n}\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(rule_present(&findings, "empty-test"));
-}
-
-#[test]
-fn unknown_test_given_rust_assertion_free_body_reports_rule() {
-    // given
-    let change = make_change(
-        "src/foo_test.rs",
-        "rust",
-        "",
-        "#[test]\nfn t() {\n    do_work();\n}\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(rule_present(&findings, "unknown-test"));
-}
-
-#[test]
-fn empty_test_given_js_empty_body_reports_rule() {
-    // given
-    let change = make_change(
-        "src/foo.test.ts",
-        "ts",
-        "",
-        "it(\"a\", () => {\n});\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(rule_present(&findings, "empty-test"));
-}
-
-#[test]
-fn unknown_test_given_js_assertion_free_body_reports_rule() {
-    // given
-    let change = make_change(
-        "src/foo.test.ts",
-        "ts",
-        "",
-        "it(\"a\", () => {\n  doWork();\n});\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(rule_present(&findings, "unknown-test"));
-}
-
-// --- unknown-test ----------------------------------------------------------
-
-#[test]
-fn unknown_test_given_assertion_free_body_reports_rule() {
-    // given
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "",
-        "def test_a():\n    do_work()\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(rule_present(&findings, "unknown-test"));
-}
-
-#[test]
-fn unknown_test_given_assertion_body_skips_rule() {
-    // given
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "",
-        "def test_a():\n    assert foo() == bar()\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(!rule_present(&findings, "unknown-test"));
-}
-
-// --- gutted-test -----------------------------------------------------------
-
-#[test]
-fn gutted_test_given_removed_only_assertion_reports_rule() {
-    // given
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "def test_a():\n    assert foo() == 1\n",
-        "def test_a():\n    pass\n",
-        false,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(rule_present(&findings, "gutted-test"));
-}
-
-#[test]
-fn gutted_test_given_replaced_assertion_skips_rule() {
-    // given
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "def test_a():\n    assert foo() == 1\n",
-        "def test_a():\n    assert bar() == 2\n",
-        false,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(!rule_present(&findings, "gutted-test"));
-}
-
-#[test]
-fn gutted_test_given_duplicate_removed_assertion_reports_removed_occurrence_line() {
-    // given: one of two identical assertions is removed
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "def test_a():\n    assert foo() == 1\n    assert foo() == 1\n",
-        "def test_a():\n    assert foo() == 1\n",
-        false,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then: the finding points at the removed (second) occurrence at line 3,
-    // not the surviving first match at line 2
-    let gutted: Vec<usize> = findings
-        .iter()
-        .filter(|finding| finding.rule == "gutted-test")
-        .map(|finding| finding.line)
-        .collect();
-    assert_eq!(gutted, vec![3]);
-}
-
-// --- swallowed-error -------------------------------------------------------
-
-#[test]
-fn swallowed_error_given_python_except_pass_reports_rule() {
-    // given
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "",
-        "def test_a():\n    try:\n        do_work()\n    except Exception:\n        pass\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(rule_present(&findings, "swallowed-error"));
-}
-
-#[test]
-fn swallowed_error_given_python_bare_except_pass_reports_rule() {
-    // given
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "",
-        "def test_a():\n    try:\n        do_work()\n    except:\n        pass\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(rule_present(&findings, "swallowed-error"));
-}
-
-#[test]
-fn swallowed_error_given_named_exception_with_pass_does_not_fire() {
-    // given
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "",
-        "def test_a():\n    try:\n        do_work()\n    except ValidationError:\n        password = x\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(!rule_present(&findings, "swallowed-error"));
-}
-
-#[test]
-fn swallowed_error_given_python_except_reraise_skips_rule() {
-    // given
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "",
-        "def test_a():\n    try:\n        do_work()\n    except Exception:\n        raise\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(!rule_present(&findings, "swallowed-error"));
-}
-
-// --- duplicate-test --------------------------------------------------------
-
-#[test]
-fn duplicate_test_given_identical_bodies_reports_rule() {
-    // given
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "",
-        "def test_a():\n    assert foo() == 1\n\ndef test_b():\n    assert foo() == 1\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(rule_present(&findings, "duplicate-test"));
-}
-
-#[test]
-fn duplicate_test_given_distinct_bodies_skips_rule() {
-    // given
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "",
-        "def test_a():\n    assert foo() == 1\n\ndef test_b():\n    assert foo() == 2\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(!rule_present(&findings, "duplicate-test"));
-}
-
-// --- mock-of-sut -----------------------------------------------------------
-
-#[test]
-fn mock_of_sut_given_mocked_module_stem_reports_rule() {
-    // given
-    let change = make_change(
-        "src/foo.test.ts",
-        "ts",
-        "",
-        "vi.mock('./foo', () => ({}));",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(rule_present(&findings, "mock-of-sut"));
-}
-
-#[test]
-fn mock_of_sut_given_unrelated_module_skips_rule() {
-    // given
-    let change = make_change(
-        "src/foo.test.ts",
-        "ts",
-        "",
-        "vi.mock('./bar', () => ({}));",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(!rule_present(&findings, "mock-of-sut"));
-}
-
-#[test]
-fn mock_of_sut_given_spy_on_imported_name_reports_rule() {
-    // given
-    let change = make_change(
-        "src/foo.test.ts",
-        "ts",
-        "",
-        "import { helper } from './foo';\nvi.spyOn(helper, 'run');\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(rule_present(&findings, "mock-of-sut"));
-}
-
-#[test]
-fn mock_of_sut_given_spy_on_unimported_name_skips_rule() {
-    // given
-    let change = make_change(
-        "src/foo.test.ts",
-        "ts",
-        "",
-        "import { helper } from './foo';\nvi.spyOn(other, 'run');\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(!rule_present(&findings, "mock-of-sut"));
-}
-
-// --- over-mocking ----------------------------------------------------------
-
-#[test]
-fn over_mocking_given_added_mock_identifier_reports_rule() {
-    // given
-    let change = make_change(
-        "src/service.test.ts",
-        "ts",
-        "",
-        "const mockClient = createMock();",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(rule_present(&findings, "over-mocking"));
-}
-
-#[test]
-fn over_mocking_given_added_plain_identifier_skips_rule() {
-    // given
-    let change = make_change(
-        "src/service.test.ts",
-        "ts",
-        "",
-        "const client = createClient();",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(!rule_present(&findings, "over-mocking"));
-}
-
-#[test]
-fn over_mocking_given_dispatch_call_skips_rule() {
-    // given: `dispatch` merely contains `patch`; it is not a `patch(` call
-    let change = make_change(
-        "src/service.test.ts",
-        "ts",
-        "",
-        "const result = dispatch(event);",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(!rule_present(&findings, "over-mocking"));
-}
-
-// --- assertion-roulette ----------------------------------------------------
-
-#[test]
-fn assertion_roulette_given_unlabeled_assertions_reports_rule() {
-    // given
-    let change = make_change(
-        "src/app.test.ts",
-        "ts",
-        "",
-        "it(\"a\", () => {\n  expect(foo()).toBe(1);\n  expect(bar()).toBe(2);\n});",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(rule_present(&findings, "assertion-roulette"));
-}
-
-#[test]
-fn assertion_roulette_given_labeled_assertions_skips_rule() {
-    // given
-    let change = make_change(
-        "src/app.test.ts",
-        "ts",
-        "",
-        "it(\"a\", () => {\n  expect(foo(), \"one\").toBe(1);\n  expect(bar(), \"two\").toBe(2);\n});",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(!rule_present(&findings, "assertion-roulette"));
-}
-
-// --- redundant-assertion ---------------------------------------------------
-
-#[test]
-fn redundant_assertion_given_repeated_line_reports_rule() {
-    // given
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "",
-        "def test_a():\n    assert foo() == 1\n    assert foo() == 1\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(rule_present(&findings, "redundant-assertion"));
-}
-
-#[test]
-fn redundant_assertion_given_distinct_lines_skips_rule() {
-    // given
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "",
-        "def test_a():\n    assert foo() == 1\n    assert bar() == 2\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(!rule_present(&findings, "redundant-assertion"));
-}
-
-#[test]
-fn redundant_assertion_given_two_blocks_with_duplicates_reports_each_block_line() {
-    // given: two tests each repeating the same assertion
-    let change = make_change(
-        "src/a.test.ts",
-        "ts",
-        "",
-        "test('a', () => {\n  expect(x).toBe(1);\n  expect(x).toBe(1);\n});\ntest('b', () => {\n  expect(x).toBe(1);\n  expect(x).toBe(1);\n});\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then: each test reports its own duplicate, in its own block range
-    let redundant: Vec<usize> = findings
-        .iter()
-        .filter(|finding| finding.rule == "redundant-assertion")
-        .map(|finding| finding.line)
-        .collect();
-    assert_eq!(redundant, vec![2, 6]);
-}
-
-// --- JS/TS capture scope ---------------------------------------------------
-
-#[test]
-fn unknown_test_given_js_hooks_and_containers_skips_them() {
-    // given: hook, container and step calls that are not test bodies
-    let bodies = [
-        "test.beforeEach(() => {\n  setup();\n});\n",
-        "describe(\"group\", () => {\n  setup();\n});\n",
-        "test.step(\"s\", async () => {\n  setup();\n});\n",
-    ];
-    for body in bodies {
-        let change = make_change("src/a.test.ts", "ts", "", body, true);
-
-        // when
-        let findings = TestDetector::new().detect(&change);
-
-        // then: no test-body rule fires for a non-test call
-        assert!(!rule_present(&findings, "unknown-test"), "body: {body}");
-        assert!(!rule_present(&findings, "empty-test"), "body: {body}");
+    for index in 0..FRAMEWORK_CASES.len() {
+        let path = FRAMEWORK_CASES[index].0;
+        let weakening = WEAKEN_CASES[index].1;
+        let Some(name) = language_for_path(path) else {
+            failures.push(format!("{path}: grammar did not resolve"));
+            continue;
+        };
+        if !supports_test_bodies(name) {
+            failures.push(format!("{path} ({name}): test-body query did not compile"));
+            continue;
+        }
+        let findings = detector.detect(weakening, path, true, true);
+        if !findings.iter().any(|finding| finding.rule == "skip-added") {
+            failures.push(format!(
+                "{path} ({name}): captured body did not yield skip-added: {findings:?}"
+            ));
+        }
     }
+
+    // then
+    assert!(failures.is_empty(), "coverage failures: {failures:#?}");
 }
 
 #[test]
-fn redundant_assertion_given_outer_test_wrapping_step_reports_outer_finding() {
-    // given: a real outer test wrapping a `test.step`; the step must not be
-    // captured as its own block and must not drop the outer test
-    let change = make_change(
-        "src/a.test.ts",
-        "ts",
-        "",
-        "test('outer', async () => {\n  await test.step('s', async () => {\n    expect(a).toBe(1);\n  });\n  expect(a).toBe(1);\n});\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then: the outer test's duplicate assertion is reported at its own line
-    let redundant: Vec<usize> = findings
-        .iter()
-        .filter(|finding| finding.rule == "redundant-assertion")
-        .map(|finding| finding.line)
-        .collect();
-    assert_eq!(redundant, vec![5]);
-}
-
-// --- Regression: assertion / capture correctness ---------------------------
-
-#[test]
-fn unknown_test_given_rust_assert_macros_skips_rule() {
-    // given: every Rust assertion macro form must count as an assertion
-    let bodies = [
-        "#[test]\nfn t() {\n    assert!(x);\n}\n",
-        "#[test]\nfn t() {\n    assert_eq!(2 + 2, 4);\n}\n",
-        "#[test]\nfn t() {\n    assert_ne!(a, b);\n}\n",
-        "#[test]\nfn t() {\n    debug_assert!(x);\n}\n",
-    ];
-    for body in bodies {
-        let change = make_change("src/foo_test.rs", "rust", "", body, true);
-
-        // when
-        let findings = TestDetector::new().detect(&change);
-
-        // then
-        assert!(!rule_present(&findings, "unknown-test"), "body: {body}");
+fn pipeline_coverage_given_non_framework_languages_have_no_test_body_query() {
+    // then
+    for (path, _) in NON_FRAMEWORK_CASES {
+        let name = language_for_path(path).unwrap_or_default();
+        assert!(
+            !supports_test_bodies(name),
+            "{path} ({name}) unexpectedly has a test-body query"
+        );
     }
-}
-
-#[test]
-fn unknown_test_given_tokio_and_rstest_attributes_reports_rule() {
-    // given: attribute macros beyond `#[test]` must still capture the body,
-    // while `#[cfg(test)]` stays excluded
-    let captured = [
-        "#[tokio::test]\nasync fn t() {\n    do_work();\n}\n",
-        "#[rstest]\nfn t() {\n    do_work();\n}\n",
-    ];
-    for body in captured {
-        let change = make_change("src/foo_test.rs", "rust", "", body, true);
-
-        // when
-        let findings = TestDetector::new().detect(&change);
-
-        // then
-        assert!(rule_present(&findings, "unknown-test"), "body: {body}");
-    }
-    let cfg = "#[cfg(test)]\nfn t() {\n    do_work();\n}\n";
-    let change = make_change("src/foo_test.rs", "rust", "", cfg, true);
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(!rule_present(&findings, "unknown-test"), "body: {cfg}");
-}
-
-#[test]
-fn unknown_test_given_edited_block_with_trailing_comment_reports_rule() {
-    // given: an edit adds a body line whose trailing comment is stripped when
-    // the added-line multiset is keyed
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "def test_a():\n    pass\n",
-        "def test_a():\n    do_work()  # wip\n",
-        false,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(rule_present(&findings, "unknown-test"));
-}
-
-#[test]
-fn unknown_test_given_trivial_body_skips_rule() {
-    // given: a `pass` body is empty-test, not also unknown-test
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "",
-        "def test_a():\n    pass\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(rule_present(&findings, "empty-test"));
-    assert!(!rule_present(&findings, "unknown-test"));
-}
-
-#[test]
-fn unknown_test_given_describe_container_skips_container_block() {
-    // given: a `describe` wraps an `it`; only the inner block is a test body
-    let change = make_change(
-        "src/app.test.ts",
-        "ts",
-        "",
-        "describe(\"group\", () => {\n  it(\"a\", () => {\n    doWork();\n  });\n});\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    let unknown: Vec<_> = findings
-        .iter()
-        .filter(|finding| finding.rule == "unknown-test")
-        .collect();
-    assert_eq!(unknown.len(), 1);
-    assert_eq!(unknown[0].line, 2);
-}
-
-#[test]
-fn assertion_roulette_given_python_assert_messages_skips_rule() {
-    // given: two Python asserts, each carrying a trailing message
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "",
-        "def test_a():\n    assert a == b, \"first\"\n    assert c == d, \"second\"\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(!rule_present(&findings, "assertion-roulette"));
-}
-
-#[test]
-fn mock_of_sut_given_python_dispatch_call_skips_rule() {
-    // given: `dispatch(` only contains `patch(`; it is not a patch call
-    let change = make_change(
-        "tests/test_evt.py",
-        "python",
-        "",
-        "def test_evt():\n    dispatch(\"evt\")\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert!(!rule_present(&findings, "mock-of-sut"));
-}
-
-#[test]
-fn detect_pipeline_given_allow_marker_near_one_identical_tautology_keeps_the_other() {
-    // given: two identical tautologies, an allow marker only near the first
-    let change = make_change(
-        "tests/test_two.py",
-        "python",
-        "",
-        "def test_a():\n    # test-guard: allow\n    assert True\n\ndef test_b():\n    assert True\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-    let findings = test_checker::filters::apply_filters(&findings, &change.new_text);
-
-    // then: the marker suppresses only the first tautology; the second at line
-    // 6 survives instead of being hidden by the collapsed first-match finding
-    let lines: Vec<usize> = findings
-        .iter()
-        .filter(|finding| finding.rule == "tautological-assertion")
-        .map(|finding| finding.line)
-        .collect();
-    assert_eq!(lines, vec![6]);
-}
-
-// --- Cross-cutting gates ---------------------------------------------------
-
-#[test]
-fn detect_given_non_test_file_yields_no_findings() {
-    // given
-    let mut change = make_change(
-        "src/app.py",
-        "python",
-        "",
-        "def test_a():\n    assert True\n",
-        true,
-    );
-    change.is_test_file = false;
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert_eq!(findings, Vec::<Finding>::new());
-}
-
-#[test]
-fn detect_given_disable_file_marker_suppresses_all_rules() {
-    // given
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "",
-        "def test_a():\n    assert True\n# test-guard-disable-file\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-
-    // then
-    assert_eq!(findings, Vec::<Finding>::new());
-}
-
-#[test]
-fn detect_pipeline_given_allow_marker_suppresses_nearby_finding() {
-    // given
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "",
-        "def test_a():\n    # test-guard: allow\n    assert True\n",
-        true,
-    );
-
-    // when: detect captures the finding, then the suppression filter drops it
-    let findings = TestDetector::new().detect(&change);
-    let findings = test_checker::filters::apply_filters(&findings, &change.new_text);
-
-    // then
-    assert_eq!(findings, Vec::<Finding>::new());
-}
-
-#[test]
-fn detect_pipeline_given_finding_far_from_marker_keeps_it() {
-    // given: the tautology is 5 lines above the only allow marker
-    let change = make_change(
-        "tests/test_a.py",
-        "python",
-        "",
-        "def test_a():\n    assert True\n\n\n\n\n# test-guard: allow\n",
-        true,
-    );
-
-    // when
-    let findings = TestDetector::new().detect(&change);
-    let findings = test_checker::filters::apply_filters(&findings, &change.new_text);
-
-    // then
-    assert!(rule_present(&findings, "tautological-assertion"));
 }

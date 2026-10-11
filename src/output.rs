@@ -1,114 +1,101 @@
-use std::collections::HashMap;
-
 use crate::models::Finding;
 
-/// Imperative message emitted when no `--prompt` is given. The `{{findings}}`
-/// placeholder receives the grouped XML blocks.
-pub const DEFAULT_TEMPLATE: &str =
-    "TEST QUALITY DETECTED:\n{{findings}}\n\nFix the cause, do not weaken the test.";
-
-/// Renders one file's findings as a `<findings>` block.
 #[must_use]
 pub fn build_findings_xml(findings: &[Finding], file_path: &str) -> String {
-    let refs: Vec<&Finding> = findings.iter().collect();
-    build_findings_xml_refs(&refs, file_path)
-}
-
-/// Renders one file's findings as a `<findings>` block, borrowing each finding
-/// so grouping never clones the findings it renders.
-#[must_use]
-pub fn build_findings_xml_refs(findings: &[&Finding], file_path: &str) -> String {
     if findings.is_empty() {
         return String::new();
     }
-    let mut output = String::with_capacity(32 + file_path.len() + findings.len() * 64);
-    output.push_str("<findings file=\"");
-    push_escaped_attr(&mut output, file_path);
-    output.push_str("\">\n");
-    let mut line_number = itoa::Buffer::new();
+
+    let mut output = String::with_capacity(24 + file_path.len() + findings.len() * 96);
+    push_findings_xml_header(&mut output, file_path);
     for finding in findings {
-        output.push_str("<finding line-number=\"");
-        output.push_str(line_number.format(finding.line));
-        output.push_str("\" rule=\"");
-        output.push_str(finding.rule);
-        output.push_str("\" confidence=\"");
-        output.push_str(finding.confidence.as_str());
-        output.push_str("\">");
-        push_escaped(&mut output, finding.message.as_str());
-        output.push_str("</finding>\n");
+        push_finding_xml(&mut output, finding);
     }
     output.push_str("</findings>");
     output
 }
 
-/// Renders the stderr message for a non-empty finding set. A non-empty
-/// `custom_prompt` replaces the default; its `{{findings}}` placeholder is
-/// substituted with the grouped XML.
+fn push_escaped_text(output: &mut String, text: &str) {
+    for character in text.chars() {
+        match character {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            _ => output.push(character),
+        }
+    }
+}
+
+fn push_escaped_attribute(output: &mut String, text: &str) {
+    for character in text.chars() {
+        match character {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            '"' => output.push_str("&quot;"),
+            _ => output.push(character),
+        }
+    }
+}
+
+fn push_findings_xml_header(output: &mut String, file_path: &str) {
+    output.push_str("<findings file=\"");
+    push_escaped_attribute(output, file_path);
+    output.push_str("\">\n");
+}
+
+fn push_finding_xml(output: &mut String, finding: &Finding) {
+    output.push_str("\t<finding line-number=\"");
+    output.push_str(&finding.line_number.to_string());
+    output.push_str("\" rule=\"");
+    push_escaped_attribute(output, &finding.rule);
+    output.push_str("\" confidence=\"");
+    output.push_str(finding.confidence.as_str());
+    output.push_str("\">");
+    push_escaped_text(output, &finding.message);
+    output.push_str("</finding>\n");
+}
+
 #[must_use]
 pub fn format_hook_message(findings: &[Finding], custom_prompt: &str) -> String {
     if findings.is_empty() {
         return String::new();
     }
-    let blocks = findings_xml(findings);
-    let template = if custom_prompt.is_empty() {
-        DEFAULT_TEMPLATE
-    } else {
-        custom_prompt
-    };
-    template.replace("{{findings}}", &blocks)
-}
 
-fn findings_xml(findings: &[Finding]) -> String {
-    let mut by_file: HashMap<&str, Vec<&Finding>> = HashMap::with_capacity(findings.len());
-    let mut order: Vec<&str> = Vec::new();
-    for finding in findings {
-        let file = finding.file.as_str();
-        match by_file.entry(file) {
-            std::collections::hash_map::Entry::Occupied(mut entry) => entry.get_mut().push(finding),
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(vec![finding]);
-                order.push(file);
-            }
-        }
-    }
-    let mut blocks = Vec::with_capacity(order.len());
-    for file in order {
-        if let Some(items) = by_file.get(file) {
-            blocks.push(build_findings_xml_refs(items, file));
-        }
-    }
-    blocks.join("\n")
-}
+    let file_path = findings
+        .first()
+        .map_or("", |finding| finding.file_path.as_str());
+    let mut findings_xml = build_findings_xml(findings, file_path);
+    findings_xml.push('\n');
 
-fn push_escaped(output: &mut String, value: &str) {
-    if !value.contains(['&', '<', '>']) {
-        output.push_str(value);
-        return;
+    if !custom_prompt.is_empty() {
+        return custom_prompt.replace("{{findings}}", &findings_xml);
     }
-    for ch in value.chars() {
-        match ch {
-            '&' => output.push_str("&amp;"),
-            '<' => output.push_str("&lt;"),
-            '>' => output.push_str("&gt;"),
-            _ => output.push(ch),
-        }
-    }
-}
 
-/// Escapes a payload-controlled attribute value, additionally folding `"` so
-/// it cannot close the surrounding XML attribute.
-fn push_escaped_attr(output: &mut String, value: &str) {
-    if !value.contains(['&', '<', '>', '"']) {
-        output.push_str(value);
-        return;
-    }
-    for ch in value.chars() {
-        match ch {
-            '&' => output.push_str("&amp;"),
-            '<' => output.push_str("&lt;"),
-            '>' => output.push_str("&gt;"),
-            '"' => output.push_str("&quot;"),
-            _ => output.push(ch),
-        }
-    }
+    let mut output = String::new();
+    output.push_str("TEST-WEAKENING DETECTED - IMMEDIATE ACTION REQUIRED\n\n");
+    output.push_str("Your recent change weakens a test. This triggered the hook and requires immediate action.\n");
+    output.push_str("STOP: do not modify the test to make it pass. If the test is wrong, stop and tell the user instead of weakening it.\n\n");
+    output.push_str("CRITICAL WARNING: This hook message MUST NEVER be ignored, even if you receive it multiple times.\n");
+    output.push_str(
+        "You MUST provide a corresponding explanation or action for EACH reported finding.\n\n",
+    );
+    output.push_str("PRIORITY-BASED ACTION GUIDELINES:\n\n");
+    output.push_str(
+        "1. The finding is a false positive (the flagged line is not a real weakening).\n",
+    );
+    output.push_str(
+        "\t-> Explain to the user why it is a false positive and proceed (justify it)\n\n",
+    );
+    output.push_str("2. The test genuinely needs to change because the behavior under test changed intentionally.\n");
+    output.push_str("\t-> Explain the intended behavior change and update the test honestly, do not delete assertions\n\n");
+    output.push_str("3. The test is failing for a real reason in the code under test.\n");
+    output.push_str("\t-> STOP. Do not weaken, skip, or delete the test. Fix the code under test, or tell the user the test is wrong\n\n");
+    output.push_str("4. The change disables or hides a test (skip/ignore/focus/commented-out).\n");
+    output.push_str("\t-> Remove the suppression and fix the underlying failure, or justify it with a tracked reason\n\n");
+    output.push_str("MANDATORY REQUIREMENT: You must acknowledge this hook message and take one of the above actions.\n");
+    output.push_str("REMINDER: These rules apply to ALL your future test edits, not just this specific edit.\n\n");
+    output.push_str("Detected findings:\n");
+    output.push_str(&findings_xml);
+    output
 }

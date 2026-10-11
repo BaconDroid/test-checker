@@ -1,1006 +1,215 @@
-//! Inline test-guard suppression markers plus the plain-text helpers.
-//!
-//! No regex engine is involved: every predicate is a small, auditable string
-//! scan, mirroring the reference implementation's filters.
-
-use std::collections::HashSet;
-
 use crate::models::Finding;
 
-/// `test-guard: allow` window, in lines, on each side of a finding.
-const BYPASS_WINDOW: usize = 2;
+const BDD_KEYWORDS: &[&str] = &[
+    "given",
+    "when",
+    "then",
+    "arrange",
+    "act",
+    "assert",
+    "when & then",
+    "when&then",
+];
 
-#[must_use]
-pub fn is_file_disabled(text: &str) -> bool {
-    contains_ignore_ascii_case(text, "test-guard-disable-file")
-}
+const DIRECTIVE_PREFIXES: &[&str] = &[
+    "type:",
+    "noqa",
+    "pyright:",
+    "ruff:",
+    "mypy:",
+    "pylint:",
+    "flake8:",
+    "pyre:",
+    "pytype:",
+    "eslint-disable",
+    "eslint-ignore",
+    "prettier-ignore",
+    "ts-ignore",
+    "ts-expect-error",
+    "clippy:",
+    "allow",
+    "deny",
+    "warn",
+    "forbid",
+];
 
-/// Reports whether a `test-guard: allow` marker sits within +/-2 lines of the
-/// given 1-based line. Line `0` never matches.
-#[must_use]
-pub fn within_bypass(text: &str, line: usize) -> bool {
-    if line == 0 {
-        return false;
+const SUPPRESSION_MARKER: &str = "test-checker: allow";
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BddFilter;
+
+impl BddFilter {
+    #[must_use]
+    pub fn should_skip(&self, finding: &Finding) -> bool {
+        let normalized = strip_one_prefix(finding.text.trim(), &["#", "//", "--", "/*", "*"]);
+        BDD_KEYWORDS
+            .iter()
+            .any(|keyword| normalized.eq_ignore_ascii_case(keyword))
     }
-    let lines: Vec<&str> = text.split('\n').collect();
-    let from = line.saturating_sub(1 + BYPASS_WINDOW);
-    let to = (line + BYPASS_WINDOW).min(lines.len());
-    (from..to).any(|index| {
-        lines
-            .get(index)
-            .is_some_and(|candidate| has_allow_marker(candidate))
-    })
 }
 
-/// Drops every finding whose line sits within a `test-guard: allow` window in
-/// `source`, preserving the input order of the survivors.
-///
-/// `gutted-test` is exempt: its line is a position in the old text (a removed
-/// assertion has no line in `new_text`), so bypass-checking it against `source`
-/// would suppress it using an unrelated new-text line.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DirectiveFilter;
+
+impl DirectiveFilter {
+    #[must_use]
+    pub fn should_skip(&self, finding: &Finding) -> bool {
+        let mut normalized = strip_one_prefix(finding.text.trim(), &["#", "//", "/*", "--", "*"]);
+        if let Some(rest) = normalized.strip_prefix('@') {
+            normalized = rest.trim();
+        }
+        DIRECTIVE_PREFIXES
+            .iter()
+            .any(|directive| starts_with_ignore_ascii_case(normalized, directive))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SuppressionFilter;
+
+impl SuppressionFilter {
+    #[must_use]
+    pub fn should_skip(&self, finding: &Finding) -> bool {
+        is_line_suppressed(&finding.text)
+    }
+
+    #[must_use]
+    pub fn is_file_suppressed(&self, content: &str) -> bool {
+        content.lines().any(is_line_suppressed)
+    }
+}
+
 #[must_use]
-pub fn apply_filters(findings: &[Finding], source: &str) -> Vec<Finding> {
+pub fn is_line_suppressed(text: &str) -> bool {
+    let lowered = text.to_lowercase();
+    lowered.contains(SUPPRESSION_MARKER)
+}
+
+#[must_use]
+pub fn apply_filters(findings: &[Finding]) -> Vec<Finding> {
+    let bdd = BddFilter;
+    let directive = DirectiveFilter;
+    let suppression = SuppressionFilter;
     findings
         .iter()
-        .filter(|finding| finding.rule == "gutted-test" || !within_bypass(source, finding.line))
+        .filter(|finding| {
+            !bdd.should_skip(finding)
+                && !directive.should_skip(finding)
+                && !suppression.should_skip(finding)
+        })
         .cloned()
         .collect()
 }
 
-/// Reports whether a line contains the `test-guard:\s*allow\b` marker: the
-/// `test-guard:` key is matched case-insensitively, ASCII whitespace is
-/// skipped, then `allow` must be followed by a non-word byte (or end of line).
-fn has_allow_marker(line: &str) -> bool {
-    const KEY: &str = "test-guard:";
-    let lower = line.to_ascii_lowercase();
-    let mut start = 0;
-    while let Some(offset) = lower[start..].find(KEY) {
-        let index = start + offset;
-        let rest = lower[index + KEY.len()..].trim_start_matches(|c: char| c.is_ascii_whitespace());
-        if let Some(after) = rest.strip_prefix("allow") {
-            if after.is_empty() || !is_word_byte(after.as_bytes()[0]) {
-                return true;
-            }
-        }
-        start = index + KEY.len();
-    }
-    false
-}
-
-/// Strips block comments, Python triple-quoted strings, shebangs and trailing
-/// line comments. Multi-line aware only for block/triple constructs.
+/// The agent-memo phrase catalog, reused from `comment-checker` and applied to test names and
+/// assertion messages instead of comment text.
 #[must_use]
-pub fn strip_comments(text: &str, language: &str) -> String {
-    let markers: &[&str] = if language == "python" {
-        &["#"]
-    } else {
-        &["//"]
+pub fn is_agent_memo_phrase(text: &str) -> bool {
+    let text = text.trim();
+    let starts_like_memo = match first_ascii_lowercase_byte(text) {
+        Some(b'a') => starts_with_ignore_ascii_case(text, "after this"),
+        Some(b'b') => starts_with_ignore_ascii_case(text, "before this"),
+        Some(b'c') => {
+            starts_with_word_pair(text, "changed", &["from", "to"])
+                || starts_with_word_pair(text, "change", &["from", "to"])
+                || starts_with_word_pair(text, "converted", &["from", "to"])
+                || starts_with_word_pair(text, "convert", &["from", "to"])
+        }
+        Some(b'h') => starts_with_ignore_ascii_case(text, "here we"),
+        Some(b'i') => starts_with_word_pair(text, "implementation", &["of", "note"]),
+        Some(b'm') => {
+            starts_with_word_pair(text, "modified", &["from", "to"])
+                || starts_with_word_pair(text, "modify", &["from", "to"])
+                || starts_with_word_pair(text, "moved", &["from", "to"])
+                || starts_with_word_pair(text, "move", &["from", "to"])
+                || starts_with_word_pair(text, "migrated", &["from", "to"])
+                || starts_with_word_pair(text, "migrate", &["from", "to"])
+        }
+        Some(b'n') => {
+            starts_with_word_pair(text, "now", &["we", "this", "it"])
+                || starts_with_ignore_ascii_case(text, "note:")
+        }
+        Some(b'p') => starts_with_ignore_ascii_case(text, "previously"),
+        Some(b'r') => {
+            starts_with_word_pair(text, "renamed", &["from", "to"])
+                || starts_with_word_pair(text, "rename", &["from", "to"])
+        }
+        Some(b's') => {
+            starts_with_word_pair(text, "switched", &["from", "to"])
+                || starts_with_word_pair(text, "switch", &["from", "to"])
+        }
+        Some(b't') => starts_with_word_pair(
+            text,
+            "this",
+            &[
+                "implements",
+                "implement",
+                "adds",
+                "add",
+                "removes",
+                "remove",
+                "changes",
+                "change",
+                "fixes",
+                "fix",
+            ],
+        ),
+        Some(b'u') => {
+            starts_with_word_pair(text, "updated", &["from", "to"])
+                || starts_with_word_pair(text, "update", &["from", "to"])
+        }
+        Some(b'w') => starts_with_word_pair(text, "was", &["changed"]),
+        _ => false,
     };
-    let without_blocks = strip_block_comments(text);
-    let without_triples = if language == "python" {
-        strip_python_triples(&without_blocks)
-    } else {
-        without_blocks
+    starts_like_memo || has_ascii_arrow(text)
+}
+
+fn strip_one_prefix<'a>(text: &'a str, prefixes: &[&str]) -> &'a str {
+    let mut normalized = text.trim();
+    for prefix in prefixes {
+        if let Some(rest) = normalized.strip_prefix(prefix) {
+            normalized = rest.trim();
+            break;
+        }
+    }
+    normalized
+}
+
+fn first_ascii_lowercase_byte(text: &str) -> Option<u8> {
+    text.as_bytes().first().map(u8::to_ascii_lowercase)
+}
+
+fn starts_with_word_pair(text: &str, first: &str, seconds: &[&str]) -> bool {
+    let Some(rest) = strip_prefix_ignore_ascii_case(text, first) else {
+        return false;
     };
-    let mut lines: Vec<&str> = Vec::new();
-    for line in without_triples.split('\n') {
-        if line.trim_start_matches([' ', '\t']).starts_with("#!") {
-            lines.push("");
-            continue;
-        }
-        let mut result = line;
-        for marker in markers {
-            if let Some(index) = find_comment_index(result, marker) {
-                result = &result[..index];
-                break;
-            }
-        }
-        lines.push(result);
-    }
-    lines.join("\n")
+    let rest = rest.trim_start();
+    seconds
+        .iter()
+        .any(|second| starts_with_ignore_ascii_case(rest, second))
 }
 
-/// Comment-stripped then string-literal-stripped text, as the plugin's
-/// `codeText` helper.
-#[must_use]
-pub fn code_text(line: &str, language: &str) -> String {
-    strip_string_literals(&strip_comments(line, language))
-}
-
-#[must_use]
-pub fn strip_string_literals(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut output = String::with_capacity(text.len());
-    let mut quote: Option<u8> = None;
-    let mut index = 0;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if let Some(open) = quote {
-            if byte == b'\\' {
-                index += 2;
-                continue;
-            }
-            if byte == open {
-                quote = None;
-            }
-            index += 1;
-            continue;
-        }
-        if matches!(byte, b'"' | b'\'' | b'`') {
-            quote = Some(byte);
-            index += 1;
-            continue;
-        }
-        push_char(text, index, &mut output);
-        index += char_len(text, index);
-    }
-    output
-}
-
-#[must_use]
-pub fn is_comment_line(line: &str, language: &str) -> bool {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
+fn has_ascii_arrow(text: &str) -> bool {
+    let Some((left, right)) = text.split_once("->") else {
         return false;
-    }
-    if trimmed.starts_with("//")
-        || trimmed.starts_with("/*")
-        || trimmed.starts_with('*')
-        || trimmed.starts_with("*/")
-    {
-        return true;
-    }
-    if language == "python"
-        && (trimmed.starts_with('#') || trimmed.starts_with("\"\"\"") || trimmed.starts_with("'''"))
-    {
-        return true;
-    }
-    false
-}
-
-#[must_use]
-pub fn count_real_lines(text: &str, language: &str) -> usize {
-    text.split('\n')
-        .filter(|line| !strip_comments(line, language).trim().is_empty())
-        .count()
-}
-
-/// Normalizes an assertion line the way the reference dedup does: remove all
-/// whitespace, drop a `self.` receiver, fold `assertEqual` to `assertEquals`
-/// and `.toBe` to `.toEqual`.
-#[must_use]
-pub fn normalize_assertion(code: &str) -> String {
-    let squashed: String = code.chars().filter(|c| !c.is_whitespace()).collect();
-    let without_self = squashed.replace("self.assert", "assert");
-    let folded = replace_ignore_ascii_case(&without_self, "assertEqual", "assertEquals");
-    replace_word_suffix(&folded, ".toBe", ".toEqual")
-}
-
-/// Collapses a test body to a comparable string (comment-only lines dropped).
-#[must_use]
-pub fn normalize_body<'a>(lines: impl IntoIterator<Item = &'a str>, language: &str) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    for line in lines {
-        let stripped = strip_comments(line, language).trim().to_owned();
-        if !stripped.is_empty() {
-            parts.push(stripped);
-        }
-    }
-    parts.join("\n")
-}
-
-// --- Rule predicates -------------------------------------------------------
-
-#[must_use]
-pub fn skip_focus_hit(code: &str, plugin: &str) -> bool {
-    match plugin {
-        "js" | "ts" => {
-            has_call(code, ".skip")
-                || has_call(code, ".only")
-                || has_call(code, ".todo")
-                || has_word_call(code, "xit")
-                || has_word_call(code, "xdescribe")
-                || has_word_call(code, "xtest")
-        }
-        "python" => {
-            let trimmed = code.trim_start();
-            trimmed.starts_with("@pytest.mark.skip")
-                || trimmed.contains("@pytest.mark.xfail")
-                || trimmed.contains("@unittest.skip")
-                || has_call(code, ".skipIf")
-        }
-        "go" => {
-            has_call(code, "t.Skip") || has_call(code, "t.Skipf") || has_call(code, "t.SkipNow")
-        }
-        "rust" => code.contains("#[ignore]"),
-        _ => false,
-    }
-}
-
-#[must_use]
-pub fn is_conditional_skip(line: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
-    lower.contains("skipif")
-        || lower.contains("skipunless")
-        || lower.contains("skip_if")
-        || lower
-            .find("if")
-            .zip(lower.find("skip"))
-            .is_some_and(|(if_index, skip_index)| if_index < skip_index)
-}
-
-#[must_use]
-pub fn tautological_hit(code: &str) -> bool {
-    let squashed: String = code.chars().filter(|c| !c.is_whitespace()).collect();
-    if squashed.contains("assertTrue(True)")
-        || squashed.contains("expect(true).toBe(true)")
-        || squashed.contains("assert.ok(true)")
-    {
-        return true;
-    }
-    if let Some(rest) = after_word(code, "assert") {
-        let trimmed = rest.trim_start();
-        if let Some(after_true) = trimmed.strip_prefix("True") {
-            if after_true.is_empty() || !is_word_byte(after_true.as_bytes()[0]) {
-                return true;
-            }
-        }
-    }
-    if let Some((left, right)) = parse_assert_equals(code) {
-        if left == right {
-            return true;
-        }
-    }
-    if let Some((left, right)) = parse_assert_eqeq(code) {
-        if left == right {
-            return true;
-        }
-    }
-    false
-}
-
-/// Reports whether the joined code swallows errors for `language`: an empty
-/// JS/TS `catch`, a Python `except …: pass`, or a Rust `Err(_) => {}` arm.
-#[must_use]
-pub fn swallowed_error_hit(joined: &str, language: &str) -> bool {
-    match language {
-        "js" | "ts" => has_empty_catch(joined),
-        "python" => has_except_pass(joined),
-        "rust" => has_empty_err_arm(joined),
-        _ => false,
-    }
-}
-
-fn has_empty_catch(text: &str) -> bool {
-    let mut start = 0;
-    while let Some(offset) = text[start..].find("catch") {
-        let index = start + offset;
-        let mut rest = text[index + "catch".len()..].trim_start();
-        if let Some(after) = rest.strip_prefix('(') {
-            if let Some(close) = after.find(')') {
-                rest = after[close + 1..].trim_start();
-            }
-        }
-        if let Some(body) = rest.strip_prefix('{') {
-            if body
-                .split('}')
-                .next()
-                .is_some_and(|inner| inner.trim().is_empty())
-            {
-                return true;
-            }
-        }
-        start = index + "catch".len();
-    }
-    false
-}
-
-fn has_except_pass(text: &str) -> bool {
-    let mut start = 0;
-    while let Some(offset) = text[start..].find("except") {
-        let index = start + offset;
-        let rest = &text[index + "except".len()..];
-        if let Some((clause, tail)) = rest.split_once(':') {
-            let clause = clause.trim();
-            if matches!(clause, "" | "Exception" | "BaseException") {
-                if let Some(after) = tail.trim_start().strip_prefix("pass") {
-                    if after.is_empty() || !is_word_byte(after.as_bytes()[0]) {
-                        return true;
-                    }
-                }
-            }
-        }
-        start = index + "except".len();
-    }
-    false
-}
-
-fn has_empty_err_arm(text: &str) -> bool {
-    let squashed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-    squashed.contains("Err(_)=>{}") || squashed.contains("Err(_)=>()")
-}
-
-#[must_use]
-pub fn has_assertion(text: &str) -> bool {
-    contains_word(text, "assert")
-        || has_assert_call(text)
-        || has_call(text, "expect")
-        || has_word_call(text, "fail")
-        || has_word_call(text, "verify")
-        || contains_word(text, "should")
-        || contains_word(text, "raises")
-        || contains_word(text, "throws")
-        || contains_word(text, "assertRaises")
-        || text.contains("t.Error")
-        || text.contains("t.Fatal")
-        || has_call(text, "panic!")
-        || text.contains("require.")
-}
-
-#[must_use]
-pub fn is_assertion_line(code: &str) -> bool {
-    has_assert_call(code)
-        || after_word(code, "assert").is_some_and(|rest| rest.starts_with([' ', '\t']))
-        || has_call(code, "expect")
-        || contains_word(code, "assertEqual")
-        || contains_word(code, "assertRaises")
-        || contains_word(code, "verify")
-        || contains_word(code, "assertThat")
-        || code.contains("self.assert")
-}
-
-#[must_use]
-pub fn has_assertion_message(body: &str) -> bool {
-    call_has_message(body, "assert")
-        || call_has_message(body, "expect")
-        || python_assert_message(body)
-}
-
-/// Reports whether a Python `assert <expr>, "<msg>"` statement carries a
-/// message: a top-level `assert` whose expression is followed, outside any
-/// nested brackets, by a comma and then a string literal.
-fn python_assert_message(body: &str) -> bool {
-    for line in body.split('\n') {
-        let trimmed = line.trim_start();
-        if let Some(rest) = after_word(trimmed, "assert") {
-            if top_level_comma_then_string(rest) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn top_level_comma_then_string(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    let mut depth: i32 = 0;
-    for (index, byte) in bytes.iter().enumerate() {
-        match byte {
-            b'(' | b'[' | b'{' => depth += 1,
-            b')' | b']' | b'}' => depth -= 1,
-            b',' if depth == 0 => {
-                let tail = text[index + 1..].trim_start();
-                if tail.starts_with(['"', '\'']) {
-                    return true;
-                }
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
-#[must_use]
-pub fn is_trivial_body(body: &str) -> bool {
-    let trimmed = body.trim();
-    trimmed.is_empty() || trimmed == "pass" || trimmed == "..."
-}
-
-#[must_use]
-pub fn mock_identifier_hit(code: &str) -> bool {
-    has_mock_prefix(code) || contains_word(code, "monkeypatch") || has_word_call(code, "patch")
-}
-
-#[must_use]
-pub fn is_test_declaration(code: &str, plugin: &str) -> bool {
-    match plugin {
-        "js" | "ts" => js_test_declaration(code),
-        "python" => {
-            let trimmed = code.trim_start();
-            trimmed.starts_with("def test_")
-                || trimmed
-                    .strip_prefix("async ")
-                    .is_some_and(|rest| rest.starts_with("def test_"))
-        }
-        "go" => code.trim_start().starts_with("func Test"),
-        "rust" => code.contains("#[test]"),
-        _ => false,
-    }
-}
-
-// --- Primitives ------------------------------------------------------------
-
-fn push_char(text: &str, index: usize, output: &mut String) {
-    if let Some(ch) = text[index..].chars().next() {
-        output.push(ch);
-    }
-}
-
-fn char_len(text: &str, index: usize) -> usize {
-    text[index..].chars().next().map_or(1, char::len_utf8)
-}
-
-pub(crate) const fn is_word_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_'
-}
-
-fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
-    let haystack = haystack.as_bytes();
-    let needle = needle.as_bytes();
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return false;
-    }
-    haystack
-        .windows(needle.len())
-        .any(|window| window.eq_ignore_ascii_case(needle))
-}
-
-fn contains_word(haystack: &str, word: &str) -> bool {
-    if word.is_empty() {
-        return false;
-    }
-    let bytes = haystack.as_bytes();
-    let mut start = 0;
-    while let Some(offset) = haystack[start..].find(word) {
-        let index = start + offset;
-        let before_ok = index == 0 || !is_word_byte(bytes[index - 1]);
-        let after = index + word.len();
-        let after_ok = after >= bytes.len() || !is_word_byte(bytes[after]);
-        if before_ok && after_ok {
-            return true;
-        }
-        start = index + word.len();
-    }
-    false
-}
-
-fn after_word<'a>(haystack: &'a str, word: &str) -> Option<&'a str> {
-    if word.is_empty() {
-        return None;
-    }
-    let bytes = haystack.as_bytes();
-    let mut start = 0;
-    while let Some(offset) = haystack[start..].find(word) {
-        let index = start + offset;
-        let before_ok = index == 0 || !is_word_byte(bytes[index - 1]);
-        if before_ok {
-            return Some(&haystack[index + word.len()..]);
-        }
-        start = index + word.len();
-    }
-    None
-}
-
-/// `name` followed (after optional spaces) by `(`.
-fn has_call(code: &str, name: &str) -> bool {
-    if name.is_empty() {
-        return false;
-    }
-    let mut start = 0;
-    while let Some(offset) = code[start..].find(name) {
-        let index = start + offset;
-        let rest = code[index + name.len()..].trim_start();
-        if rest.starts_with('(') {
-            return true;
-        }
-        start = index + name.len();
-    }
-    false
-}
-
-/// `word` at a word boundary followed (after optional spaces) by `(`.
-fn has_word_call(code: &str, word: &str) -> bool {
-    if word.is_empty() {
-        return false;
-    }
-    let bytes = code.as_bytes();
-    let mut start = 0;
-    while let Some(offset) = code[start..].find(word) {
-        let index = start + offset;
-        let before_ok = index == 0 || !is_word_byte(bytes[index - 1]);
-        let rest = code[index + word.len()..].trim_start();
-        if before_ok && rest.starts_with('(') {
-            return true;
-        }
-        start = index + word.len();
-    }
-    false
-}
-
-fn has_assert_call(code: &str) -> bool {
-    let bytes = code.as_bytes();
-    let mut start = 0;
-    while let Some(offset) = code[start..].find("assert") {
-        let index = start + offset;
-        // Walk back to the start of the identifier so the `debug_assert`
-        // family is recognized, then accept only the Rust assert macro
-        // families (plain `assert` / `debug_assert`), not arbitrary
-        // identifiers that merely end in `assert`.
-        let mut ident_start = index;
-        while ident_start > 0 && is_word_byte(bytes[ident_start - 1]) {
-            ident_start -= 1;
-        }
-        let ident = &code[ident_start..];
-        let accepted = ident.starts_with("assert") || ident.starts_with("debug_assert");
-        if accepted {
-            let mut end = index + "assert".len();
-            while end < bytes.len() && is_word_byte(bytes[end]) {
-                end += 1;
-            }
-            let mut rest = code[end..].trim_start();
-            if let Some(after) = rest.strip_prefix('!') {
-                rest = after.trim_start();
-            }
-            if rest.starts_with('(') {
-                return true;
-            }
-        }
-        start = index + "assert".len();
-    }
-    false
-}
-
-fn identifier(value: &str) -> Option<&str> {
-    let value = value.trim();
-    if !value.is_empty()
-        && value
+    };
+    let left = left.trim();
+    let right = right.trim();
+    !left.is_empty()
+        && !right.is_empty()
+        && left.bytes().all(|byte| byte.is_ascii_alphabetic())
+        && right
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    {
-        Some(value)
-    } else {
-        None
-    }
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic())
 }
 
-fn parse_assert_equals(code: &str) -> Option<(String, String)> {
-    let index = code.find("assertEquals")?;
-    let rest = code[index + "assertEquals".len()..].trim_start();
-    let inner = rest.strip_prefix('(')?;
-    let close = inner.find(')')?;
-    let (left, right) = inner[..close].split_once(',')?;
-    let left = identifier(left)?;
-    let right = identifier(right)?;
-    Some((left.to_owned(), right.to_owned()))
+fn strip_prefix_ignore_ascii_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    starts_with_ignore_ascii_case(text, prefix).then(|| &text[prefix.len()..])
 }
 
-fn parse_assert_eqeq(code: &str) -> Option<(String, String)> {
-    let rest = after_word(code, "assert")?;
-    let (left, right) = rest.split_once("==")?;
-    let left = identifier(left)?;
-    let right = identifier(right)?;
-    Some((left.to_owned(), right.to_owned()))
-}
-
-fn has_mock_prefix(code: &str) -> bool {
-    let bytes = code.as_bytes();
-    let lower = code.to_ascii_lowercase();
-    for needle in ["dummy", "stub", "mock", "spy", "fake"] {
-        let mut start = 0;
-        while let Some(offset) = lower[start..].find(needle) {
-            let index = start + offset;
-            if index == 0 || !is_word_byte(bytes[index - 1]) {
-                return true;
-            }
-            start = index + needle.len();
-        }
-    }
-    false
-}
-
-fn call_has_message(body: &str, keyword: &str) -> bool {
-    let mut start = 0;
-    while let Some(offset) = body[start..].find(keyword) {
-        let index = start + offset;
-        let rest = body[index + keyword.len()..].trim_start();
-        if let Some(inner) = rest.strip_prefix('(') {
-            let mut depth = 1;
-            let mut end = 0;
-            for (position, ch) in inner.char_indices() {
-                match ch {
-                    '(' => depth += 1,
-                    ')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            end = position;
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            let arguments = &inner[..end];
-            if arguments
-                .split_once(',')
-                .is_some_and(|(_, tail)| tail.trim_start().starts_with(['"', '\'', '`']))
-            {
-                return true;
-            }
-        }
-        start = index + keyword.len();
-    }
-    false
-}
-
-/// JS/TS test functions: `it(...)` and `test(...)`, including modifiers such as
-/// `it.only(...)`, `test.skip(...)` or `it.each([...])(...)`. Containers
-/// (`describe`/`test.describe`), lifecycle hooks (`test.beforeEach`,
-/// `test.afterEach`, `test.beforeAll`, `test.afterAll`) and `test.step(...)` are
-/// not test bodies and must not be captured as blocks.
-fn js_test_declaration(code: &str) -> bool {
-    let bytes = code.as_bytes();
-    for keyword in ["it", "test"] {
-        let mut cursor = 0;
-        while let Some(offset) = code[cursor..].find(keyword) {
-            let index = cursor + offset;
-            let before_ok = index == 0 || !is_word_byte(bytes[index - 1]);
-            let not_method = index == 0 || bytes[index - 1] != b'.';
-            if before_ok && not_method {
-                let mut end = index + keyword.len();
-                if code[end..].starts_with('.') {
-                    end += 1;
-                    let member_start = end;
-                    while end < bytes.len() && is_word_byte(bytes[end]) {
-                        end += 1;
-                    }
-                    if is_non_test_js_member(&code[member_start..end]) {
-                        cursor = index + keyword.len();
-                        continue;
-                    }
-                }
-                if code[end..].trim_start().starts_with('(') {
-                    return true;
-                }
-            }
-            cursor = index + keyword.len();
-        }
-    }
-    false
-}
-
-/// Member names on `test`/`it` that are containers, lifecycle hooks or
-/// interaction steps rather than test bodies.
-fn is_non_test_js_member(member: &str) -> bool {
-    matches!(
-        member,
-        "describe" | "beforeEach" | "afterEach" | "beforeAll" | "afterAll" | "step"
-    )
-}
-
-fn replace_ignore_ascii_case(haystack: &str, needle: &str, replacement: &str) -> String {
-    let mut output = String::with_capacity(haystack.len());
-    let bytes = haystack.as_bytes();
-    let needle = needle.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index..].len() >= needle.len()
-            && bytes[index..index + needle.len()].eq_ignore_ascii_case(needle)
-        {
-            output.push_str(replacement);
-            index += needle.len();
-        } else {
-            push_char(haystack, index, &mut output);
-            index += char_len(haystack, index);
-        }
-    }
-    output
-}
-
-/// Replaces `needle` only when it is not followed by a word byte.
-fn replace_word_suffix(haystack: &str, needle: &str, replacement: &str) -> String {
-    let mut output = String::with_capacity(haystack.len());
-    let bytes = haystack.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        if haystack[index..].starts_with(needle) {
-            let after = index + needle.len();
-            if after >= bytes.len() || !is_word_byte(bytes[after]) {
-                output.push_str(replacement);
-                index = after;
-                continue;
-            }
-        }
-        push_char(haystack, index, &mut output);
-        index += char_len(haystack, index);
-    }
-    output
-}
-
-fn strip_block_comments(text: &str) -> String {
-    let mut output = String::with_capacity(text.len());
-    let bytes = text.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index..].starts_with(b"/*") {
-            if let Some(offset) = text[index + 2..].find("*/") {
-                index = index + 2 + offset + 2;
-                continue;
-            }
-            break;
-        }
-        push_char(text, index, &mut output);
-        index += char_len(text, index);
-    }
-    output
-}
-
-fn strip_python_triples(text: &str) -> String {
-    let mut output = String::with_capacity(text.len());
-    let mut index = 0;
-    while index < text.len() {
-        let rest = &text[index..];
-        if let Some(delimiter) = ["\"\"\"", "'''"]
-            .into_iter()
-            .find(|candidate| rest.starts_with(candidate))
-        {
-            if let Some(offset) = text[index + 3..].find(delimiter) {
-                index = index + 3 + offset + 3;
-                continue;
-            }
-            break;
-        }
-        push_char(text, index, &mut output);
-        index += char_len(text, index);
-    }
-    output
-}
-
-fn find_comment_index(line: &str, marker: &str) -> Option<usize> {
-    let bytes = line.as_bytes();
-    let marker_bytes = marker.as_bytes();
-    let mut quote: Option<u8> = None;
-    let mut index = 0;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if let Some(open) = quote {
-            if byte == b'\\' {
-                index += 2;
-                continue;
-            }
-            if byte == open {
-                quote = None;
-            }
-            index += 1;
-            continue;
-        }
-        if matches!(byte, b'"' | b'\'' | b'`') {
-            quote = Some(byte);
-            index += 1;
-            continue;
-        }
-        if bytes[index..].starts_with(marker_bytes) {
-            return Some(index);
-        }
-        index += 1;
-    }
-    None
-}
-
-// --- Module-under-test text helpers ----------------------------------------
-
-pub(crate) fn test_stem(file_path: &str) -> String {
-    let base = file_path
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(file_path)
-        .to_owned();
-    let Some(dot) = base.rfind('.') else {
-        return base;
-    };
-    let mut stem = base[..dot].to_owned();
-    if let Some(inner) = stem.strip_suffix(".test") {
-        stem = inner.to_owned();
-    } else if let Some(inner) = stem.strip_suffix(".spec") {
-        stem = inner.to_owned();
-    } else if let Some(inner) = stem.strip_prefix("test_") {
-        stem = inner.to_owned();
-    } else if let Some(inner) = stem.strip_suffix("_test") {
-        stem = inner.to_owned();
-    }
-    stem
-}
-
-pub(crate) fn mocked_module_stem(spec: &str) -> String {
-    let mut spec = spec.trim().to_owned();
-    if let Some(index) = spec.rfind(['/', '\\']) {
-        spec = spec[index + 1..].to_owned();
-    }
-    if let Some(index) = spec.rfind('.') {
-        if index > 0 {
-            spec = spec[..index].to_owned();
-        }
-    }
-    spec
-}
-
-pub(crate) fn patched_module_root(spec: &str) -> String {
-    let spec = spec.trim();
-    spec.find(['.', '/'])
-        .map_or_else(|| spec.to_owned(), |index| spec[..index].to_owned())
-}
-
-pub(crate) fn extract_js_mock_target(code: &str) -> Option<String> {
-    for prefix in ["vi.mock(", "jest.mock("] {
-        if let Some(rest) = code.split_once(prefix).map(|(_, tail)| tail) {
-            if let Some(target) = read_quoted(rest) {
-                return Some(target);
-            }
-        }
-    }
-    None
-}
-
-pub(crate) fn extract_js_spy_target(code: &str) -> Option<String> {
-    for prefix in ["vi.spyOn(", "jest.spyOn("] {
-        if let Some(rest) = code.split_once(prefix).map(|(_, tail)| tail) {
-            let name: String = rest
-                .trim_start()
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$')
-                .collect();
-            if !name.is_empty() {
-                return Some(name);
-            }
-        }
-    }
-    None
-}
-
-pub(crate) fn extract_python_patch_target(code: &str) -> Option<String> {
-    let bytes = code.as_bytes();
-    let mut start = 0;
-    while let Some(offset) = code[start..].find("patch(") {
-        let index = start + offset;
-        // Require a non-word byte before `patch(` so `mocker.patch(`,
-        // `patch(` and `@patch(` match, while `dispatch(` does not.
-        if index == 0 || !is_word_byte(bytes[index - 1]) {
-            return read_quoted(&code[index + "patch(".len()..]);
-        }
-        start = index + "patch(".len();
-    }
-    None
-}
-
-pub(crate) fn read_quoted(text: &str) -> Option<String> {
-    let trimmed = text.trim_start();
-    let quote = trimmed.chars().next()?;
-    if !matches!(quote, '"' | '\'') {
-        return None;
-    }
-    let rest = &trimmed[quote.len_utf8()..];
-    let end = rest.find(quote)?;
-    Some(rest[..end].to_owned())
-}
-
-pub(crate) fn imported_names_from_stem(text: &str, stem: &str, language: &str) -> HashSet<String> {
-    let mut names = HashSet::new();
-    for raw in text.split('\n') {
-        let line = strip_comments(raw, language);
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Some(clause) = line.strip_prefix("import ") {
-            if let Some((binding, spec)) = clause.split_once(" from ") {
-                if let Some(module) = read_quoted(spec) {
-                    if mocked_module_stem(&module) == stem {
-                        collect_js_bindings(binding, &mut names);
-                    }
-                }
-            }
-            continue;
-        }
-        if let Some(eq) = line.find('=') {
-            let binding = line[..eq]
-                .trim()
-                .trim_start_matches("const ")
-                .trim_start_matches("let ")
-                .trim_start_matches("var ")
-                .trim();
-            if let Some(rest) = line[eq + 1..].trim().strip_prefix("require(") {
-                if let Some(module) = read_quoted(rest) {
-                    if mocked_module_stem(&module) == stem {
-                        collect_js_bindings(binding, &mut names);
-                    }
-                }
-            }
-        }
-    }
-    names
-}
-
-pub(crate) fn collect_js_bindings(binding: &str, names: &mut HashSet<String>) {
-    let mut binding = binding.trim().to_owned();
-    if let Some(open) = binding.find('{') {
-        if let Some(close) = binding[open..].find('}') {
-            collect_named_bindings(&binding[open + 1..open + close], names);
-            let mut combined = binding[..open].to_owned();
-            combined.push_str(&binding[open + close + 1..]);
-            binding = combined;
-        }
-    }
-    let binding = binding.trim().trim_end_matches(',').trim();
-    if binding.is_empty() {
-        return;
-    }
-    if let Some(rest) = binding.strip_prefix('*') {
-        if let Some((_, alias)) = rest.trim().rsplit_once(' ') {
-            names.insert(alias.trim().to_owned());
-        }
-        return;
-    }
-    if let Some(first) = binding.split_whitespace().next() {
-        names.insert(first.to_owned());
-    }
-}
-
-pub(crate) fn collect_named_bindings(inner: &str, names: &mut HashSet<String>) {
-    for part in inner.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        let local = part
-            .split_once(" as ")
-            .map_or(part, |(_, alias)| alias.trim());
-        names.insert(local.to_owned());
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{code_text, count_real_lines, normalize_assertion, strip_comments, within_bypass};
-
-    #[test]
-    fn strip_comments_removes_line_and_block_comments() {
-        assert_eq!(strip_comments("x = 1 # note", "python"), "x = 1 ");
-        assert_eq!(
-            strip_comments("const a = 1; // note", "js"),
-            "const a = 1; "
-        );
-        assert_eq!(strip_comments("/* block */ y", "js"), " y");
-        assert_eq!(strip_comments("#!/usr/bin/env python", "python"), "");
-    }
-
-    #[test]
-    fn code_text_blanks_string_literals() {
-        assert_eq!(
-            code_text("assert x == \"literal\"", "python"),
-            "assert x == "
-        );
-    }
-
-    #[test]
-    fn count_real_lines_ignores_blank_and_comment_lines() {
-        assert_eq!(count_real_lines("// c\n\nx\ny", "js"), 2);
-    }
-
-    #[test]
-    fn within_bypass_matches_nearby_marker() {
-        let text = "line1\ntest-guard: allow\nline3";
-        assert!(within_bypass(text, 2));
-        assert!(!within_bypass(text, 0));
-    }
-
-    #[test]
-    fn normalize_assertion_folds_equivalents() {
-        assert_eq!(
-            normalize_assertion("self.assertEqual(a, a)"),
-            "assertEquals(a,a)"
-        );
-        assert_eq!(
-            normalize_assertion("expect(x).toBe(y)"),
-            "expect(x).toEqual(y)"
-        );
-    }
+fn starts_with_ignore_ascii_case(text: &str, prefix: &str) -> bool {
+    text.as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
 }

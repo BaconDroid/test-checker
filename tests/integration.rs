@@ -1,92 +1,48 @@
-use test_checker::api::check_hook_input;
+use test_checker::detector::TestDetector;
+use test_checker::filters::{apply_filters, is_line_suppressed};
+use test_checker::output::format_hook_message;
 
 #[test]
-fn pipeline_given_clean_python_returns_success() {
+fn full_pipeline_given_clean_test_returns_empty() {
     // given
-    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"test_clean.py","content":"def test_a():\n    assert foo() == 1\n"}}"#;
+    let detector = TestDetector::new();
+    let code = "def test_sums():\n    assert add(1, 2) == 3\n";
 
     // when
-    let result = check_hook_input(input, "");
+    let findings = detector.detect(code, "tests/test_app.py", true, true);
 
     // then
-    assert_eq!(result.exit_code, 0);
-    assert!(result.message.contains("Success"));
+    assert_eq!(findings.len(), 0);
 }
 
 #[test]
-fn pipeline_given_tautological_python_reports_findings() {
+fn full_pipeline_given_weakening_returns_formatted_message() {
     // given
-    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/test_tauto.py","content":"def test_a():\n    assert True\n"}}"#;
+    let detector = TestDetector::new();
+    let code = "def test_sums():\n    @pytest.mark.skip\n    assert add(1, 2) == 3\n";
 
     // when
-    let result = check_hook_input(input, "");
+    let findings = detector.detect(code, "tests/test_app.py", true, true);
+    let filtered = apply_filters(&findings);
+    let message = format_hook_message(&filtered, "");
 
     // then
-    assert_eq!(result.exit_code, 2);
-    assert!(result.message.contains("<findings"));
+    assert_ne!(filtered.len(), 0);
+    assert!(message.contains("TEST-WEAKENING DETECTED"));
+    assert!(message.contains("tests/test_app.py"));
 }
 
 #[test]
-fn pipeline_given_allow_marker_returns_success() {
+fn full_pipeline_given_suppression_marker_filters_out() {
     // given
-    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/test_allow.py","content":"def test_a():\n    # test-guard: allow\n    assert True\n"}}"#;
+    let detector = TestDetector::new();
+    let code = "def test_sums():\n    x = 1\n    # assert x == 2  # test-checker: allow\n";
 
     // when
-    let result = check_hook_input(input, "");
+    let findings = detector.detect(code, "tests/test_app.py", true, true);
+    let filtered = apply_filters(&findings);
 
     // then
-    assert_eq!(result.exit_code, 0);
-    assert!(result.message.contains("Success"));
-}
-
-#[test]
-fn pipeline_given_disable_file_marker_returns_success() {
-    // given
-    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/test_disabled.py","content":"def test_a():\n    assert True\n# test-guard-disable-file\n"}}"#;
-
-    // when
-    let result = check_hook_input(input, "");
-
-    // then
-    assert_eq!(result.exit_code, 0);
-    assert!(result.message.contains("Success"));
-}
-
-#[test]
-fn pipeline_given_go_skipped_test_reports_findings() {
-    // given
-    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"pkg/foo_test.go","content":"package foo\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) {\n\tt.Skip(\"later\")\n}\n"}}"#;
-
-    // when
-    let result = check_hook_input(input, "");
-
-    // then
-    assert_eq!(result.exit_code, 2);
-    assert!(result.message.contains("skip-focus-added"));
-}
-
-#[test]
-fn pipeline_given_ignored_rust_test_reports_findings() {
-    // given
-    let input = r##"{"tool_name":"Write","tool_input":{"file_path":"src/foo_test.rs","content":"#[test]\n#[ignore]\nfn t() {\n    assert!(true);\n}\n"}}"##;
-
-    // when
-    let result = check_hook_input(input, "");
-
-    // then
-    assert_eq!(result.exit_code, 2);
-    assert!(result.message.contains("skip-focus-added"));
-}
-
-#[test]
-fn pipeline_given_tautological_javascript_reports_findings() {
-    // given
-    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"src/foo.test.ts","content":"it('a', () => {\n  expect(true).toBe(true);\n});\n"}}"#;
-
-    // when
-    let result = check_hook_input(input, "");
-
-    // then
-    assert_eq!(result.exit_code, 2);
-    assert!(result.message.contains("tautological-assertion"));
+    assert!(is_line_suppressed("# test-checker: allow"));
+    assert_eq!(filtered.len(), 0);
 }
