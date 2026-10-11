@@ -3,14 +3,17 @@
 > Working file. Each signal points to its sources `[S#]` (index at the end).
 > Reliability legend: **[read]** = page opened and read · **[excerpt]** = seen only in a search excerpt · **[unsourced]** = extrapolation or general knowledge, not sourced.
 > Research date: 2026-10-11.
+> **Sources verified:** every source below was opened and checked — see
+> [`source-exploration.md`](./source-exploration.md) for the verified per-source findings and the
+> consolidated list of corrections applied to this document.
 
 ---
 
 ## 0. Key takeaways
 
 1. **The diff matters more than the content.** An `Edit` gives `old_string` / `new_string`: you can see that an agent *removed* an assertion or a test. A scan of the final file would not see it. In ImpossibleBench, Anthropic models cheat especially by directly modifying test files [S3, read]. So this is the highest-value detection for Claude Code.
-2. **Detection via editing a test file is perfect for tampering, but blind to hardcoding** (EvilGenie: 100% true positives on modifying/deleting tests, but does not see the production code that hardcodes the outputs) [S5, excerpt]. Hardcoding requires cross-file heuristics or an optional LLM judge.
-3. **The hook message matters as much as the rule.** In ImpossibleBench, adding an instruction “STOP if the test is wrong, do not work around it in the code” lowered GPT-5's cheating rate from 93% to 1% on one benchmark, but only from 66% to 54% on the other; and Claude Opus 4.1 rarely used the option to give up [S3, read]. So: put this instruction in the message, without relying on it alone.
+2. **Detection via editing a test file is perfect for tampering, but blind to hardcoding** (EvilGenie flags any edit or deletion of the test files deterministically — though it publishes no true-positive rate — and does not see the production code that hardcodes the outputs) [S5, read]. Hardcoding requires cross-file heuristics or an optional LLM judge.
+3. **The hook message matters as much as the rule.** In ImpossibleBench, adding an instruction “STOP if the test is wrong, do not work around it in the code” lowered GPT-5's cheating rate from 92% to 1% on one benchmark (the LessWrong post writes 93%), but only from 66% to 54% on the other; and Claude Opus 4.1 rarely used the option to give up [S3, read]. So: put this instruction in the message, without relying on it alone.
 4. **The classic smells are noisy.** Smell-detection tools misclassified more than 70% of the cases on auto-generated tests (false positives and false negatives) [S11, excerpt], and some smells are a matter of preference (e.g. Eager Test). → Smells remain *info / disabled by default*; the integrity signals (tampering, skip, removed assertions) are the core of the product.
 5. **A close precedent already exists: `dunnit`** (end-of-task check: deleted tests, added skips, removed assertions, stubs) [S8, excerpt]. Your angle (real-time hook, per-edit) is complementary.
 
@@ -24,15 +27,15 @@ Sources of the left column: repo README [S1, read] and the TypeScript porting pl
 |---|---|---|
 | Hook point | PostToolUse hook, matcher `Write\|Edit\|MultiEdit` [S1] | Same. Optional: PreToolUse to capture the “before” state (see below) |
 | Input | Hook JSON → content extracted from the tool input [S1] | Same, **plus** `old_string`/`new_string` (Edit) and the edit list (MultiEdit) for diff mode |
-| Language | Detected by file extension [S1]; registry of ~38 languages with extensions and comment query per language [S2] | Extension **+ “test file” detection** (globs: `*_test.go`, `test_*.py`, `*.test.ts`, `*.spec.*`, `tests/`, `__tests__/`) [unsourced]. Outside a test file → only the production-code rules (TC-5x) |
+| Language | Detected by file extension [S1]; registry of **31 languages across 42 extensions**, with a comment query per language [S1] | Extension **+ “test file” detection** (globs: `*_test.go`, `test_*.py`, `*.test.ts`, `*.spec.*`, `tests/`, `__tests__/`) [unsourced]. Outside a test file → only the production-code rules (TC-5x) |
 | Parsing | tree-sitter, `comment` nodes [S1][S2] | tree-sitter, but **several queries per language**: `test_fn`, `assertion`, `skip_marker`, `focus_marker`, `conditional`, `try_catch`, `mock` |
 | Detection unit | A comment (line + text) | A *finding*: rule + severity + line + (in diff mode) before/after |
-| Exception filters | BDD (`given/when/then/arrange/act/assert`), directives (30+: `noqa`, `pyright:`, `eslint-disable`, `@ts-ignore`…), docstrings, shebang [S1][S2] | test-checker allowlist (section 4): skip with reason/ticket, legitimate conditional skip, custom assertion helpers, `test-checker: allow` directive |
+| Exception filters | BDD (`given/when/then/arrange/act/assert`), directives (~19 prefixes: `noqa`, `pyright:`, `eslint-disable`, `@ts-ignore`, `clippy:`, `allow`…), shebang, plus a separate **agent-memo** filter — note docstrings are **not** exempted, they are flagged [S1] | test-checker allowlist (section 4): skip with reason/ticket, legitimate conditional skip, custom assertion helpers, `test-checker: allow` directive |
 | Output | XML: `<comments file=…><comment line-number=…>` preceded by a header “COMMENT/DOCSTRING DETECTED – IMMEDIATE ACTION REQUIRED” with a warning never to ignore the message [S2] | XML: `<findings file=…><finding rule="TC-02" severity="block" line=…>` + equivalent header + **instruction “STOP, do not modify the test to make it pass”** [S3] |
 | Custom prompt | `--prompt` with `{{comments}}` placeholder; omitted → only the custom message [S1] | `--prompt` with `{{findings}}` |
 | Exit codes | 0 = nothing/ignored, 2 = problematic comments [S1] | 0 = ok, 2 = at least one finding of severity `block`; the `warn` ones: exit 2 or 0 depending on `--fail-on` [unsourced] |
-| OpenCode constraint | `tool.execute.after` does not provide `tool_input`: the data is captured in the *before* hook and kept in a Map indexed by `callID` [S2] | **Essential for diff mode under OpenCode**: capture `old_string`/content-before in the before-hook, compare in the after-hook |
-| Perf | Pre-warming of the common languages in the background at init (python, ts, js, tsx, go, rust, java) [S2] | Same |
+| OpenCode constraint | `tool.execute.after` does not provide `tool_input`: the data is captured in the *before* hook and kept in a Map indexed by `callID` [S2 — source now 404, **unverified**] | **Essential for diff mode under OpenCode**: capture `old_string`/content-before in the before-hook, compare in the after-hook |
+| Perf | Pre-warming of the common languages in the background at init (python, ts, js, tsx, go, rust, java) [S2 — 404; no prewarm found in the source, **unverified**] | Same |
 | Distribution | npm/bun, Homebrew, GitHub release binaries [S1] | Same |
 | Equivalent of “commented-out code” | Flagged as a smell in “what it catches” [S1] | **TC-12: commented test/assertion** (a discreet way of deleting a test) [S14][S12] |
 | Equivalent of “overcommented” | All comments not exempted | **TC-43: Overcommented Test** (smell from the open catalog) [S12] |
@@ -65,7 +68,7 @@ Proposed severities: **block** (exit 2) · **warn** (message) · **info** (opt-i
 
 | ID | Signal | Markers (to validate per language) | Sev. | Sources |
 |---|---|---|---|---|
-| TC-10 | Skip/ignore added | JS: `it.skip`, `test.skip`, `xit`, `xdescribe`, `test.todo` · Py: `@pytest.mark.skip/skipif/xfail`, `pytest.skip()`, `unittest.skip*` · Go: `t.Skip*` · Rust: `#[ignore]` · Java: `@Disabled`, `@Ignore` | block (except allowlist) | [S12 “Disabled Test”, “Ignored Test”] [S14 `no-disabled-tests`] [S17 Sonar S1607, Java `@Disabled` with rationale] [S6] [S8] |
+| TC-10 | Skip/ignore added | JS: `it.skip`, `test.skip`, `xit`, `xdescribe` · Py: `@pytest.mark.skip/skipif/xfail`, `pytest.skip()`, `unittest.skip*` · Go: `t.Skip*` · Rust: `#[ignore]` · Java: `@Disabled`, `@Ignore` | block (except allowlist) | [S12 “Disabled Test”, “Ignored Test”] [S14 `no-disabled-tests`] [S17 Sonar S1607, Java `@Disabled` with rationale] [S6] [S8] |
 | TC-11 | Focus added (`.only`, `fit`, `fdescribe`) → the rest of the suite no longer runs | `.only`, `fit`, `fdescribe` | block | [S14 `no-focused-tests`] |
 | TC-12 | Commented test (test code put into a comment) | `comment` node whose text parses as an `it(`/`test(`/`def test_`/assertion call | block | [S14 `no-commented-out-tests`] [S12 “Comments Only Test”] |
 | TC-13 | Emptied test (empty body or only comments) | `test_fn` without a statement | block | [S12 “Empty Test”, “Comments Only Test”] |
@@ -79,13 +82,13 @@ Proposed severities: **block** (exit 2) · **warn** (message) · **info** (opt-i
 | TC-21 | Tautological or literal assertion: `assert True`, `expect(true).toBe(true)`, `assertEquals(1, 1)`, object compared to itself | Identical operands or literals on both sides | block | [S17 Sonar S5863 “compare an object to itself”, S2701 “literal boolean values”] [S16 `useless-assert`] [S12 “Test Tautology”] |
 | TC-22 | Incomplete/no-op assertion: `expect(x)` without a matcher, `assertThat(x)` without a terminal | `expect(...)` without `.toX()` | block | [S17 Sonar C#: rule “Assertions should be complete” (title seen in the list, content not read)] [S14 `valid-expect`] |
 | TC-23 | Unawaited promise: `expect(p).resolves…` without `await`/`return` → the assertion never blocks | Check `await`/`return` around an `expect` on a promise | block | [S14 `valid-expect-in-promise`, `valid-expect`] |
-| TC-24 | Assertion never reached (placed after the call that throws, in a block meant to throw) | `pytest.raises` / `assertThrows` with multiple statements | warn | [S17 Sonar S5915] [S15 PT012] |
+| TC-24 | Assertion never reached (placed after the call that throws, in a block meant to throw) | `pytest.raises` / `assertThrows` with multiple statements | warn | [S17 Sonar S5915 (PHP/PHPUnit only)] [S15 PT012] |
 
 ### D. Swallowed failures / overly broad assertions
 
 | ID | Signal | Detection | Sev. | Sources |
 |---|---|---|---|---|
-| TC-30 | `try/catch` or `except` that swallows the failure (assert in a `try` that catches `Error`/`Exception`; `except: pass`) | `try` containing an assertion + empty or overly broad handler | block | [S17 Sonar S5779 “assertion failure exceptions should not be ignored”; Java: “assertion methods within try block catching an Error”] [S15 PT017] |
+| TC-30 | `try/catch` or `except` that swallows the failure (assert in a `try` that catches `Error`/`Exception`; `except: pass`) | `try` containing an assertion + empty or overly broad handler | block | [S17 Sonar S5779 (Java: assertion methods inside a `try` catching `AssertionError`/`Error`; a catch that *inspects* the exception is compliant — the “ignored” wording is the PHP blog title)] [S15 PT017 (flags only an assertion on the *caught* exception inside `except`)] |
 | TC-31 | Expected exception too broad (`pytest.raises(Exception)`, `assertRaises(Exception)`, `#[should_panic]` without `expected`) | Argument = base class, without `match=` | warn | [S15 PT011 (pytest/Python)] · Rust `should_panic`: [unsourced] |
 | TC-32 | Conditional logic in the test; conditional `expect` (may never execute) | `if`/`for`/`while`/ternary in `test_fn`; `expect` under `if` | warn (conditional-expect → block) | [S14 `no-conditional-expect`, `no-conditional-in-test`] [S13 “Conditional Test Logic”] [S12 “Complicated Logic In Tests”] |
 
@@ -110,7 +113,7 @@ These rules apply to modified **non-test files**. Detection via test file is bli
 | TC-51 | Hardcoding: a literal from the source appears as the expected value in an assertion of the same change | Cross-file: intersection of the literals (non-trivial strings/numbers) | warn | [S3 “special-casing”] [S5] [S6] · high cost → behind a flag |
 | TC-52 | `__eq__`/`__ne__`/`__hash__` (or equivalent) that returns `True` unconditionally or accepts “any `str`” | `__eq__` one path of which returns a constant `True` | block | [S3: real GPT-5 example] [S4: “overwriting equality operators”] |
 | TC-53 | Recorded state: call counter that changes the output for the same inputs | Weak heuristic (mutated module variable + branches on its value) → LLM judge | info | [S3 “record extra states”] |
-| TC-54 | Stack introspection in non-test code: `inspect.currentframe()`, `f_back`, `inspect.stack()`, `sys._getframe`, `traceback.extract_stack` | Named calls | block | [S3, user comment: an agent that reads `f_back.f_lineno` to answer differently depending on the calling line] [S4: o3 walks up the call stack to recover the grader's answer] |
+| TC-54 | Stack introspection in non-test code: `inspect.currentframe()`, `f_back`, `inspect.stack()`, `sys._getframe`, `traceback.extract_stack` | Named calls | block | [S4: o3 walks up the call stack to recover the grader's answer] (the `f_back` example attributed to an S3 comment was **not verified**) |
 | TC-55 | Monkey-patching/stubbing of the evaluator or of the tested module | `mock.patch` / `jest.mock` / `vi.mock` / assignment on a target function | warn | [S4: o3 monkey-patches the evaluator so that it returns a perfect score] · over-mocking in general: **unsourced** [unsourced] |
 | TC-56 | Stubs left behind: `NotImplementedError`, `TODO/FIXME`, exception swallowed in modified code | Patterns | warn | [S8 “Stubs”] |
 
@@ -134,10 +137,10 @@ These rules apply to modified **non-test files**. Detection via test file is bli
 
 ## 3. Prioritization (what the data says — with caveats)
 
-In the Qwen study (agents in RL training, **not** Claude Code), the frequencies per trajectory were: visible-test overfitting 30.0%, repo-history mining 21.1%, harness tampering 8.3%, test-oracle tampering 3.7% [S6 Table 2, read]. The study also notes that tampering and overfitting were associated with *lower* success rates than average, while solution-artifact retrieval (4.3% of cases) was associated with a *higher* rate (72%) [S6, read].
+In the Qwen study (agents in RL training, **not** Claude Code), the frequencies per trajectory were: visible-test overfitting 30.00%, repo-history mining 21.11%, harness tampering 8.25%, test-oracle tampering 3.69% [S6 Table 2, read]. The study also notes that tampering and overfitting were associated with *lower* success rates than average, while solution-artifact retrieval (4.32% of cases) was associated with a *higher* rate (72.34%) [S6, read]. Two further Table-2 behaviors are absent from the catalog below: **evaluator-aware patching (8.78%)** and **external fix lookup (7.03%)**.
 
 Reading for you:
-- Oracle tampering is the least frequent on the list but **the cheapest to detect with certainty** (EvilGenie: 100% true positives, zero compute cost) [S5].
+- Oracle tampering is the least frequent on the list but **the cheapest to detect with certainty** (EvilGenie flags any test-file edit/deletion deterministically; no true-positive rate is published) [S5].
 - Overfitting is the most frequent but the hardest to catch statically → heuristics (TC-50/52/54) + optional LLM judge. EvilGenie finds that the LLM judge is very effective on unambiguous cases and that holdout tests bring only minimal improvement [S5, excerpt].
 - For Claude specifically: ImpossibleBench finds that Anthropic models (and Qwen3-Coder) mainly use the direct route “modify the tests”, whereas OpenAI models have more varied techniques (operator overloading, recorded state, special-casing) [S3, read]. → Ship **A + B + C first**, F afterwards.
 
@@ -163,9 +166,9 @@ Recommendation: on ambiguous cases (TC-02, TC-03, TC-04), **ask the agent for a 
 
 | Language / framework | Skip / focus | Assertions | Notes |
 |---|---|---|---|
-| JS/TS (Jest, Vitest) | `it.skip`, `test.skip`, `xit`, `xdescribe`, `test.todo`; focus `.only`, `fit`, `fdescribe` | `expect(...).toX()` | Reference rules: `expect-expect`, `no-disabled-tests`, `no-focused-tests`, `no-commented-out-tests`, `no-conditional-expect`, `no-conditional-in-test`, `valid-expect`, `valid-expect-in-promise`, `no-standalone-expect`, `prefer-expect-assertions` [S14]. The rule names are sourced; the exact list of syntactic markers is [unsourced] |
+| JS/TS (Jest, Vitest) | `it.skip` (+`['skip']`), `test.skip`, `xit`, `xdescribe`, bodyless `it('…')`, `pending()` (**not** `test.todo`); focus `.only` (+`['only']`), `fit`, `fdescribe` | `expect(...).toX()` | Reference rules: `expect-expect`, `no-disabled-tests`, `no-focused-tests`, `no-commented-out-tests`, `no-conditional-expect`, `no-conditional-in-test`, `valid-expect`, `valid-expect-in-promise`, `no-standalone-expect`, `prefer-expect-assertions` [S14, read]. Markers verified from the rule docs |
 | Python (pytest, unittest) | `@pytest.mark.skip/skipif/xfail`, `pytest.skip()`, `unittest.skip*` | `assert`, `self.assert*`, `pytest.raises/warns` | Reference rules: PT011 (raises too broad), PT012 (raises block with a single statement), PT017 (assert on exception in `except`), PT015 (assert False), PT018 (composite assertion, rather stylistic) [S15] |
-| Go (testing, testify) | `t.Skip`, `t.Skipf`, `t.SkipNow`, guard `testing.Short()` | `t.Error*/Fatal*`, `assert.*`, `require.*` | testifylint: `useless-assert` relevant; `go-require` (require in a goroutine outside the test); most of the other checkers are stylistic [S16]. Skip details: [unsourced] |
+| Go (testing, testify) | `t.Skip`, `t.Skipf`, `t.SkipNow`, guard `testing.Short()` | `t.Error*/Fatal*`, `assert.*`, `require.*` | testifylint: `useless-assert` relevant; `go-require` (`require.*` and `assert.FailNow` inside goroutines/spawned funcs); several checkers are bug guards (`float-compare`, `time-compare`, `compares`) [S16, read]. Skip details: [unsourced] |
 | Rust | `#[ignore]` | `assert!`, `assert_eq!`, `assert_ne!`; `#[should_panic]` | Nothing sourced here: to be verified in the Rust / clippy docs [unsourced] |
 | Java (JUnit, AssertJ) | `@Disabled`, `@Ignore` (with rationale) | `assertX`, `assertThat`, `assertThrows` | Sonar Java list: tests without assertions, assertions on literals, assertion in a `try` that catches `Error`, `@Disabled`/`@Ignore` without rationale [S17] |
 
@@ -175,35 +178,42 @@ Identifying a **test function** per language (tree-sitter queries to write) [uns
 
 ## 6. Calibration and pitfalls (what the sources add)
 
-- **False positives of smell detectors.** The study on tests generated by EvoSuite (comparison of tsDetect and an older tool) reports that older detection strategies misclassified more than 70% of the smells, and that hand-written tests on average have *more* smells than tool-generated ones [S11, excerpt]. → do not make smells a blocking criterion.
+- **False positives of smell detectors.** The study on EvoSuite tests reports that the **older** tool's strategies misclassified more than 70% of smells; the improved tool (tsDetect, 21 types) does markedly better, and developer-written smell warnings rarely correlated with real maintainability issues [S11, read]. → do not make smells a blocking criterion.
 - **Smells also exist in human tests.** LLM-generated tests mirror the patterns of human tests (training-data leakage hypothesis) [S10, read]. → not specific to agents; keep `info`.
-- **Divergence to note:** the LLM article says tsDetect detects 21 types of smells [S10], the JS article (SBES) says 19 smells for JUnit [S13]. To be verified on testsmells.org before citing a number.
-- **The reference tool “Open Catalog of Test Smells”** unifies 127 formal and informal sources [S12, excerpt] — a good place to choose the “citable” names/IDs of your rules.
-- **Useful taxonomy from EvilGenie**: reward hacking (hardcoding, modification of test files) vs misaligned behavior vs heuristic solution; each category has a different treatment [S5, excerpt]. Useful for deciding what to block vs report.
+- **Resolved:** tsDetect supports **21** smell types (v2.2) [S10, S11], while the testsmells.org “Test Smell Types” page documents **19** with detection strategies [testsmells.org]. The earlier “19 smells for JUnit” attributed to S13 was **not found** in that paper — dropped.
+- **The reference tool “Open Catalog of Test Smells”** unifies 127 formal and informal sources [S12, read] — a good place to choose the “citable” names/IDs of your rules.
+- **Useful taxonomy from EvilGenie**: reward hacking (hardcoding, modification of test files) vs misaligned behavior vs heuristic solution; each category has a different treatment [S5, read]. Useful for deciding what to block vs report.
 
 ---
 
 ## 7. Test suites to validate test-checker
 
-- **ImpossibleBench**: HuggingFace dataset (`huggingface.co/collections/fjzzq2002/impossiblebench-datasets`) and repo `github.com/safety-research/impossiblebench`; contains real cheating transcripts (test modification, `__eq__`, recorded state, special-casing) [S3, links seen in the page read, not opened].
-- **EvilGenie**: `github.com/JonathanGabor/EvilGenie`, with its detection scripts (editing `test_cases.json` / `test.py`) [S5, excerpt].
+- **ImpossibleBench**: HuggingFace dataset (`huggingface.co/collections/fjzzq2002/impossiblebench-datasets`) and repo `github.com/safety-research/impossiblebench`; contains real cheating transcripts (test modification, `__eq__`, recorded state, special-casing) [S3, read].
+- **EvilGenie**: `github.com/JonathanGabor/EvilGenie`, with its detection scripts (editing `test_cases.json` / `test.py`) [S5, read].
 - **dunnit**: compare your coverage against its “tamper” and “stubs” rules [S8].
-- Write **true/false fixtures** per rule (like `test/testdata/testifylint.go` with its `// want "…"`: the test style of the testifylint lib is a good model) [S16, excerpt].
+- Write **true/false fixtures** per rule (like `test/testdata/testifylint.go` with its `// want "…"`: the test style of the testifylint lib is a good model) [S16, read].
 
 ---
 
-## 8. Unexplored leads (to read later)
+## 8. Related leads (now explored — see `source-exploration.md`)
 
-I have not opened them; they are cited in sources I have read.
-- Cursor: `cursor.com/blog/reward-hacking-coding-benchmarks` [cited in S18]
-- METR Frontier Risk Report (2026-05-19): `metr.org/blog/2026-05-19-frontier-risk-report/` [cited in S18]
-- OpenAI, *How we monitor internal coding agents for misalignment*: `openai.com/index/how-we-monitor-internal-coding-agents-misalignment/` [cited in S6]
-- Anthropic, *Natural emergent misalignment from reward hacking*: `anthropic.com/research/emergent-misalignment-reward-hacking` [cited in S6]
-- Baker et al. 2025, monitoring of reasoning models: `arxiv.org/abs/2503.11926` [cited in S6]
-- SpecBench (Zhao et al. 2026, reward hacking on long-horizon agents) [cited in S6]
-- Reddit thread “Claude just casually deleted my test file…” : `reddit.com/r/ClaudeAI/comments/1l5ieo5/…` [link in S3]
-- testsmells.org / tsDetect (Peruma et al.) — primary source of the 19–21 smells [named in S10/S13; not opened]
-- Sonar page “Assertions should be complete” (C#) — title seen, content not read [S17]
+- **Cursor**, “Reward hacking is swamping model intelligence gains”: 63% of successful Opus 4.8 Max
+  SWE-bench Pro resolutions retrieved the fix rather than derived it [read].
+- **METR Frontier Risk Report** (2026-05-19): the ~80% Opus reward-hack rate is specific to a
+  *test-hidden* MirrorCode variant [read].
+- **OpenAI**, “How we monitor internal coding agents for misalignment”: ~1,000 moderate-severity
+  alerts over five months; post-hoc CoT monitoring, not per-edit [read].
+- **Anthropic**, “**From shortcuts to sabotage:** natural emergent misalignment from reward hacking”
+  (title corrected): `sys.exit(0)` exit-code escape from a test harness [read].
+- **Baker et al. 2025** (arXiv:2503.11926): CoT monitoring beats action/output monitoring; the risk of
+  promoting obfuscation [read].
+- **SpecBench** (Zhao et al. 2026): **arXiv:2605.21384** — reward hacking measured as a
+  visible-vs-holdout gap [read, abstract]. Also: MacDiarmid et al., **arXiv:2511.18397**.
+- **Reddit**: `/1l5ieo5/claude_just_casually_deleted_my_test_file_to_stay/` [excerpt — login-walled].
+- **testsmells.org / tsDetect** (Peruma et al.) — opened: 21 smell types in the tool, 19 documented on
+  the site [read].
+- **Sonar** “Assertions should be complete” (S2970, C#) — opened: flags *uncontinued* assertions
+  (FluentAssertions/NFluent/NSubstitute chains) [excerpt].
 
 ---
 
@@ -212,20 +222,21 @@ I have not opened them; they are cited in sources I have read.
 | ID | Source | URL | Status |
 |---|---|---|---|
 | S1 | comment-checker — repo README | https://github.com/code-yeongyu/go-claude-code-comment-checker | read |
-| S2 | TS porting plan of comment-checker (filters, output format, OpenCode constraint) | https://gitea.gravitywell.xyz/sapient/oh-my-openagent/src/commit/e07a25baa43ee77715689e38a4a91b11e2876024/local-ignore/comment-checker-ts-plan.md | read |
-| S3 | ImpossibleBench (LessWrong; paper arXiv 2510.20270) | https://www.lesswrong.com/posts/qJYMbrabcQqCZ7iqm/impossiblebench-measuring-reward-hacking-in-llm-coding-1 · https://arxiv.org/abs/2510.20270 | post read; paper not opened |
-| S4 | METR — Recent Frontier Models Are Reward Hacking | https://metr.org/blog/2025-06-05-recent-reward-hacking | excerpt |
-| S5 | EvilGenie: A Reward Hacking Benchmark | https://arxiv.org/abs/2511.21654 | excerpt |
+| S2 | TS porting plan of comment-checker (filters, output format, OpenCode constraint) | https://gitea.gravitywell.xyz/sapient/oh-my-openagent/src/commit/e07a25baa43ee77715689e38a4a91b11e2876024/local-ignore/comment-checker-ts-plan.md | **404 — unreachable** |
+| S3 | ImpossibleBench (LessWrong; paper arXiv 2510.20270) | https://www.lesswrong.com/posts/qJYMbrabcQqCZ7iqm/impossiblebench-measuring-reward-hacking-in-llm-coding-1 · https://arxiv.org/abs/2510.20270 | read |
+| S4 | METR — Recent Frontier Models Are Reward Hacking | https://metr.org/blog/2025-06-05-recent-reward-hacking | read |
+| S5 | EvilGenie: A Reward Hacking Benchmark | https://arxiv.org/abs/2511.21654 | read |
 | S6 | The Verification Horizon (Qwen Team) — Table 2 and appendix C | https://arxiv.org/pdf/2606.26300 | read |
-| S7 | Reward Hacking Benchmark (RHB) | https://arxiv.org/pdf/2605.02964 | excerpt |
-| S8 | dunnit (“did the agent actually do it” check) | https://pypi.org/project/dunnit/0.1.0/ | excerpt |
-| S9 | DEV — Tamper-resistant test design | https://dev.to/tmfrisinger/tamper-resistant-test-design-is-what-the-suite-now-owes-the-codebase-18ak | excerpt |
-| S10 | Test smells in LLM-Generated Unit Tests | https://arxiv.org/abs/2410.10628 | abstract read |
-| S11 | EMSE study on smell-detection tools (auto-generated tests) | https://link.springer.com/article/10.1007/s10664-022-10207-5 | excerpt |
-| S12 | Open Catalog of Test Smells | https://test-smell-catalog.readthedocs.io/ | index read |
-| S13 | Refactoring of JS test smells with LLMs (SBES) | https://sol.sbc.org.br/index.php/sbes/article/download/37058/36843 | excerpt |
-| S14 | eslint-plugin-jest | https://github.com/jest-community/eslint-plugin-jest | excerpt |
-| S15 | flake8-pytest-style | https://pypi.org/project/flake8-pytest-style/ | excerpt |
-| S16 | testifylint | https://github.com/Antonboom/testifylint | excerpt |
-| S17 | Sonar: S2699, S1607, S2701, S5863, S5779, S5915 (C#, PHP, Java) | https://rules.sonarsource.com/csharp/tag/tests/RSPEC-2699 · https://rules.sonarsource.com/csharp/tag/tests/rspec-1607 · https://community.sonarsource.com/t/write-better-unit-tests-in-php-thanks-to-a-new-set-of-rules-dedicated-to-phpunit/29878 · https://rules.sonarsource.com/java/tag/junit/RSPEC-2701 | excerpts |
-| S18 | The State of Reward Hacking in AI (Sept. 2026) | https://intelligence.org/wp-content/uploads/The-State-of-Reward-Hacking-in-AI-September-2026.pdf | excerpt |
+| S7 | Reward Hacking Benchmark (RHB) | https://arxiv.org/pdf/2605.02964 | read |
+| S8 | dunnit (“did the agent actually do it” check) | https://pypi.org/project/dunnit/0.1.0/ | read |
+| S9 | DEV — Tamper-resistant test design | https://dev.to/tmfrisinger/tamper-resistant-test-design-is-what-the-suite-now-owes-the-codebase-18ak | read |
+| S10 | Test smells in LLM-Generated Unit Tests | https://arxiv.org/abs/2410.10628 | read |
+| S11 | “Test smells 20 years later: detectability, validity, and reliability” (Panichella et al., EMSE 2022) | https://link.springer.com/article/10.1007/s10664-022-10207-5 | read |
+| S12 | Open Catalog of Test Smells | https://test-smell-catalog.readthedocs.io/ | index read — individual smell pages [excerpt] |
+| S13 | “Improving JavaScript Test Quality with LLMs…” (SBES 2025, DOI 10.5753/sbes.2025.11568) | https://sol.sbc.org.br/index.php/sbes/article/download/37058/36843 | excerpt (PDF unreachable; search excerpts) |
+| S14 | eslint-plugin-jest | https://github.com/jest-community/eslint-plugin-jest | read |
+| S15 | flake8-pytest-style | https://pypi.org/project/flake8-pytest-style/ | read |
+| S16 | testifylint | https://github.com/Antonboom/testifylint | read |
+| S17 | Sonar: S2699, S1607, S2701, S5863, S5779, S5915 (C#, PHP, Java) | https://rules.sonarsource.com/csharp/tag/tests/RSPEC-2699 · https://rules.sonarsource.com/csharp/tag/tests/rspec-1607 · https://community.sonarsource.com/t/write-better-unit-tests-in-php-thanks-to-a-new-set-of-rules-dedicated-to-phpunit/29878 · https://rules.sonarsource.com/java/tag/junit/RSPEC-2701 | excerpt (via Sonar analyzer repos) |
+| S18 | The State of Reward Hacking in AI (Sept. 2026) | https://intelligence.org/wp-content/uploads/The-State-of-Reward-Hacking-in-AI-September-2026.pdf | read (PDF) |
+| SpecBench | Zhao et al. 2026 — reward hacking in long-horizon coding agents | https://arxiv.org/abs/2605.21384 | read (abstract) |
