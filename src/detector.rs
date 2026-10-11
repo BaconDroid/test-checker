@@ -1,18 +1,14 @@
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::ops::ControlFlow;
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::{Duration, Instant};
 
-use tree_sitter::{ParseOptions, ParseState, Parser, Query, QueryCursor, StreamingIterator};
+use tree_sitter::{Query, QueryCursor, StreamingIterator};
 
+use crate::engine;
 use crate::language::{
     comment_query, is_test_callee, is_test_function_name, language_for_path, test_query,
 };
 use crate::models::{Confidence, Finding};
 use crate::rules::{self, AddedLine};
-
-const PARSE_TIME_BUDGET: Duration = Duration::from_millis(50);
 
 struct Runtime {
     name: String,
@@ -24,10 +20,6 @@ struct Runtime {
 
 static RUNTIMES: LazyLock<Mutex<HashMap<String, Arc<Runtime>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-
-thread_local! {
-    static PARSERS: RefCell<HashMap<String, Parser>> = RefCell::new(HashMap::new());
-}
 
 #[derive(Clone, Copy, Debug)]
 struct Body {
@@ -173,41 +165,7 @@ pub fn supports_test_bodies(name: &str) -> bool {
 }
 
 fn parse_with_runtime(runtime: &Runtime, source: &[u8]) -> Option<tree_sitter::Tree> {
-    PARSERS.with(|parsers| {
-        let mut parsers = parsers.borrow_mut();
-        if let Some(parser) = parsers.get_mut(&runtime.name) {
-            parse_with_budget(parser, source)
-        } else {
-            let mut parser = Parser::new();
-            if parser.set_language(&runtime.language).is_err() {
-                return None;
-            }
-            let tree = parse_with_budget(&mut parser, source);
-            parsers.insert(runtime.name.clone(), parser);
-            tree
-        }
-    })
-}
-
-fn parse_with_budget(parser: &mut Parser, source: &[u8]) -> Option<tree_sitter::Tree> {
-    let start = Instant::now();
-    let mut progress = |_state: &ParseState| {
-        if start.elapsed() > PARSE_TIME_BUDGET {
-            ControlFlow::Break(())
-        } else {
-            ControlFlow::Continue(())
-        }
-    };
-    let options = ParseOptions::new().progress_callback(&mut progress);
-    let len = source.len();
-    let mut read = |offset: usize, _: tree_sitter::Point| {
-        if offset < len {
-            &source[offset..]
-        } else {
-            Default::default()
-        }
-    };
-    parser.parse_with_options(&mut read, None, Some(options))
+    engine::parse_cached(&runtime.name, &runtime.language, source)
 }
 
 fn collect_comments(
@@ -217,22 +175,10 @@ fn collect_comments(
     row_offset: usize,
     out: &mut Vec<(usize, String)>,
 ) {
-    let source = content.as_bytes();
-    let root = tree.root_node();
-    let mut cursor = QueryCursor::new();
-    cursor.set_byte_range(0..source.len());
-    let mut captures = cursor.captures(&runtime.comment_query, root, source);
-    captures.advance();
-    while let Some((query_match, capture_index)) = captures.get() {
-        if let Some(capture) = query_match.captures.get(*capture_index) {
-            if let Ok(text) = capture.node.utf8_text(source) {
-                out.push((
-                    capture.node.start_position().row + 1 + row_offset,
-                    text.to_string(),
-                ));
-            }
-        }
-        captures.advance();
+    for (row, _kind, text) in
+        engine::capture_texts(&runtime.comment_query, tree, content.as_bytes())
+    {
+        out.push((row + 1 + row_offset, text));
     }
     collect_injected_comments(runtime, tree, content, row_offset, out);
 }
@@ -247,45 +193,22 @@ fn collect_injected_comments(
     let Some(query) = &runtime.injection_query else {
         return;
     };
-    let source = content.as_bytes();
-    let capture_names = query.capture_names();
-    let mut cursor = QueryCursor::new();
-    cursor.set_byte_range(0..source.len());
-    let mut matches = cursor.matches(query, tree.root_node(), source);
-    matches.advance();
-    while let Some(query_match) = matches.get() {
-        let mut injected_content: Option<tree_sitter::Node> = None;
-        let mut injected_language: Option<&str> = None;
-        for setting in query.property_settings(query_match.pattern_index) {
-            if setting.key.as_ref() == "injection.language" {
-                injected_language = setting.value.as_deref();
-            }
-        }
-        for capture in query_match.captures {
-            match capture_names.get(capture.index as usize).copied() {
-                Some("injection.content") => injected_content = Some(capture.node),
-                Some("injection.language") => {
-                    injected_language = capture.node.utf8_text(source).ok();
-                }
-                _ => {}
-            }
-        }
-        if let (Some(node), Some(injected)) = (injected_content, injected_language) {
-            if let (Ok(text), Some(inner)) =
-                (node.utf8_text(source), runtime_by_name(injected.trim()))
-            {
-                if let Some(inner_tree) = parse_with_runtime(&inner, text.as_bytes()) {
-                    collect_comments(
-                        &inner,
-                        &inner_tree,
-                        text,
-                        node.start_position().row + row_offset,
-                        out,
-                    );
-                }
-            }
-        }
-        matches.advance();
+    for injection in engine::injection_regions(query, tree, content.as_bytes()) {
+        let Some(inner) = runtime_by_name(&injection.language) else {
+            continue;
+        };
+        let Some(inner_tree) =
+            engine::parse_cached(&inner.name, &inner.language, injection.content.as_bytes())
+        else {
+            continue;
+        };
+        collect_comments(
+            &inner,
+            &inner_tree,
+            &injection.content,
+            injection.row + row_offset,
+            out,
+        );
     }
 }
 
@@ -319,18 +242,13 @@ fn normalized_comment(text: &str) -> String {
 
 /// Nested test bodies (a `describe` containing an `it`) can classify the same line twice.
 fn dedupe(findings: Vec<Finding>) -> Vec<Finding> {
-    let mut seen = HashSet::new();
-    findings
-        .into_iter()
-        .filter(|finding| {
-            seen.insert(format!(
-                "{}\u{1f}{}\u{1f}{}",
-                finding.rule,
-                finding.line_number,
-                finding.normalized_text()
-            ))
-        })
-        .collect()
+    engine::dedupe_by(findings, |finding| {
+        (
+            finding.rule.clone(),
+            finding.line_number,
+            finding.normalized_text(),
+        )
+    })
 }
 
 fn capture_bodies(
@@ -587,43 +505,7 @@ fn body_signature(lines: &[AddedLine<'_>]) -> String {
 /// New (added) line indices in `new_content`, computed with an LCS over trimmed lines so a line
 /// whose text happens to appear elsewhere in the old content is not dropped.
 fn added_lines(old_content: &str, new_content: &str) -> HashSet<usize> {
-    let old: Vec<&str> = old_content.lines().map(str::trim).collect();
-    let new: Vec<&str> = new_content.lines().map(str::trim).collect();
-    if old.len().saturating_mul(new.len()) > 4_000_000 {
-        let old_set: HashSet<&str> = old.iter().copied().collect();
-        return new
-            .iter()
-            .enumerate()
-            .filter(|(_, line)| !old_set.contains(*line))
-            .map(|(index, _)| index)
-            .collect();
-    }
-
-    let (rows, columns) = (new.len(), old.len());
-    let mut lengths = vec![vec![0_u32; columns + 1]; rows + 1];
-    for row in (0..rows).rev() {
-        for column in (0..columns).rev() {
-            lengths[row][column] = if new[row] == old[column] {
-                lengths[row + 1][column + 1] + 1
-            } else {
-                lengths[row + 1][column].max(lengths[row][column + 1])
-            };
-        }
-    }
-    let mut matched = vec![false; rows];
-    let (mut row, mut column) = (0, 0);
-    while row < rows && column < columns {
-        if new[row] == old[column] {
-            matched[row] = true;
-            row += 1;
-            column += 1;
-        } else if lengths[row + 1][column] >= lengths[row][column + 1] {
-            row += 1;
-        } else {
-            column += 1;
-        }
-    }
-    (0..rows).filter(|&index| !matched[index]).collect()
+    engine::added_lines(old_content, new_content)
 }
 
 fn line_comment_token(language: &str) -> Option<&'static str> {

@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::detector::TestDetector;
+use crate::engine::null_default;
 use crate::filters::{SuppressionFilter, apply_filters};
 use crate::language::{is_test_path, language_for_path};
-use crate::models::{Edit, null_default};
+use crate::models::Edit;
 use crate::output::format_hook_message;
 use crate::rules;
 

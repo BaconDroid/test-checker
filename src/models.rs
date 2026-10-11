@@ -1,4 +1,6 @@
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
+
+use crate::engine::null_default;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -63,14 +65,6 @@ pub struct Edit {
     pub old_string: String,
     #[serde(default, alias = "newString", deserialize_with = "null_default")]
     pub new_string: String,
-}
-
-pub(crate) fn null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Default + Deserialize<'de>,
-{
-    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[cfg(test)]
