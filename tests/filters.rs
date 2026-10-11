@@ -1,5 +1,6 @@
 use test_checker::filters::{
-    BddFilter, DirectiveFilter, SuppressionFilter, apply_filters, is_agent_memo_phrase,
+    BddFilter, DirectiveFilter, ShebangFilter, SuppressionFilter, apply_filters,
+    is_agent_memo_phrase,
 };
 use test_checker::models::{Confidence, Finding};
 
@@ -50,12 +51,24 @@ fn suppression_filter_given_marker_returns_true() {
 }
 
 #[test]
+fn shebang_filter_given_shebang_returns_true() {
+    // given
+    let filter = ShebangFilter;
+
+    // when / then
+    assert!(filter.should_skip(&finding("#!/usr/bin/env bats")));
+    assert!(filter.should_skip(&finding("#! /usr/bin/env bash")));
+    assert!(!filter.should_skip(&finding("# regular comment")));
+}
+
+#[test]
 fn apply_filters_given_allowed_and_suppressed_returns_empty() {
     // given
     let findings = vec![
         finding("# given"),
         finding("// @ts-ignore"),
         finding("# test-checker: allow"),
+        finding("#!/usr/bin/env bats"),
     ];
 
     // when

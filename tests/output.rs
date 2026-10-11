@@ -116,6 +116,40 @@ fn format_hook_message_given_empty_list_returns_empty_string() {
 }
 
 #[test]
+fn format_hook_message_given_agent_memo_finding_contains_memo_banner() {
+    // given
+    let findings = vec![finding(
+        "it('now uses the new parser')",
+        4,
+        "agent-memo-test",
+    )];
+
+    // when
+    let result = format_hook_message(&findings, "");
+
+    // then
+    assert!(result.contains("AGENT MEMO TEST DETECTED"));
+    assert!(result.contains("CODE SMELL"));
+    assert!(!result.contains("TEST-WEAKENING DETECTED - IMMEDIATE ACTION REQUIRED"));
+}
+
+#[test]
+fn format_hook_message_given_mixed_findings_keeps_the_weakening_header() {
+    // given
+    let findings = vec![
+        finding("A test skip marker was added.", 4, "skip-added"),
+        finding("it('now uses the new parser')", 9, "agent-memo-test"),
+    ];
+
+    // when
+    let result = format_hook_message(&findings, "");
+
+    // then
+    assert!(result.contains("TEST-WEAKENING DETECTED - IMMEDIATE ACTION REQUIRED"));
+    assert!(result.contains("AGENT MEMO TEST DETECTED"));
+}
+
+#[test]
 fn format_hook_message_given_multiple_findings_groups_into_one_block() {
     // given
     let findings = vec![
