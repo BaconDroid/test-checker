@@ -146,6 +146,29 @@ fn tautological_assertion_given_comparison_skips_rule() {
     assert!(!rule_present(&findings, "tautological-assertion"));
 }
 
+#[test]
+fn tautological_assertion_given_two_identical_added_lines_reports_each_line() {
+    // given: the same tautology added in two separate tests
+    let change = make_change(
+        "tests/test_two.py",
+        "python",
+        "",
+        "def test_a():\n    assert True\n\ndef test_b():\n    assert True\n",
+        true,
+    );
+
+    // when
+    let findings = TestDetector::new().detect(&change);
+
+    // then: each added occurrence keeps its own line, so neither collapses
+    let lines: Vec<usize> = findings
+        .iter()
+        .filter(|finding| finding.rule == "tautological-assertion")
+        .map(|finding| finding.line)
+        .collect();
+    assert_eq!(lines, vec![2, 5]);
+}
+
 // --- empty-test ------------------------------------------------------------
 
 #[test]
@@ -368,6 +391,30 @@ fn gutted_test_given_replaced_assertion_skips_rule() {
 
     // then
     assert!(!rule_present(&findings, "gutted-test"));
+}
+
+#[test]
+fn gutted_test_given_duplicate_removed_assertion_reports_removed_occurrence_line() {
+    // given: one of two identical assertions is removed
+    let change = make_change(
+        "tests/test_a.py",
+        "python",
+        "def test_a():\n    assert foo() == 1\n    assert foo() == 1\n",
+        "def test_a():\n    assert foo() == 1\n",
+        false,
+    );
+
+    // when
+    let findings = TestDetector::new().detect(&change);
+
+    // then: the finding points at the removed (second) occurrence at line 3,
+    // not the surviving first match at line 2
+    let gutted: Vec<usize> = findings
+        .iter()
+        .filter(|finding| finding.rule == "gutted-test")
+        .map(|finding| finding.line)
+        .collect();
+    assert_eq!(gutted, vec![3]);
 }
 
 // --- swallowed-error -------------------------------------------------------
@@ -832,6 +879,31 @@ fn mock_of_sut_given_python_dispatch_call_skips_rule() {
 
     // then
     assert!(!rule_present(&findings, "mock-of-sut"));
+}
+
+#[test]
+fn detect_pipeline_given_allow_marker_near_one_identical_tautology_keeps_the_other() {
+    // given: two identical tautologies, an allow marker only near the first
+    let change = make_change(
+        "tests/test_two.py",
+        "python",
+        "",
+        "def test_a():\n    # test-guard: allow\n    assert True\n\ndef test_b():\n    assert True\n",
+        true,
+    );
+
+    // when
+    let findings = TestDetector::new().detect(&change);
+    let findings = test_checker::filters::apply_filters(&findings, &change.new_text);
+
+    // then: the marker suppresses only the first tautology; the second at line
+    // 6 survives instead of being hidden by the collapsed first-match finding
+    let lines: Vec<usize> = findings
+        .iter()
+        .filter(|finding| finding.rule == "tautological-assertion")
+        .map(|finding| finding.line)
+        .collect();
+    assert_eq!(lines, vec![6]);
 }
 
 // --- Cross-cutting gates ---------------------------------------------------

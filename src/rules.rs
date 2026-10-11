@@ -11,11 +11,21 @@ use crate::detector::{Change, TestBlock};
 use crate::filters;
 use crate::models::{Confidence, Finding};
 
+/// One diff occurrence: its 1-based line in the source stream plus the text.
+type LineOccurrence = (usize, String);
+
+/// Added and removed occurrences, in source order.
+type LineDiff = (Vec<LineOccurrence>, Vec<LineOccurrence>);
+
 /// Everything the classifiers need for one changed file, captured once.
+///
+/// `added` and `removed` pair each diff occurrence with the 1-based line it
+/// occupies in `new_text` (added) or `old_text` (removed), so a rule can report
+/// the occurrence's real line without re-searching for the first matching text.
 pub struct Derived<'a> {
     change: &'a Change,
-    added: Vec<String>,
-    removed: Vec<String>,
+    added: Vec<LineOccurrence>,
+    removed: Vec<LineOccurrence>,
     added_code: Vec<String>,
     removed_code: Vec<String>,
     blocks: Vec<TestBlock>,
@@ -28,11 +38,11 @@ impl<'a> Derived<'a> {
         let (added, removed) = diff_lines(&change.old_text, &change.new_text);
         let added_code = added
             .iter()
-            .map(|line| filters::code_text(line, change.language))
+            .map(|(_, line)| filters::code_text(line, change.language))
             .collect();
         let removed_code = removed
             .iter()
-            .map(|line| filters::code_text(line, change.language))
+            .map(|(_, line)| filters::code_text(line, change.language))
             .collect();
         Self {
             change,
@@ -164,14 +174,14 @@ impl TautologicalAssertionFilter {
     #[must_use]
     pub fn hits(&self, d: &Derived<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
-        for (raw, code) in d.added.iter().zip(&d.added_code) {
+        for ((line_number, _), code) in d.added.iter().zip(&d.added_code) {
             if code.trim().is_empty() || !filters::tautological_hit(code) {
                 continue;
             }
             push_finding(
                 &mut out,
                 d,
-                raw,
+                *line_number,
                 "tautological-assertion",
                 "Assertion is tautological (always true).",
                 Confidence::High,
@@ -256,12 +266,12 @@ impl GuttedTestFilter {
             let before = d
                 .removed
                 .iter()
-                .filter(|line| filters::is_test_declaration(line, d.language()))
+                .filter(|(_, line)| filters::is_test_declaration(line, d.language()))
                 .count();
             let after = d
                 .added
                 .iter()
-                .filter(|line| filters::is_test_declaration(line, d.language()))
+                .filter(|(_, line)| filters::is_test_declaration(line, d.language()))
                 .count();
             if before != after {
                 return Vec::new();
@@ -272,13 +282,13 @@ impl GuttedTestFilter {
             .iter()
             .zip(&d.removed_code)
             .find(|(_, code)| filters::is_assertion_line(code))
-            .map(|(raw, _)| raw);
-        let Some(sample) = sample else {
+            .map(|((line_number, _), _)| *line_number);
+        let Some(line_number) = sample else {
             return Vec::new();
         };
         vec![Finding::new(
             &d.change.file_path,
-            locate_line(&d.change.old_text, sample),
+            line_number,
             "gutted-test",
             "All assertions were removed and nothing replaced them.",
             Confidence::High,
@@ -302,16 +312,16 @@ impl SwallowedErrorFilter {
             .iter()
             .zip(&d.added_code)
             .find(|(_, code)| swallowed_error_hit(code, d.language()))
-            .map(|(raw, _)| raw)
-            .or_else(|| d.added.first());
-        let Some(sample) = sample else {
+            .map(|((line_number, _), _)| *line_number)
+            .or_else(|| d.added.first().map(|(line_number, _)| *line_number));
+        let Some(line_number) = sample else {
             return Vec::new();
         };
         let mut out = Vec::new();
         push_finding(
             &mut out,
             d,
-            sample,
+            line_number,
             "swallowed-error",
             "Errors are swallowed (empty catch / except pass / Err(_) => {}).",
             Confidence::Medium,
@@ -379,7 +389,7 @@ fn mock_of_sut_javascript(d: &Derived<'_>) -> Vec<Finding> {
     }
     let imported = imported_names_from_stem(&d.change.new_text, &stem, d.language());
     let mut out = Vec::new();
-    for line in &d.added {
+    for (line_number, line) in &d.added {
         let code = filters::strip_comments(line, d.language());
         let code = code.trim();
         if code.is_empty() {
@@ -394,7 +404,7 @@ fn mock_of_sut_javascript(d: &Derived<'_>) -> Vec<Finding> {
         push_finding(
             &mut out,
             d,
-            line,
+            *line_number,
             "mock-of-sut",
             MOCK_OF_SUT_MESSAGE,
             Confidence::Medium,
@@ -409,7 +419,7 @@ fn mock_of_sut_python(d: &Derived<'_>) -> Vec<Finding> {
         return Vec::new();
     }
     let mut out = Vec::new();
-    for line in &d.added {
+    for (line_number, line) in &d.added {
         let code = filters::strip_comments(line, d.language());
         let code = code.trim();
         if code.is_empty() {
@@ -424,7 +434,7 @@ fn mock_of_sut_python(d: &Derived<'_>) -> Vec<Finding> {
         push_finding(
             &mut out,
             d,
-            line,
+            *line_number,
             "mock-of-sut",
             MOCK_OF_SUT_MESSAGE,
             Confidence::Medium,
@@ -458,13 +468,13 @@ impl OverMockingFilter {
             .iter()
             .zip(&d.added_code)
             .find(|(_, code)| filters::mock_identifier_hit(code))
-            .map(|(raw, _)| raw);
-        let Some(sample) = sample else {
+            .map(|((line_number, _), _)| *line_number);
+        let Some(line_number) = sample else {
             return Vec::new();
         };
         vec![Finding::new(
             &d.change.file_path,
-            locate_line(&d.change.new_text, sample),
+            line_number,
             "over-mocking",
             format!("New mock identifiers added (net +{}).", added - removed),
             Confidence::Low,
@@ -563,11 +573,18 @@ where
     S: Fn(&str) -> bool,
 {
     let mut out = Vec::new();
-    for (raw, code) in d.added.iter().zip(&d.added_code) {
+    for ((line_number, raw), code) in d.added.iter().zip(&d.added_code) {
         if code.trim().is_empty() || skip(raw) || !predicate(code) {
             continue;
         }
-        push_finding(&mut out, d, raw, spec.rule, spec.message, spec.confidence);
+        push_finding(
+            &mut out,
+            d,
+            *line_number,
+            spec.rule,
+            spec.message,
+            spec.confidence,
+        );
     }
     out
 }
@@ -575,12 +592,11 @@ where
 fn push_finding(
     out: &mut Vec<Finding>,
     d: &Derived<'_>,
-    line: &str,
+    line_number: usize,
     rule: &'static str,
     message: &str,
     confidence: Confidence,
 ) {
-    let line_number = locate_line(&d.change.new_text, line);
     out.push(Finding::new(
         &d.change.file_path,
         line_number,
@@ -665,7 +681,7 @@ fn block_is_added(d: &Derived<'_>, block: &TestBlock) -> bool {
         return true;
     }
     let mut added: HashMap<String, i64> = HashMap::new();
-    for line in &d.added {
+    for (_, line) in &d.added {
         *added
             .entry(
                 filters::strip_comments(line, d.language())
@@ -700,41 +716,62 @@ fn split_lines(text: &str) -> Vec<&str> {
     text.split('\n').collect()
 }
 
-fn diff_lines(old_text: &str, new_text: &str) -> (Vec<String>, Vec<String>) {
+/// Order-insensitive multiset line diff that preserves each occurrence's real
+/// line number.
+///
+/// Returns `added` as `(line in new_text, text)` and `removed` as
+/// `(line in old_text, text)`. For a text with `old` and `new` occurrences, the
+/// first `min(old, new)` occurrences are treated as matched; any surplus is the
+/// additive/removal set. Tracking the line per occurrence keeps two identical
+/// added lines as two distinct findings instead of collapsing them onto the
+/// first match. Texts stay grouped by first appearance, as before, so the only
+/// behavioral change is the per-occurrence line.
+fn diff_lines(old_text: &str, new_text: &str) -> LineDiff {
     let old_lines = split_lines(old_text);
     let new_lines = split_lines(new_text);
     let old_count = count_occurrences(&old_lines);
     let new_count = count_occurrences(&new_lines);
-
-    let mut added = Vec::new();
-    let mut seen: HashSet<&str> = HashSet::new();
-    for line in &new_lines {
-        if !seen.insert(line) {
-            continue;
-        }
-        let delta =
-            new_count.get(line).copied().unwrap_or(0) - old_count.get(line).copied().unwrap_or(0);
-        for _ in 0..delta.max(0) {
-            added.push((*line).to_owned());
-        }
-    }
-    let mut removed = Vec::new();
-    let mut seen: HashSet<&str> = HashSet::new();
-    for line in &old_lines {
-        if !seen.insert(line) {
-            continue;
-        }
-        let delta =
-            old_count.get(line).copied().unwrap_or(0) - new_count.get(line).copied().unwrap_or(0);
-        for _ in 0..delta.max(0) {
-            removed.push((*line).to_owned());
-        }
-    }
-    (added, removed)
+    (
+        surplus_lines(&new_lines, &old_count, &new_count),
+        surplus_lines(&old_lines, &new_count, &old_count),
+    )
 }
 
-fn count_occurrences<'a>(lines: &[&'a str]) -> HashMap<&'a str, i64> {
-    let mut counts: HashMap<&str, i64> = HashMap::new();
+/// Occurrences of `lines` beyond the `min(mine, other)` match count, grouped by
+/// first appearance and carrying each occurrence's 1-based line.
+fn surplus_lines(
+    lines: &[&str],
+    other: &HashMap<&str, usize>,
+    mine: &HashMap<&str, usize>,
+) -> Vec<LineOccurrence> {
+    let mut out = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    for line in lines {
+        let key = *line;
+        if !seen.insert(key) {
+            continue;
+        }
+        let matched = other
+            .get(key)
+            .copied()
+            .unwrap_or(0)
+            .min(mine.get(key).copied().unwrap_or(0));
+        let mut occurrence = 0_usize;
+        for (index, candidate) in lines.iter().enumerate() {
+            if *candidate != key {
+                continue;
+            }
+            occurrence += 1;
+            if occurrence > matched {
+                out.push((index + 1, key.to_owned()));
+            }
+        }
+    }
+    out
+}
+
+fn count_occurrences<'a>(lines: &[&'a str]) -> HashMap<&'a str, usize> {
+    let mut counts: HashMap<&str, usize> = HashMap::new();
     for line in lines {
         *counts.entry(line).or_insert(0) += 1;
     }
