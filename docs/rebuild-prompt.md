@@ -9,8 +9,8 @@ changes through branch → PR → merge. Do NOT modify `comment-checker`.
   current `src/`, `tests/`, `benches/`, `npm/`, `.github/`, `Cargo.toml`, `Cargo.lock`, `README.md`,
   `AGENTS.md` and rebuild them following `comment-checker`. Ignore/discard the existing `test-checker`
   code entirely — it is NOT the base. Keep only the repo, its name, and its license if it fits. Keep
-  the `docs/` directory — this prompt (`docs/rebuild-prompt.md`) and the signal research
-  (`docs/test-signal-research.md`).
+  the `docs/` directory — this prompt (`docs/rebuild-prompt.md`), the signal research
+  (`docs/test-signal-research.md`) and its verified source findings (`docs/source-exploration.md`).
 - **Base to copy from:** `BaconDroid/comment-checker` (standalone Rust project). Clone it
   (`git clone https://github.com/BaconDroid/comment-checker.git`) and **read it fully first**; the goal
   is to reproduce its structure, conventions, and quality bar for the *test* domain.
@@ -154,7 +154,9 @@ caches, parse budget, escaping, and repo scaffolding (benches/CI/npm/release), a
 > `docs/test-signal-research.md`: rule IDs (`TC-01`…`TC-71`), the detection approach, severity and
 > sources per signal, the per-language markers, the allowlist, the calibration caveats, and the
 > complete source index. Use it as the authority for signal selection; the list below is the
-> condensed must-have subset (mostly catalog groups A–D).
+> condensed must-have subset (mostly catalog groups A–D). The sources themselves have been opened and
+> verified — see `docs/source-exploration.md` for the per-source findings and the corrections already
+> applied to the research doc.
 
 Each finding carries a `rule` id and a `confidence` (high/medium/low). Rules are classifiers over the
 **added lines** of the captured test bodies (comments stripped), plus the before/after diff.
