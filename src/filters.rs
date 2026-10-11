@@ -3,6 +3,8 @@
 //! No regex engine is involved: every predicate is a small, auditable string
 //! scan, mirroring the reference implementation's filters.
 
+use std::collections::HashSet;
+
 use crate::models::Finding;
 
 /// `test-guard: allow` window, in lines, on each side of a finding.
@@ -255,6 +257,67 @@ pub fn tautological_hit(code: &str) -> bool {
         }
     }
     false
+}
+
+/// Reports whether the joined code swallows errors for `language`: an empty
+/// JS/TS `catch`, a Python `except …: pass`, or a Rust `Err(_) => {}` arm.
+#[must_use]
+pub fn swallowed_error_hit(joined: &str, language: &str) -> bool {
+    match language {
+        "js" | "ts" => has_empty_catch(joined),
+        "python" => has_except_pass(joined),
+        "rust" => has_empty_err_arm(joined),
+        _ => false,
+    }
+}
+
+fn has_empty_catch(text: &str) -> bool {
+    let mut start = 0;
+    while let Some(offset) = text[start..].find("catch") {
+        let index = start + offset;
+        let mut rest = text[index + "catch".len()..].trim_start();
+        if let Some(after) = rest.strip_prefix('(') {
+            if let Some(close) = after.find(')') {
+                rest = after[close + 1..].trim_start();
+            }
+        }
+        if let Some(body) = rest.strip_prefix('{') {
+            if body
+                .split('}')
+                .next()
+                .is_some_and(|inner| inner.trim().is_empty())
+            {
+                return true;
+            }
+        }
+        start = index + "catch".len();
+    }
+    false
+}
+
+fn has_except_pass(text: &str) -> bool {
+    let mut start = 0;
+    while let Some(offset) = text[start..].find("except") {
+        let index = start + offset;
+        let rest = &text[index + "except".len()..];
+        if let Some((clause, tail)) = rest.split_once(':') {
+            let clause = clause.trim();
+            if matches!(clause, "" | "Exception" | "BaseException") {
+                if let Some(after) = tail.trim_start().strip_prefix("pass") {
+                    if after.is_empty() || !is_word_byte(after.as_bytes()[0]) {
+                        return true;
+                    }
+                }
+            }
+        }
+        start = index + "except".len();
+    }
+    false
+}
+
+fn has_empty_err_arm(text: &str) -> bool {
+    let squashed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    squashed.contains("Err(_)=>{}") || squashed.contains("Err(_)=>()")
 }
 
 #[must_use]
@@ -721,6 +784,177 @@ fn find_comment_index(line: &str, marker: &str) -> Option<usize> {
         index += 1;
     }
     None
+}
+
+// --- Module-under-test text helpers ----------------------------------------
+
+pub(crate) fn test_stem(file_path: &str) -> String {
+    let base = file_path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(file_path)
+        .to_owned();
+    let Some(dot) = base.rfind('.') else {
+        return base;
+    };
+    let mut stem = base[..dot].to_owned();
+    if let Some(inner) = stem.strip_suffix(".test") {
+        stem = inner.to_owned();
+    } else if let Some(inner) = stem.strip_suffix(".spec") {
+        stem = inner.to_owned();
+    } else if let Some(inner) = stem.strip_prefix("test_") {
+        stem = inner.to_owned();
+    } else if let Some(inner) = stem.strip_suffix("_test") {
+        stem = inner.to_owned();
+    }
+    stem
+}
+
+pub(crate) fn mocked_module_stem(spec: &str) -> String {
+    let mut spec = spec.trim().to_owned();
+    if let Some(index) = spec.rfind(['/', '\\']) {
+        spec = spec[index + 1..].to_owned();
+    }
+    if let Some(index) = spec.rfind('.') {
+        if index > 0 {
+            spec = spec[..index].to_owned();
+        }
+    }
+    spec
+}
+
+pub(crate) fn patched_module_root(spec: &str) -> String {
+    let spec = spec.trim();
+    spec.find(['.', '/'])
+        .map_or_else(|| spec.to_owned(), |index| spec[..index].to_owned())
+}
+
+pub(crate) fn extract_js_mock_target(code: &str) -> Option<String> {
+    for prefix in ["vi.mock(", "jest.mock("] {
+        if let Some(rest) = code.split_once(prefix).map(|(_, tail)| tail) {
+            if let Some(target) = read_quoted(rest) {
+                return Some(target);
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn extract_js_spy_target(code: &str) -> Option<String> {
+    for prefix in ["vi.spyOn(", "jest.spyOn("] {
+        if let Some(rest) = code.split_once(prefix).map(|(_, tail)| tail) {
+            let name: String = rest
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$')
+                .collect();
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn extract_python_patch_target(code: &str) -> Option<String> {
+    let bytes = code.as_bytes();
+    let mut start = 0;
+    while let Some(offset) = code[start..].find("patch(") {
+        let index = start + offset;
+        // Require a non-word byte before `patch(` so `mocker.patch(`,
+        // `patch(` and `@patch(` match, while `dispatch(` does not.
+        if index == 0 || !is_word_byte(bytes[index - 1]) {
+            return read_quoted(&code[index + "patch(".len()..]);
+        }
+        start = index + "patch(".len();
+    }
+    None
+}
+
+pub(crate) fn read_quoted(text: &str) -> Option<String> {
+    let trimmed = text.trim_start();
+    let quote = trimmed.chars().next()?;
+    if !matches!(quote, '"' | '\'') {
+        return None;
+    }
+    let rest = &trimmed[quote.len_utf8()..];
+    let end = rest.find(quote)?;
+    Some(rest[..end].to_owned())
+}
+
+pub(crate) fn imported_names_from_stem(text: &str, stem: &str, language: &str) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for raw in text.split('\n') {
+        let line = strip_comments(raw, language);
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(clause) = line.strip_prefix("import ") {
+            if let Some((binding, spec)) = clause.split_once(" from ") {
+                if let Some(module) = read_quoted(spec) {
+                    if mocked_module_stem(&module) == stem {
+                        collect_js_bindings(binding, &mut names);
+                    }
+                }
+            }
+            continue;
+        }
+        if let Some(eq) = line.find('=') {
+            let binding = line[..eq]
+                .trim()
+                .trim_start_matches("const ")
+                .trim_start_matches("let ")
+                .trim_start_matches("var ")
+                .trim();
+            if let Some(rest) = line[eq + 1..].trim().strip_prefix("require(") {
+                if let Some(module) = read_quoted(rest) {
+                    if mocked_module_stem(&module) == stem {
+                        collect_js_bindings(binding, &mut names);
+                    }
+                }
+            }
+        }
+    }
+    names
+}
+
+pub(crate) fn collect_js_bindings(binding: &str, names: &mut HashSet<String>) {
+    let mut binding = binding.trim().to_owned();
+    if let Some(open) = binding.find('{') {
+        if let Some(close) = binding[open..].find('}') {
+            collect_named_bindings(&binding[open + 1..open + close], names);
+            let mut combined = binding[..open].to_owned();
+            combined.push_str(&binding[open + close + 1..]);
+            binding = combined;
+        }
+    }
+    let binding = binding.trim().trim_end_matches(',').trim();
+    if binding.is_empty() {
+        return;
+    }
+    if let Some(rest) = binding.strip_prefix('*') {
+        if let Some((_, alias)) = rest.trim().rsplit_once(' ') {
+            names.insert(alias.trim().to_owned());
+        }
+        return;
+    }
+    if let Some(first) = binding.split_whitespace().next() {
+        names.insert(first.to_owned());
+    }
+}
+
+pub(crate) fn collect_named_bindings(inner: &str, names: &mut HashSet<String>) {
+    for part in inner.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let local = part
+            .split_once(" as ")
+            .map_or(part, |(_, alias)| alias.trim());
+        names.insert(local.to_owned());
+    }
 }
 
 #[cfg(test)]
