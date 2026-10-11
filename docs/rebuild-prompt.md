@@ -103,8 +103,45 @@ Reproduce every one of the capabilities above, in the test domain:
 | `detect_comments_json` library API | `detect_findings_json` library API |
 
 Everything else — stdin contract, `--prompt`/placeholder, message prefix `[test-checker]`, JSON API,
-Rust+tree-sitter engine, caches, parse budget, injection handling, XML escaping, 31-language
-coverage, tests/benches/CI/npm/release — mirrors `comment-checker` exactly.
+Rust+tree-sitter engine, caches, parse budget, XML escaping, 31-language
+coverage, tests/benches/CI/npm/release — mirrors `comment-checker` exactly. Two capabilities are easy
+to lose in the mapping, so state them explicitly:
+
+- **Injection handling is required, not optional.** Reuse `comment-checker`'s injection machinery (the
+  pack's `get_injections_query`, the injected language taken from an `@injection.language` capture or
+  the pattern's `#set! injection.language` property, re-parsing the captured span, and re-offsetting
+  line numbers) for the **comment capture**, so a commented-out test inside an embedded/injected block
+  (a JS/TS test inside `<script>`, a Python test inside a markdown fence, …) is caught. This applies
+  to `commented-out-test` (§3b); the test-body capture itself runs on the host language only.
+- **Keep a `detect(..., include_*)` toggle** so the library face matches `comment-checker`'s
+  `detect(content, file_path, include_docstrings)` and
+  `detect_comments_json(content, file_path, include_docstrings)`. Define the test-domain equivalent
+  (e.g. `include_commented_out_tests` / `include_body_tests`), thread it through `evaluate()`, both
+  JSON APIs and the filters exactly as `include_docstrings` is, and test its default in both states.
+
+### 2a. What "parity" does and does NOT mean
+
+**Parity means** the same hook contract, CLI, JSON API, output format, conventions, dependency set,
+caches, parse budget, escaping, and repo scaffolding (benches/CI/npm/release), across the same 31
+**compiled and parsed** languages.
+
+**Parity does NOT mean:**
+
+- **the same rules content.** comment-checker's signals are comment queries + allowed-pattern
+  filters; test-checker's are a rule-classifier catalog over added lines. Same *engine shape*,
+  different *content* — the catalog is deliberately new.
+- **31 languages produce findings.** Comments are universal, tests are not. Every language is
+  **parsed** (the same `TSLP_LANGUAGES`), but only languages with a real test framework/test-body
+  query can yield a finding; `dockerfile`, `hcl`, `proto`, `toml`, `yaml`, `css`, `html`, `cue`, …
+  parse cleanly and report nothing. Coverage tests must therefore assert **pipeline coverage per
+  language** (grammar resolves, query compiles, capture runs, zero false positives), never *detection*
+  per language.
+- **every comment-checker feature has a test analog.** Docstring detection (query + `/**`/`(*`/`--`
+  prefix filter + the Python line scan), `determine_comment_type` (`Line`/`Block`/`Docstring`) and the
+  multiline "agent memo" message banner have **no test-domain equivalent** — drop them; do not
+  re-invent them.
+- **this document is the parity guarantee.** It is a spec. Parity is produced by reading
+  `comment-checker` fully and mirroring it faithfully, step by step, verified per step.
 
 ---
 
@@ -153,9 +190,10 @@ These reuse machinery `comment-checker` already has, adapted to the test domain:
     behavior is* is a smell. Apply the phrase catalog to identifiers and assertion/message strings,
     not to comment text.
 18. `commented-out-test` — a **comment whose body is commented-out test/assertion code** (`# assert x == y`,
-    `// expect(x).toBe(y)`, `# def test_foo():`, `// it("…", …)`). This **reuses `comment-checker`'s
-    comment detection**, which already covers **all 31 languages**, so a disabled-by-comment test is
-    caught everywhere for free. (This is the direct analog of `comment-checker` flagging comments.)
+   `// expect(x).toBe(y)`, `# def test_foo():`, `// it("…", …)`). This **reuses `comment-checker`'s
+   comment detection**, which already covers **all 31 languages**, so a disabled-by-comment test is
+   caught everywhere for free — including inside injected/embedded blocks via comment-checker's
+   injection handling (see §2). (This is the direct analog of `comment-checker` flagging comments.)
 
 ### 3c. Allow-list / suppression predicates (the filter analog)
 
@@ -256,7 +294,10 @@ README.md, AGENTS.md, LICENSE, .gitignore, .cargo/config.toml (TSLP_LANGUAGES), 
   `node --test npm/test-checker/*.test.js` green.
 - Behavior: a clean test edit → exit 0 + `[test-checker] Success: No problematic tests found`; a
   weakening edit → exit 2 + `<findings>` XML on stderr; an unsupported/non-test file → exit 0 skip.
-- Detection coverage across **all 31 languages** (a table case per language).
+- **Pipeline** coverage across **all 31 languages** (a table case per language: grammar resolves, the
+  test-body query compiles, capture runs, and a clean fixture yields no findings). Only languages with
+  a real test framework produce findings; assert *pipeline* coverage per language, not detection
+  (see §2a).
 - No dependency outside the four; no `--help`/clap; no bindings; single-package manifest.
 - Every change landed via branch → PR → (squash) merge; final `main` CI green.
 
