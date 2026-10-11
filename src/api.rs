@@ -1,10 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::detector::{Change, TestDetector};
-use crate::language::{language_for_path, plugin_language};
+use crate::language::{is_test_path, language_for_path, plugin_language};
 use crate::models::Payload;
 use crate::output::format_hook_message;
-use crate::testpath::is_test_path;
 
 pub const EXIT_PASS: i32 = 0;
 pub const EXIT_BLOCK: i32 = 2;

@@ -6,4 +6,3 @@ pub mod language;
 pub mod models;
 pub mod output;
 pub mod rules;
-pub mod testpath;

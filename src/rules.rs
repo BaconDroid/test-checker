@@ -1,9 +1,9 @@
 //! The 11 rule classifiers over one derived change set.
 //!
-//! `Derived` captures the diff (added/removed lines, their comment- and
-//! string-stripped code text, and the parsed test blocks) once; each unit
-//! struct below classifies it. `evaluate` runs the catalog in order and stamps
-//! every finding with the rule's confidence.
+//! `Derived` captures the diff (added/removed [`DiffLine`]s, each with its line,
+//! raw text and comment-/string-stripped code, plus the parsed test blocks)
+//! once; each unit struct below classifies it. `evaluate` is the single place a
+//! finding is constructed and stamped with its rule's catalog confidence.
 
 use std::collections::{HashMap, HashSet};
 
@@ -11,45 +11,40 @@ use crate::detector::{Change, TestBlock};
 use crate::filters;
 use crate::models::{Confidence, Finding};
 
-/// One diff occurrence: its 1-based line in the source stream plus the text.
-type LineOccurrence = (usize, String);
+/// One diff occurrence: its 1-based line in the source stream, the raw text, and
+/// the comment-/string-stripped code, all computed once so they cannot drift.
+struct DiffLine {
+    line: usize,
+    text: String,
+    code: String,
+}
 
-/// Added and removed occurrences, in source order.
-type LineDiff = (Vec<LineOccurrence>, Vec<LineOccurrence>);
+/// A rule hit before its rule id and confidence are stamped from [`RULES`].
+pub struct Hit {
+    pub line: usize,
+    pub message: String,
+}
 
 /// Everything the classifiers need for one changed file, captured once.
 ///
-/// `added` and `removed` pair each diff occurrence with the 1-based line it
-/// occupies in `new_text` (added) or `old_text` (removed), so a rule can report
-/// the occurrence's real line without re-searching for the first matching text.
+/// `added`/`removed` carry each diff occurrence's real line (in `new_text` for
+/// added, `old_text` for removed) together with its precomputed code text.
 pub struct Derived<'a> {
     change: &'a Change,
-    added: Vec<LineOccurrence>,
-    removed: Vec<LineOccurrence>,
-    added_code: Vec<String>,
-    removed_code: Vec<String>,
+    added: Vec<DiffLine>,
+    removed: Vec<DiffLine>,
     blocks: Vec<TestBlock>,
 }
 
 impl<'a> Derived<'a> {
-    /// Builds the order-insensitive diff and precomputes the code text once.
+    /// Builds the order-insensitive diff, precomputing each line's code once.
     #[must_use]
     pub fn new(change: &'a Change, blocks: Vec<TestBlock>) -> Self {
-        let (added, removed) = diff_lines(&change.old_text, &change.new_text);
-        let added_code = added
-            .iter()
-            .map(|(_, line)| filters::code_text(line, change.language))
-            .collect();
-        let removed_code = removed
-            .iter()
-            .map(|(_, line)| filters::code_text(line, change.language))
-            .collect();
+        let (added, removed) = diff_lines(&change.old_text, &change.new_text, change.language);
         Self {
             change,
             added,
             removed,
-            added_code,
-            removed_code,
             blocks,
         }
     }
@@ -63,7 +58,7 @@ impl<'a> Derived<'a> {
 struct Rule {
     id: &'static str,
     confidence: Confidence,
-    hits: fn(&Derived<'_>) -> Vec<Finding>,
+    hits: fn(&Derived<'_>) -> Vec<Hit>,
 }
 
 const RULES: &[Rule] = &[
@@ -130,18 +125,23 @@ pub fn rule_ids() -> Vec<&'static str> {
     RULES.iter().map(|rule| rule.id).collect()
 }
 
-/// Runs the 11 classifiers and stamps each finding with its rule confidence.
+/// Runs the 11 classifiers and constructs each finding from its rule id and
+/// catalog confidence — the single finding-construction site.
 #[must_use]
 pub fn evaluate(d: &Derived<'_>) -> Vec<Finding> {
-    let mut findings: Vec<Finding> = Vec::new();
+    let mut findings = Vec::new();
     for rule in RULES {
-        let mut rule_findings = (rule.hits)(d);
-        for finding in &mut rule_findings {
-            finding.confidence = rule.confidence;
+        for hit in (rule.hits)(d) {
+            findings.push(make_finding(&d.change.file_path, rule, hit));
         }
-        findings.extend(rule_findings);
     }
     findings
+}
+
+/// The single finding-construction helper: pairs a rule hit with its catalog id
+/// and confidence.
+fn make_finding(file: &str, rule: &Rule, hit: Hit) -> Finding {
+    Finding::new(file, hit.line, rule.id, hit.message, rule.confidence)
 }
 
 // --- Classifiers -----------------------------------------------------------
@@ -152,14 +152,10 @@ pub struct SkipFocusAddedFilter;
 
 impl SkipFocusAddedFilter {
     #[must_use]
-    pub fn hits(&self, d: &Derived<'_>) -> Vec<Finding> {
+    pub fn hits(&self, d: &Derived<'_>) -> Vec<Hit> {
         added_line_findings(
             d,
-            FindingSpec {
-                rule: "skip-focus-added",
-                confidence: Confidence::High,
-                message: "A test was disabled or focused (.skip/.only/.todo, xit/xdescribe, skip marker, #[ignore], t.Skip).",
-            },
+            "A test was disabled or focused (.skip/.only/.todo, xit/xdescribe, skip marker, #[ignore], t.Skip).",
             |code| filters::skip_focus_hit(code, d.language()),
             filters::is_conditional_skip,
         )
@@ -172,19 +168,16 @@ pub struct TautologicalAssertionFilter;
 
 impl TautologicalAssertionFilter {
     #[must_use]
-    pub fn hits(&self, d: &Derived<'_>) -> Vec<Finding> {
+    pub fn hits(&self, d: &Derived<'_>) -> Vec<Hit> {
         let mut out = Vec::new();
-        for ((line_number, _), code) in d.added.iter().zip(&d.added_code) {
-            if code.trim().is_empty() || !filters::tautological_hit(code) {
+        for diff_line in &d.added {
+            if diff_line.code.trim().is_empty() || !filters::tautological_hit(&diff_line.code) {
                 continue;
             }
-            push_finding(
+            push_hit(
                 &mut out,
-                d,
-                *line_number,
-                "tautological-assertion",
+                diff_line.line,
                 "Assertion is tautological (always true).",
-                Confidence::High,
             );
         }
         out
@@ -197,7 +190,7 @@ pub struct EmptyTestFilter;
 
 impl EmptyTestFilter {
     #[must_use]
-    pub fn hits(&self, d: &Derived<'_>) -> Vec<Finding> {
+    pub fn hits(&self, d: &Derived<'_>) -> Vec<Hit> {
         let mut out = Vec::new();
         for block in &d.blocks {
             if !block_is_added(d, block) {
@@ -208,13 +201,11 @@ impl EmptyTestFilter {
             if executable > 0 && !filters::is_trivial_body(&body) {
                 continue;
             }
-            out.push(Finding::new(
-                &d.change.file_path,
+            push_hit(
+                &mut out,
                 block.start_line,
-                "empty-test",
                 "Test body has no executable statement.",
-                Confidence::Medium,
-            ));
+            );
         }
         out
     }
@@ -226,7 +217,7 @@ pub struct UnknownTestFilter;
 
 impl UnknownTestFilter {
     #[must_use]
-    pub fn hits(&self, d: &Derived<'_>) -> Vec<Finding> {
+    pub fn hits(&self, d: &Derived<'_>) -> Vec<Hit> {
         let mut out = Vec::new();
         for block in &d.blocks {
             if !block_is_added(d, block) {
@@ -239,13 +230,11 @@ impl UnknownTestFilter {
             {
                 continue;
             }
-            out.push(Finding::new(
-                &d.change.file_path,
+            push_hit(
+                &mut out,
                 block.start_line,
-                "unknown-test",
                 "Test has no assertion, expect, fail, or expected exception.",
-                Confidence::Medium,
-            ));
+            );
         }
         out
     }
@@ -257,21 +246,21 @@ pub struct GuttedTestFilter;
 
 impl GuttedTestFilter {
     #[must_use]
-    pub fn hits(&self, d: &Derived<'_>) -> Vec<Finding> {
-        let removed = unique_assertions(&d.removed_code);
-        if removed.is_empty() || !unique_assertions(&d.added_code).is_empty() {
+    pub fn hits(&self, d: &Derived<'_>) -> Vec<Hit> {
+        let removed = unique_assertions(&d.removed);
+        if removed.is_empty() || !unique_assertions(&d.added).is_empty() {
             return Vec::new();
         }
         if matches!(d.language(), "js" | "ts" | "python" | "go" | "rust") {
             let before = d
                 .removed
                 .iter()
-                .filter(|(_, line)| filters::is_test_declaration(line, d.language()))
+                .filter(|line| filters::is_test_declaration(&line.text, d.language()))
                 .count();
             let after = d
                 .added
                 .iter()
-                .filter(|(_, line)| filters::is_test_declaration(line, d.language()))
+                .filter(|line| filters::is_test_declaration(&line.text, d.language()))
                 .count();
             if before != after {
                 return Vec::new();
@@ -280,19 +269,18 @@ impl GuttedTestFilter {
         let sample = d
             .removed
             .iter()
-            .zip(&d.removed_code)
-            .find(|(_, code)| filters::is_assertion_line(code))
-            .map(|((line_number, _), _)| *line_number);
-        let Some(line_number) = sample else {
+            .find(|line| filters::is_assertion_line(&line.code))
+            .map(|line| line.line);
+        let Some(line) = sample else {
             return Vec::new();
         };
-        vec![Finding::new(
-            &d.change.file_path,
-            line_number,
-            "gutted-test",
+        let mut out = Vec::new();
+        push_hit(
+            &mut out,
+            line,
             "All assertions were removed and nothing replaced them.",
-            Confidence::High,
-        )]
+        );
+        out
     }
 }
 
@@ -302,29 +290,30 @@ pub struct SwallowedErrorFilter;
 
 impl SwallowedErrorFilter {
     #[must_use]
-    pub fn hits(&self, d: &Derived<'_>) -> Vec<Finding> {
-        let joined = d.added_code.join("\n");
+    pub fn hits(&self, d: &Derived<'_>) -> Vec<Hit> {
+        let joined = d
+            .added
+            .iter()
+            .map(|line| line.code.as_str())
+            .collect::<Vec<&str>>()
+            .join("\n");
         if !swallowed_error_hit(&joined, d.language()) {
             return Vec::new();
         }
         let sample = d
             .added
             .iter()
-            .zip(&d.added_code)
-            .find(|(_, code)| swallowed_error_hit(code, d.language()))
-            .map(|((line_number, _), _)| *line_number)
-            .or_else(|| d.added.first().map(|(line_number, _)| *line_number));
-        let Some(line_number) = sample else {
+            .find(|line| swallowed_error_hit(&line.code, d.language()))
+            .map(|line| line.line)
+            .or_else(|| d.added.first().map(|line| line.line));
+        let Some(line) = sample else {
             return Vec::new();
         };
         let mut out = Vec::new();
-        push_finding(
+        push_hit(
             &mut out,
-            d,
-            line_number,
-            "swallowed-error",
+            line,
             "Errors are swallowed (empty catch / except pass / Err(_) => {}).",
-            Confidence::Medium,
         );
         out
     }
@@ -336,7 +325,7 @@ pub struct DuplicateTestFilter;
 
 impl DuplicateTestFilter {
     #[must_use]
-    pub fn hits(&self, d: &Derived<'_>) -> Vec<Finding> {
+    pub fn hits(&self, d: &Derived<'_>) -> Vec<Hit> {
         let mut seen: HashMap<String, usize> = HashMap::new();
         let mut out = Vec::new();
         for block in &d.blocks {
@@ -349,13 +338,11 @@ impl DuplicateTestFilter {
                 if !block_is_added(d, block) && !d.change.is_new {
                     continue;
                 }
-                out.push(Finding::new(
-                    &d.change.file_path,
+                push_hit(
+                    &mut out,
                     block.start_line,
-                    "duplicate-test",
                     format!("Duplicate test body (identical to the test at line {first})."),
-                    Confidence::Medium,
-                ));
+                );
             } else {
                 seen.insert(normalized, block.start_line);
             }
@@ -370,7 +357,7 @@ pub struct MockOfSutFilter;
 
 impl MockOfSutFilter {
     #[must_use]
-    pub fn hits(&self, d: &Derived<'_>) -> Vec<Finding> {
+    pub fn hits(&self, d: &Derived<'_>) -> Vec<Hit> {
         match d.language() {
             "js" | "ts" => mock_of_sut_javascript(d),
             "python" => mock_of_sut_python(d),
@@ -382,15 +369,15 @@ impl MockOfSutFilter {
 const MOCK_OF_SUT_MESSAGE: &str =
     "The module under test is mocked; asserting on the mock cannot validate real behavior.";
 
-fn mock_of_sut_javascript(d: &Derived<'_>) -> Vec<Finding> {
+fn mock_of_sut_javascript(d: &Derived<'_>) -> Vec<Hit> {
     let stem = test_stem(&d.change.file_path);
     if stem.is_empty() {
         return Vec::new();
     }
     let imported = imported_names_from_stem(&d.change.new_text, &stem, d.language());
     let mut out = Vec::new();
-    for (line_number, line) in &d.added {
-        let code = filters::strip_comments(line, d.language());
+    for diff_line in &d.added {
+        let code = filters::strip_comments(&diff_line.text, d.language());
         let code = code.trim();
         if code.is_empty() {
             continue;
@@ -401,26 +388,19 @@ fn mock_of_sut_javascript(d: &Derived<'_>) -> Vec<Finding> {
         if !hit {
             continue;
         }
-        push_finding(
-            &mut out,
-            d,
-            *line_number,
-            "mock-of-sut",
-            MOCK_OF_SUT_MESSAGE,
-            Confidence::Medium,
-        );
+        push_hit(&mut out, diff_line.line, MOCK_OF_SUT_MESSAGE);
     }
     out
 }
 
-fn mock_of_sut_python(d: &Derived<'_>) -> Vec<Finding> {
+fn mock_of_sut_python(d: &Derived<'_>) -> Vec<Hit> {
     let stem = test_stem(&d.change.file_path);
     if stem.is_empty() {
         return Vec::new();
     }
     let mut out = Vec::new();
-    for (line_number, line) in &d.added {
-        let code = filters::strip_comments(line, d.language());
+    for diff_line in &d.added {
+        let code = filters::strip_comments(&diff_line.text, d.language());
         let code = code.trim();
         if code.is_empty() {
             continue;
@@ -431,14 +411,7 @@ fn mock_of_sut_python(d: &Derived<'_>) -> Vec<Finding> {
         if patched_module_root(&target) != stem {
             continue;
         }
-        push_finding(
-            &mut out,
-            d,
-            *line_number,
-            "mock-of-sut",
-            MOCK_OF_SUT_MESSAGE,
-            Confidence::Medium,
-        );
+        push_hit(&mut out, diff_line.line, MOCK_OF_SUT_MESSAGE);
     }
     out
 }
@@ -449,16 +422,16 @@ pub struct OverMockingFilter;
 
 impl OverMockingFilter {
     #[must_use]
-    pub fn hits(&self, d: &Derived<'_>) -> Vec<Finding> {
+    pub fn hits(&self, d: &Derived<'_>) -> Vec<Hit> {
         let added = d
-            .added_code
+            .added
             .iter()
-            .filter(|code| filters::mock_identifier_hit(code))
+            .filter(|line| filters::mock_identifier_hit(&line.code))
             .count();
         let removed = d
-            .removed_code
+            .removed
             .iter()
-            .filter(|code| filters::mock_identifier_hit(code))
+            .filter(|line| filters::mock_identifier_hit(&line.code))
             .count();
         if added <= removed {
             return Vec::new();
@@ -466,19 +439,18 @@ impl OverMockingFilter {
         let sample = d
             .added
             .iter()
-            .zip(&d.added_code)
-            .find(|(_, code)| filters::mock_identifier_hit(code))
-            .map(|((line_number, _), _)| *line_number);
-        let Some(line_number) = sample else {
+            .find(|line| filters::mock_identifier_hit(&line.code))
+            .map(|line| line.line);
+        let Some(line) = sample else {
             return Vec::new();
         };
-        vec![Finding::new(
-            &d.change.file_path,
-            line_number,
-            "over-mocking",
+        let mut out = Vec::new();
+        push_hit(
+            &mut out,
+            line,
             format!("New mock identifiers added (net +{}).", added - removed),
-            Confidence::Low,
-        )]
+        );
+        out
     }
 }
 
@@ -488,7 +460,7 @@ pub struct AssertionRouletteFilter;
 
 impl AssertionRouletteFilter {
     #[must_use]
-    pub fn hits(&self, d: &Derived<'_>) -> Vec<Finding> {
+    pub fn hits(&self, d: &Derived<'_>) -> Vec<Hit> {
         let mut out = Vec::new();
         for block in &d.blocks {
             if !block_is_added(d, block) {
@@ -506,13 +478,11 @@ impl AssertionRouletteFilter {
             if filters::has_assertion_message(&body) {
                 continue;
             }
-            out.push(Finding::new(
-                &d.change.file_path,
+            push_hit(
+                &mut out,
                 block.start_line,
-                "assertion-roulette",
                 format!("{assertions} assertions with no message; failures are indistinguishable."),
-                Confidence::Low,
-            ));
+            );
         }
         out
     }
@@ -524,7 +494,7 @@ pub struct RedundantAssertionFilter;
 
 impl RedundantAssertionFilter {
     #[must_use]
-    pub fn hits(&self, d: &Derived<'_>) -> Vec<Finding> {
+    pub fn hits(&self, d: &Derived<'_>) -> Vec<Hit> {
         let mut out = Vec::new();
         for block in &d.blocks {
             if !block_is_added(d, block) {
@@ -538,13 +508,11 @@ impl RedundantAssertionFilter {
                     continue;
                 }
                 if !seen.insert(code.to_owned()) {
-                    out.push(Finding::new(
-                        &d.change.file_path,
+                    push_hit(
+                        &mut out,
                         locate_within_block(&d.change.new_text, block, raw),
-                        "redundant-assertion",
                         "The same assertion is repeated in one test.",
-                        Confidence::Low,
-                    ));
+                    );
                     break;
                 }
             }
@@ -555,61 +523,38 @@ impl RedundantAssertionFilter {
 
 // --- Shared rule plumbing --------------------------------------------------
 
-#[derive(Clone, Copy)]
-struct FindingSpec {
-    rule: &'static str,
-    confidence: Confidence,
-    message: &'static str,
-}
-
 fn added_line_findings<F, S>(
     d: &Derived<'_>,
-    spec: FindingSpec,
+    message: &'static str,
     predicate: F,
     skip: S,
-) -> Vec<Finding>
+) -> Vec<Hit>
 where
     F: Fn(&str) -> bool,
     S: Fn(&str) -> bool,
 {
     let mut out = Vec::new();
-    for ((line_number, raw), code) in d.added.iter().zip(&d.added_code) {
-        if code.trim().is_empty() || skip(raw) || !predicate(code) {
+    for diff_line in &d.added {
+        if diff_line.code.trim().is_empty() || skip(&diff_line.text) || !predicate(&diff_line.code)
+        {
             continue;
         }
-        push_finding(
-            &mut out,
-            d,
-            *line_number,
-            spec.rule,
-            spec.message,
-            spec.confidence,
-        );
+        push_hit(&mut out, diff_line.line, message);
     }
     out
 }
 
-fn push_finding(
-    out: &mut Vec<Finding>,
-    d: &Derived<'_>,
-    line_number: usize,
-    rule: &'static str,
-    message: &str,
-    confidence: Confidence,
-) {
-    out.push(Finding::new(
-        &d.change.file_path,
-        line_number,
-        rule,
-        message,
-        confidence,
-    ));
+fn push_hit(out: &mut Vec<Hit>, line: usize, message: impl Into<String>) {
+    out.push(Hit {
+        line,
+        message: message.into(),
+    });
 }
 
-fn unique_assertions(code_lines: &[String]) -> Vec<String> {
+fn unique_assertions(lines: &[DiffLine]) -> Vec<String> {
     let mut set: HashSet<String> = HashSet::new();
-    for raw in code_lines {
-        let code = raw.trim();
+    for diff_line in lines {
+        let code = diff_line.code.trim();
         if code.is_empty() || !filters::is_assertion_line(code) {
             continue;
         }
@@ -681,10 +626,10 @@ fn block_is_added(d: &Derived<'_>, block: &TestBlock) -> bool {
         return true;
     }
     let mut added: HashMap<String, i64> = HashMap::new();
-    for (_, line) in &d.added {
+    for diff_line in &d.added {
         *added
             .entry(
-                filters::strip_comments(line, d.language())
+                filters::strip_comments(&diff_line.text, d.language())
                     .trim()
                     .to_owned(),
             )
@@ -719,31 +664,32 @@ fn split_lines(text: &str) -> Vec<&str> {
 /// Order-insensitive multiset line diff that preserves each occurrence's real
 /// line number.
 ///
-/// Returns `added` as `(line in new_text, text)` and `removed` as
-/// `(line in old_text, text)`. For a text with `old` and `new` occurrences, the
-/// first `min(old, new)` occurrences are treated as matched; any surplus is the
-/// additive/removal set. Tracking the line per occurrence keeps two identical
-/// added lines as two distinct findings instead of collapsing them onto the
-/// first match. Texts stay grouped by first appearance, as before, so the only
-/// behavioral change is the per-occurrence line.
-fn diff_lines(old_text: &str, new_text: &str) -> LineDiff {
+/// `added` carries the occurrence's line in `new_text` and `removed` its line in
+/// `old_text`, each paired with the precomputed code text. For a text with `old`
+/// and `new` occurrences, the first `min(old, new)` occurrences are treated as
+/// matched; any surplus is the additive/removal set. Tracking the line per
+/// occurrence keeps two identical added lines as two distinct findings instead
+/// of collapsing them onto the first match. Texts stay grouped by first
+/// appearance, as before, so the only behavioral change is the line/code pairing.
+fn diff_lines(old_text: &str, new_text: &str, language: &str) -> (Vec<DiffLine>, Vec<DiffLine>) {
     let old_lines = split_lines(old_text);
     let new_lines = split_lines(new_text);
     let old_count = count_occurrences(&old_lines);
     let new_count = count_occurrences(&new_lines);
     (
-        surplus_lines(&new_lines, &old_count, &new_count),
-        surplus_lines(&old_lines, &new_count, &old_count),
+        surplus_lines(&new_lines, &old_count, &new_count, language),
+        surplus_lines(&old_lines, &new_count, &old_count, language),
     )
 }
 
 /// Occurrences of `lines` beyond the `min(mine, other)` match count, grouped by
-/// first appearance and carrying each occurrence's 1-based line.
+/// first appearance and carrying each occurrence's 1-based line and code text.
 fn surplus_lines(
     lines: &[&str],
     other: &HashMap<&str, usize>,
     mine: &HashMap<&str, usize>,
-) -> Vec<LineOccurrence> {
+    language: &str,
+) -> Vec<DiffLine> {
     let mut out = Vec::new();
     let mut seen: HashSet<&str> = HashSet::new();
     for line in lines {
@@ -763,7 +709,11 @@ fn surplus_lines(
             }
             occurrence += 1;
             if occurrence > matched {
-                out.push((index + 1, key.to_owned()));
+                out.push(DiffLine {
+                    line: index + 1,
+                    text: key.to_owned(),
+                    code: filters::code_text(key, language),
+                });
             }
         }
     }
