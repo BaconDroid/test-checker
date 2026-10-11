@@ -178,25 +178,7 @@ fn find_test_blocks(
             _ => {}
         }
     }
-    drop_container_blocks(&blocks)
-}
-
-/// Drops any block that strictly contains another collected block, so a
-/// `describe(…)` container does not duplicate a nested `it(…)` finding.
-fn drop_container_blocks(blocks: &[TestBlock]) -> Vec<TestBlock> {
-    let mut kept = Vec::with_capacity(blocks.len());
-    for (index, block) in blocks.iter().enumerate() {
-        let encloses_other = blocks.iter().enumerate().any(|(other_index, other)| {
-            index != other_index
-                && block.start_line <= other.start_line
-                && block.end_line >= other.end_line
-                && (block.start_line != other.start_line || block.end_line != other.end_line)
-        });
-        if !encloses_other {
-            kept.push(block.clone());
-        }
-    }
-    kept
+    blocks
 }
 
 fn collect_js(call: Node<'_>, source: &[u8], plugin: &str, out: &mut Vec<TestBlock>) {

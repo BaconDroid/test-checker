@@ -32,11 +32,15 @@ pub fn within_bypass(text: &str, line: usize) -> bool {
 
 /// Drops every finding whose line sits within a `test-guard: allow` window in
 /// `source`, preserving the input order of the survivors.
+///
+/// `gutted-test` is exempt: its line is a position in the old text (a removed
+/// assertion has no line in `new_text`), so bypass-checking it against `source`
+/// would suppress it using an unrelated new-text line.
 #[must_use]
 pub fn apply_filters(findings: &[Finding], source: &str) -> Vec<Finding> {
     findings
         .iter()
-        .filter(|finding| !within_bypass(source, finding.line))
+        .filter(|finding| finding.rule == "gutted-test" || !within_bypass(source, finding.line))
         .cloned()
         .collect()
 }
@@ -565,9 +569,14 @@ fn call_has_message(body: &str, keyword: &str) -> bool {
     false
 }
 
+/// JS/TS test functions: `it(...)` and `test(...)`, including modifiers such as
+/// `it.only(...)`, `test.skip(...)` or `it.each([...])(...)`. Containers
+/// (`describe`/`test.describe`), lifecycle hooks (`test.beforeEach`,
+/// `test.afterEach`, `test.beforeAll`, `test.afterAll`) and `test.step(...)` are
+/// not test bodies and must not be captured as blocks.
 fn js_test_declaration(code: &str) -> bool {
     let bytes = code.as_bytes();
-    for keyword in ["describe", "it", "test"] {
+    for keyword in ["it", "test"] {
         let mut cursor = 0;
         while let Some(offset) = code[cursor..].find(keyword) {
             let index = cursor + offset;
@@ -577,8 +586,13 @@ fn js_test_declaration(code: &str) -> bool {
                 let mut end = index + keyword.len();
                 if code[end..].starts_with('.') {
                     end += 1;
+                    let member_start = end;
                     while end < bytes.len() && is_word_byte(bytes[end]) {
                         end += 1;
+                    }
+                    if is_non_test_js_member(&code[member_start..end]) {
+                        cursor = index + keyword.len();
+                        continue;
                     }
                 }
                 if code[end..].trim_start().starts_with('(') {
@@ -589,6 +603,15 @@ fn js_test_declaration(code: &str) -> bool {
         }
     }
     false
+}
+
+/// Member names on `test`/`it` that are containers, lifecycle hooks or
+/// interaction steps rather than test bodies.
+fn is_non_test_js_member(member: &str) -> bool {
+    matches!(
+        member,
+        "describe" | "beforeEach" | "afterEach" | "beforeAll" | "afterAll" | "step"
+    )
 }
 
 fn replace_ignore_ascii_case(haystack: &str, needle: &str, replacement: &str) -> String {

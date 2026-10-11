@@ -735,6 +735,75 @@ fn redundant_assertion_given_distinct_lines_skips_rule() {
     assert!(!rule_present(&findings, "redundant-assertion"));
 }
 
+#[test]
+fn redundant_assertion_given_two_blocks_with_duplicates_reports_each_block_line() {
+    // given: two tests each repeating the same assertion
+    let change = make_change(
+        "src/a.test.ts",
+        "ts",
+        "",
+        "test('a', () => {\n  expect(x).toBe(1);\n  expect(x).toBe(1);\n});\ntest('b', () => {\n  expect(x).toBe(1);\n  expect(x).toBe(1);\n});\n",
+        true,
+    );
+
+    // when
+    let findings = TestDetector::new().detect(&change);
+
+    // then: each test reports its own duplicate, in its own block range
+    let redundant: Vec<usize> = findings
+        .iter()
+        .filter(|finding| finding.rule == "redundant-assertion")
+        .map(|finding| finding.line)
+        .collect();
+    assert_eq!(redundant, vec![2, 6]);
+}
+
+// --- JS/TS capture scope ---------------------------------------------------
+
+#[test]
+fn unknown_test_given_js_hooks_and_containers_skips_them() {
+    // given: hook, container and step calls that are not test bodies
+    let bodies = [
+        "test.beforeEach(() => {\n  setup();\n});\n",
+        "describe(\"group\", () => {\n  setup();\n});\n",
+        "test.step(\"s\", async () => {\n  setup();\n});\n",
+    ];
+    for body in bodies {
+        let change = make_change("src/a.test.ts", "ts", "", body, true);
+
+        // when
+        let findings = TestDetector::new().detect(&change);
+
+        // then: no test-body rule fires for a non-test call
+        assert!(!rule_present(&findings, "unknown-test"), "body: {body}");
+        assert!(!rule_present(&findings, "empty-test"), "body: {body}");
+    }
+}
+
+#[test]
+fn redundant_assertion_given_outer_test_wrapping_step_reports_outer_finding() {
+    // given: a real outer test wrapping a `test.step`; the step must not be
+    // captured as its own block and must not drop the outer test
+    let change = make_change(
+        "src/a.test.ts",
+        "ts",
+        "",
+        "test('outer', async () => {\n  await test.step('s', async () => {\n    expect(a).toBe(1);\n  });\n  expect(a).toBe(1);\n});\n",
+        true,
+    );
+
+    // when
+    let findings = TestDetector::new().detect(&change);
+
+    // then: the outer test's duplicate assertion is reported at its own line
+    let redundant: Vec<usize> = findings
+        .iter()
+        .filter(|finding| finding.rule == "redundant-assertion")
+        .map(|finding| finding.line)
+        .collect();
+    assert_eq!(redundant, vec![5]);
+}
+
 // --- Regression: assertion / capture correctness ---------------------------
 
 #[test]
