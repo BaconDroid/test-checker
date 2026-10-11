@@ -55,11 +55,6 @@ impl Finding {
     pub fn normalized_text(&self) -> String {
         self.text.trim().to_lowercase()
     }
-
-    #[must_use]
-    pub fn identity(&self) -> String {
-        format!("{}\u{1f}{}", self.rule, self.normalized_text())
-    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -91,7 +86,7 @@ mod tests {
             "A test skip marker was added.",
             7,
             "tests/test_app.py",
-            "    @pytest.mark.skip",
+            "",
         );
 
         // when
@@ -102,16 +97,7 @@ mod tests {
         assert_eq!(decoded, finding);
         assert!(encoded.contains("\"lineNumber\":7"));
         assert!(encoded.contains("\"confidence\":\"high\""));
+        assert!(!encoded.contains("\"text\""), "empty text is omitted");
         Ok(())
-    }
-
-    #[test]
-    fn finding_identity_given_same_rule_and_text_matches() {
-        // given
-        let a = Finding::new("skip-added", Confidence::High, "m", 1, "a.py", "  IT.SKIP ");
-        let b = Finding::new("skip-added", Confidence::High, "m", 9, "b.py", "it.skip");
-
-        // when / then
-        assert_eq!(a.identity(), b.identity());
     }
 }

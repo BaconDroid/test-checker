@@ -67,7 +67,7 @@ const FRAMEWORK_CASES: [(&str, &str); 15] = [
 const WEAKEN_CASES: [(&str, &str); 15] = [
     (
         "tests/test_app.py",
-        "def test_sums():\n    @pytest.mark.skip\n    assert add(1, 2) == 3\n",
+        "@pytest.mark.skip(reason=\"later\")\ndef test_sums():\n    assert add(1, 2) == 3\n",
     ),
     (
         "tests/app.test.js",
@@ -250,6 +250,57 @@ fn detect_given_commented_out_test_inside_html_script_reports_it() {
         findings
             .iter()
             .any(|finding| finding.rule == "commented-out-test"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_given_python_decorator_skip_reports_skip_added() {
+    // given
+    let detector = TestDetector::new();
+    let source = "@pytest.mark.skip\ndef test_sums():\n    assert add(1, 2) == 3\n";
+
+    // when
+    let findings = detector.detect(source, "tests/test_app.py", true, true);
+
+    // then
+    assert!(findings.iter().any(|finding| finding.rule == "skip-added"));
+}
+
+#[test]
+fn detect_edit_given_same_line_added_to_two_tests_does_not_report_duplicate() {
+    // given
+    let detector = TestDetector::new();
+    let old = "def test_a():\n    a()\ndef test_b():\n    b()\n";
+    let new = "def test_a():\n    a()\n    bump()\ndef test_b():\n    b()\n    bump()\n";
+
+    // when
+    let findings = detector.detect_edit(old, new, "tests/test_app.py", true, true);
+
+    // then
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "duplicate-test"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_given_two_identical_tests_reports_duplicate_test() {
+    // given
+    let detector = TestDetector::new();
+    let source =
+        "def test_a():\n    assert compute() == 1\ndef test_b():\n    assert compute() == 1\n";
+
+    // when
+    let findings = detector.detect(source, "tests/test_app.py", true, true);
+
+    // then
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "duplicate-test"),
         "findings: {findings:?}"
     );
 }

@@ -89,6 +89,7 @@ fn agent_memo_phrase_given_memo_text_returns_true() {
 #[test]
 fn agent_memo_phrase_given_behavioral_text_returns_false() {
     // then
+    assert!(!is_agent_memo_phrase("adds numbers"));
     assert!(!is_agent_memo_phrase("returns the sum of two numbers"));
     assert!(!is_agent_memo_phrase("rejects invalid input"));
 }

@@ -44,12 +44,11 @@ const SKIP_MARKERS: &[&str] = &[
 ];
 
 const FOCUS_MARKERS: &[&str] = &[
-    ".only(",
-    ".only)",
-    ".only;",
     "test.only",
     "it.only",
     "describe.only",
+    "context.only",
+    "specify.only",
     "fit(",
     "fdescribe(",
     "iit(",
@@ -85,13 +84,9 @@ const TOLERANCE_MARKERS: &[&str] = &[
     "toBeCloseTo(",
     "assert_allclose",
     "pytest.approx",
-    "Math.abs(",
-    "epsilon",
-    "tolerance",
     "delta=",
     "time.sleep(",
     "Thread.Sleep",
-    "setTimeout(",
     "cy.wait(",
     "await sleep(",
 ];
@@ -140,8 +135,60 @@ const ASSERTION_MARKERS: &[&str] = &[
     "Assert.Equal(",
 ];
 
+const fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
 fn has_marker(line: &str, markers: &[&str]) -> bool {
-    markers.iter().any(|marker| line.contains(marker))
+    let haystack = line.as_bytes();
+    markers.iter().any(|marker| {
+        let mut search_from = 0;
+        while let Some(offset) = line[search_from..].find(marker) {
+            let index = search_from + offset;
+            let starts_with_identifier = marker.as_bytes()[0].is_ascii_alphanumeric();
+            let boundary_ok =
+                !starts_with_identifier || index == 0 || !is_identifier_byte(haystack[index - 1]);
+            if boundary_ok {
+                return true;
+            }
+            search_from = index + 1;
+        }
+        false
+    })
+}
+
+fn has_word(text: &str, word: &str) -> bool {
+    text.split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .any(|token| token == word)
+}
+
+fn has_ternary(text: &str) -> bool {
+    let mut in_string = false;
+    let mut quote = '\0';
+    let mut escaped = false;
+    let mut seen_question = false;
+    for character in text.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == quote {
+                in_string = false;
+            }
+            continue;
+        }
+        match character {
+            '"' | '\'' => {
+                in_string = true;
+                quote = character;
+            }
+            '?' => seen_question = true,
+            ':' if seen_question => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 fn finish(
@@ -284,11 +331,7 @@ fn classify_swallowed_error(
         .unwrap_or_default();
     let swallows = if text.contains("except") {
         let tail = text.split("except").nth(1).unwrap_or("");
-        tail.contains("pass")
-            || tail.trim() == ":"
-            || tail.trim() == "Exception:"
-            || tail.trim() == "BaseException:"
-            || next == Some("pass")
+        has_word(tail, "pass") || next == Some("pass")
     } else if text.contains("catch") {
         let brace_empty = text.contains("{}") || text.contains("{ }");
         let brace_closed_next = next == Some("}") || window.get(1).is_some_and(|line| *line == "}");
@@ -317,8 +360,8 @@ fn classify_conditional_assertion(
     let assertion_here = has_marker(text, ASSERTION_MARKERS);
     let conditional_here = text.starts_with("if ")
         || text.starts_with("if(")
-        || text.contains(" if ")
-        || text.contains("? ");
+        || text.starts_with("if (")
+        || has_ternary(text);
     let triggers = conditional_here
         && (assertion_here || next.is_some_and(|line| has_marker(line, ASSERTION_MARKERS)));
     triggers.then(|| {
@@ -444,14 +487,16 @@ pub fn diff_findings(old_content: &str, new_content: &str, file_path: &str) -> V
             file_path,
             "",
         ));
-        findings.push(Finding::new(
-            "gutted-test",
-            Confidence::High,
-            "The test was stripped of assertions (or emptied) by this edit.",
-            1,
-            file_path,
-            "",
-        ));
+        if new_assertions == 0 {
+            findings.push(Finding::new(
+                "gutted-test",
+                Confidence::High,
+                "The test was stripped of all assertions (or emptied) by this edit.",
+                1,
+                file_path,
+                "",
+            ));
+        }
     }
 
     for (index, new_line) in new_lines.iter().enumerate() {
@@ -934,5 +979,83 @@ mod tests {
         assert!(!looks_like_commented_out_test(
             "# explain the algorithm below"
         ));
+    }
+
+    #[test]
+    fn classify_added_line_given_identifier_suffix_not_a_focus_marker() {
+        // given
+        let added = lines(&["    benefit(value)"]);
+
+        // when
+        let findings = classify_added_line("tests/test_app.py", &added, 0);
+
+        // then
+        assert!(!findings.iter().any(|finding| finding.rule == "focus-added"));
+    }
+
+    #[test]
+    fn classify_added_line_given_conditional_text_in_string_is_not_conditional() {
+        // given
+        let added = lines(&["    assertEquals(3, parse(\"Item? extra\"))"]);
+
+        // when
+        let findings = classify_added_line("src/test/java/AppTest.java", &added, 0);
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "conditional-assertion")
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_non_swallowing_handler_reports_nothing() {
+        // given
+        let added = lines(&["    except Exception:", "        handle_error()"]);
+
+        // when
+        let findings = classify_added_line("tests/test_app.py", &added, 0);
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "swallowed-error")
+        );
+    }
+
+    #[test]
+    fn diff_findings_given_partial_assertion_removal_does_not_gut() {
+        // given
+        let old = "def test_a():\n    assert a() == 1\n    assert b() == 2\n    assert c() == 3\n";
+        let new = "def test_a():\n    assert a() == 1\n    assert b() == 2\n";
+
+        // when
+        let findings = diff_findings(old, new, "tests/test_app.py");
+
+        // then
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "assertion-removed")
+        );
+        assert!(!findings.iter().any(|finding| finding.rule == "gutted-test"));
+    }
+
+    #[test]
+    fn classify_added_line_given_behavioral_test_name_is_not_agent_memo() {
+        // given
+        let added = lines(&["it('adds numbers', () => {})"]);
+
+        // when
+        let findings = classify_added_line("tests/app.test.js", &added, 0);
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "agent-memo-test")
+        );
     }
 }

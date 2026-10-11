@@ -1,5 +1,7 @@
 use serde_json::Value;
-use test_checker::api::{check_hook_input, check_hook_input_json, detect_findings_json};
+use test_checker::api::{
+    check_hook_input, check_hook_input_json, check_hook_input_with_options, detect_findings_json,
+};
 
 #[test]
 fn check_hook_input_given_clean_write_returns_pass() {
@@ -157,4 +159,42 @@ fn check_hook_input_given_invalid_json_skips() {
     // then
     assert_eq!(result.exit_code, 0);
     assert!(result.message.contains("Skipping: Invalid input format"));
+}
+
+#[test]
+fn check_hook_input_with_options_given_body_disabled_returns_pass() {
+    // given
+    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/test_app.py","content":"def test_sums():\n    @pytest.mark.skip\n    assert add(1, 2) == 3\n"}}"#;
+
+    // when
+    let result = check_hook_input_with_options(input, "", false, false);
+
+    // then
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn check_hook_input_given_deletion_edit_exits_two() {
+    // given
+    let input = r#"{"tool_name":"Edit","tool_input":{"file_path":"tests/test_app.py","old_string":"def test_sums():\n    assert add(1, 2) == 3\n","new_string":""}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then
+    assert_eq!(result.exit_code, 2);
+    assert!(result.message.contains("assertion-removed"));
+}
+
+#[test]
+fn check_hook_input_given_file_suppression_marker_skips() {
+    // given
+    let input = r##"{"tool_name":"Write","tool_input":{"file_path":"tests/test_app.py","content":"# test-checker: allow\ndef test_sums():\n    @pytest.mark.skip\n    assert add(1, 2) == 3\n"}}"##;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then
+    assert_eq!(result.exit_code, 0);
+    assert!(result.message.contains("Suppressed by test-checker: allow"));
 }

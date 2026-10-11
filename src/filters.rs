@@ -107,7 +107,7 @@ pub fn apply_filters(findings: &[Finding]) -> Vec<Finding> {
 pub fn is_agent_memo_phrase(text: &str) -> bool {
     let text = text.trim();
     let starts_like_memo = match first_ascii_lowercase_byte(text) {
-        Some(b'a') => starts_with_any(text, &["added", "add", "after this"]),
+        Some(b'a') => starts_with_ignore_ascii_case(text, "after this"),
         Some(b'b') => starts_with_ignore_ascii_case(text, "before this"),
         Some(b'c') => {
             starts_with_word_pair(text, "changed", &["from", "to"])
@@ -115,12 +115,8 @@ pub fn is_agent_memo_phrase(text: &str) -> bool {
                 || starts_with_word_pair(text, "converted", &["from", "to"])
                 || starts_with_word_pair(text, "convert", &["from", "to"])
         }
-        Some(b'd') => starts_with_any(text, &["deleted", "delete"]),
         Some(b'h') => starts_with_ignore_ascii_case(text, "here we"),
-        Some(b'i') => {
-            starts_with_any(text, &["implemented", "implement"])
-                || starts_with_word_pair(text, "implementation", &["of", "note"])
-        }
+        Some(b'i') => starts_with_word_pair(text, "implementation", &["of", "note"]),
         Some(b'm') => {
             starts_with_word_pair(text, "modified", &["from", "to"])
                 || starts_with_word_pair(text, "modify", &["from", "to"])
@@ -135,10 +131,7 @@ pub fn is_agent_memo_phrase(text: &str) -> bool {
         }
         Some(b'p') => starts_with_ignore_ascii_case(text, "previously"),
         Some(b'r') => {
-            starts_with_any(
-                text,
-                &["refactor", "replaced", "replace", "removed", "remove"],
-            ) || starts_with_word_pair(text, "renamed", &["from", "to"])
+            starts_with_word_pair(text, "renamed", &["from", "to"])
                 || starts_with_word_pair(text, "rename", &["from", "to"])
         }
         Some(b's') => {
@@ -184,12 +177,6 @@ fn strip_one_prefix<'a>(text: &'a str, prefixes: &[&str]) -> &'a str {
 
 fn first_ascii_lowercase_byte(text: &str) -> Option<u8> {
     text.as_bytes().first().map(u8::to_ascii_lowercase)
-}
-
-fn starts_with_any(text: &str, prefixes: &[&str]) -> bool {
-    prefixes
-        .iter()
-        .any(|prefix| starts_with_ignore_ascii_case(text, prefix))
 }
 
 fn starts_with_word_pair(text: &str, first: &str, seconds: &[&str]) -> bool {

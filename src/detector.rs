@@ -78,10 +78,15 @@ impl TestDetector {
         if include_body_tests {
             if let Some(query) = &runtime.test_query {
                 let bodies = capture_bodies(&runtime, query, &tree, source);
-                findings.extend(analyze_new_bodies(file_path, content, &bodies));
+                findings.extend(analyze_new_bodies(
+                    &runtime.name,
+                    file_path,
+                    content,
+                    &bodies,
+                ));
             }
         }
-        findings
+        dedupe(findings)
     }
 
     /// Analyze an edit: report only weakening newly introduced by `new_string`.
@@ -125,11 +130,15 @@ impl TestDetector {
                 let bodies = capture_bodies(&runtime, query, &tree, source);
                 let added = added_lines(old_string, new_string);
                 findings.extend(analyze_edited_bodies(
-                    file_path, new_string, &bodies, &added,
+                    &runtime.name,
+                    file_path,
+                    new_string,
+                    &bodies,
+                    &added,
                 ));
             }
         }
-        findings
+        dedupe(findings)
     }
 }
 
@@ -308,6 +317,22 @@ fn normalized_comment(text: &str) -> String {
     text.trim().to_lowercase()
 }
 
+/// Nested test bodies (a `describe` containing an `it`) can classify the same line twice.
+fn dedupe(findings: Vec<Finding>) -> Vec<Finding> {
+    let mut seen = HashSet::new();
+    findings
+        .into_iter()
+        .filter(|finding| {
+            seen.insert(format!(
+                "{}\u{1f}{}\u{1f}{}",
+                finding.rule,
+                finding.line_number,
+                finding.normalized_text()
+            ))
+        })
+        .collect()
+}
+
 fn capture_bodies(
     runtime: &Runtime,
     query: &Query,
@@ -350,6 +375,15 @@ fn capture_bodies(
 /// Extend a test body upward to include the attribute/marker lines that gate it (Rust
 /// `#[test]`/`#[ignore]`, Elixir `@tag :skip`).
 fn expanded_start(language: &str, node: tree_sitter::Node) -> (usize, usize) {
+    if language == "python" {
+        // `@pytest.mark.skip` style decorators live in a `decorated_definition` parent,
+        // outside the `function_definition` span captured by the test query.
+        if let Some(parent) = node.parent() {
+            if parent.kind() == "decorated_definition" {
+                return (parent.start_byte(), parent.start_position().row);
+            }
+        }
+    }
     let attribute_kinds: &[&str] = match language {
         "rust" => &["attribute_item"],
         "elixir" => &["unary_operator"],
@@ -430,39 +464,35 @@ fn has_rust_test_attribute(node: tree_sitter::Node, source: &[u8]) -> bool {
     false
 }
 
-fn analyze_new_bodies(file_path: &str, content: &str, bodies: &[Body]) -> Vec<Finding> {
+fn analyze_new_bodies(
+    language: &str,
+    file_path: &str,
+    content: &str,
+    bodies: &[Body],
+) -> Vec<Finding> {
     let mut findings = Vec::new();
     let mut seen: HashMap<String, usize> = HashMap::new();
     for body in bodies {
-        let lines = body_added_lines(content, body, None);
+        let lines = body_added_lines(content, body, None, language);
         findings.extend(classify_lines(file_path, &lines));
         findings.extend(rules::classify_test_body(
             file_path,
             body.start_row + 1,
             &lines,
         ));
-        let signature = body_signature(&lines);
-        if !signature.is_empty() {
-            if let Some(first_line) = seen.get(&signature) {
-                findings.push(Finding::new(
-                    "duplicate-test",
-                    Confidence::Medium,
-                    format!(
-                        "This test duplicates another test already defined at line {first_line}."
-                    ),
-                    body.start_row + 1,
-                    file_path,
-                    "",
-                ));
-            } else {
-                seen.insert(signature, body.start_row + 1);
-            }
-        }
+        push_duplicate(
+            &mut findings,
+            &mut seen,
+            file_path,
+            body.start_row + 1,
+            &lines,
+        );
     }
     findings
 }
 
 fn analyze_edited_bodies(
+    language: &str,
     file_path: &str,
     content: &str,
     bodies: &[Body],
@@ -471,36 +501,55 @@ fn analyze_edited_bodies(
     let mut findings = Vec::new();
     let mut seen: HashMap<String, usize> = HashMap::new();
     for body in bodies {
-        let lines = body_added_lines(content, body, Some(added));
-        if lines.is_empty() {
+        let added_lines = body_added_lines(content, body, Some(added), language);
+        if added_lines.is_empty() {
             continue;
         }
-        findings.extend(classify_lines(file_path, &lines));
-        let signature = body_signature(&lines);
-        if !signature.is_empty() {
-            if let Some(first_line) = seen.get(&signature) {
-                findings.push(Finding::new(
-                    "duplicate-test",
-                    Confidence::Medium,
-                    format!(
-                        "This test duplicates another test already defined at line {first_line}."
-                    ),
-                    body.start_row + 1,
-                    file_path,
-                    "",
-                ));
-            } else {
-                seen.insert(signature, body.start_row + 1);
-            }
-        }
+        findings.extend(classify_lines(file_path, &added_lines));
+        // `duplicate-test` compares the whole body, so adding the same line to two different
+        // tests is not mistaken for one test duplicating another.
+        let full = body_added_lines(content, body, None, language);
+        push_duplicate(
+            &mut findings,
+            &mut seen,
+            file_path,
+            body.start_row + 1,
+            &full,
+        );
     }
     findings
+}
+
+fn push_duplicate(
+    findings: &mut Vec<Finding>,
+    seen: &mut HashMap<String, usize>,
+    file_path: &str,
+    start_line: usize,
+    lines: &[AddedLine<'_>],
+) {
+    let signature = body_signature(lines);
+    if signature.is_empty() {
+        return;
+    }
+    if let Some(first_line) = seen.get(&signature) {
+        findings.push(Finding::new(
+            "duplicate-test",
+            Confidence::Medium,
+            format!("This test duplicates another test already defined at line {first_line}."),
+            start_line,
+            file_path,
+            "",
+        ));
+    } else {
+        seen.insert(signature, start_line);
+    }
 }
 
 fn body_added_lines<'a>(
     content: &'a str,
     body: &Body,
     added: Option<&HashSet<usize>>,
+    language: &str,
 ) -> Vec<AddedLine<'a>> {
     let Some(text) = content.get(body.start_byte..body.end_byte) else {
         return Vec::new();
@@ -510,7 +559,7 @@ fn body_added_lines<'a>(
         .filter(|(index, _)| added.is_none_or(|set| set.contains(&(body.start_row + index))))
         .map(|(index, line)| AddedLine {
             line_number: body.start_row + 1 + index,
-            text: strip_line_comment(line),
+            text: strip_line_comment(line, language),
         })
         .collect()
 }
@@ -524,8 +573,10 @@ fn classify_lines(file_path: &str, lines: &[AddedLine<'_>]) -> Vec<Finding> {
 }
 
 fn body_signature(lines: &[AddedLine<'_>]) -> String {
+    // Skip the declaration line so two tests that differ only by name are still duplicates.
     lines
         .iter()
+        .skip(1)
         .map(|line| line.text.trim())
         .filter(|line| !line.is_empty())
         .map(str::to_lowercase)
@@ -533,24 +584,68 @@ fn body_signature(lines: &[AddedLine<'_>]) -> String {
         .join("\n")
 }
 
+/// New (added) line indices in `new_content`, computed with an LCS over trimmed lines so a line
+/// whose text happens to appear elsewhere in the old content is not dropped.
 fn added_lines(old_content: &str, new_content: &str) -> HashSet<usize> {
-    let old: HashSet<String> = old_content
-        .lines()
-        .map(|line| line.trim().to_string())
-        .collect();
-    new_content
-        .lines()
-        .enumerate()
-        .filter(|(_, line)| !old.contains(line.trim()))
-        .map(|(index, _)| index)
-        .collect()
+    let old: Vec<&str> = old_content.lines().map(str::trim).collect();
+    let new: Vec<&str> = new_content.lines().map(str::trim).collect();
+    if old.len().saturating_mul(new.len()) > 4_000_000 {
+        let old_set: HashSet<&str> = old.iter().copied().collect();
+        return new
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| !old_set.contains(*line))
+            .map(|(index, _)| index)
+            .collect();
+    }
+
+    let (rows, columns) = (new.len(), old.len());
+    let mut lengths = vec![vec![0_u32; columns + 1]; rows + 1];
+    for row in (0..rows).rev() {
+        for column in (0..columns).rev() {
+            lengths[row][column] = if new[row] == old[column] {
+                lengths[row + 1][column + 1] + 1
+            } else {
+                lengths[row + 1][column].max(lengths[row][column + 1])
+            };
+        }
+    }
+    let mut matched = vec![false; rows];
+    let (mut row, mut column) = (0, 0);
+    while row < rows && column < columns {
+        if new[row] == old[column] {
+            matched[row] = true;
+            row += 1;
+            column += 1;
+        } else if lengths[row + 1][column] >= lengths[row][column + 1] {
+            row += 1;
+        } else {
+            column += 1;
+        }
+    }
+    (0..rows).filter(|&index| !matched[index]).collect()
 }
 
-fn strip_line_comment(line: &str) -> &str {
+fn line_comment_token(language: &str) -> Option<&'static str> {
+    match language {
+        "python" | "ruby" | "bash" | "dockerfile" | "elixir" | "hcl" | "toml" | "yaml" | "cue"
+        | "perl" => Some("#"),
+        "lua" | "sql" | "elm" | "haskell" => Some("--"),
+        "javascript" | "typescript" | "tsx" | "java" | "go" | "rust" | "c" | "cpp" | "csharp"
+        | "kotlin" | "scala" | "swift" | "groovy" | "php" | "proto" | "css" | "svelte" => {
+            Some("//")
+        }
+        _ => None,
+    }
+}
+
+fn strip_line_comment<'a>(line: &'a str, language: &str) -> &'a str {
+    let Some(token) = line_comment_token(language) else {
+        return line;
+    };
     let mut in_string = false;
     let mut quote = '\0';
     let mut escaped = false;
-    let mut previous_is_space = true;
     for (index, character) in line.char_indices() {
         if in_string {
             if escaped {
@@ -562,21 +657,13 @@ fn strip_line_comment(line: &str) -> &str {
             }
             continue;
         }
-        match character {
-            '"' | '\'' => {
-                in_string = true;
-                quote = character;
-                previous_is_space = false;
-            }
-            '#' if previous_is_space => {
-                let rest = &line[index + 1..];
-                if !rest.starts_with('[') && !rest.starts_with('!') {
-                    return &line[..index];
-                }
-                previous_is_space = false;
-            }
-            '/' if line[index..].starts_with("//") => return &line[..index],
-            _ => previous_is_space = character.is_whitespace(),
+        if character == '"' || character == '\'' {
+            in_string = true;
+            quote = character;
+            continue;
+        }
+        if line[index..].starts_with(token) {
+            return &line[..index];
         }
     }
     line
@@ -590,21 +677,31 @@ mod tests {
     fn strip_line_comment_given_trailing_comment_removes_it() {
         // then
         assert_eq!(
-            strip_line_comment("assert x == y  # not a comment marker"),
+            strip_line_comment("assert x == y  # note", "python"),
             "assert x == y  "
         );
         assert_eq!(
-            strip_line_comment("expect(a).toBe(b); // note"),
+            strip_line_comment("expect(a).toBe(b); // note", "javascript"),
             "expect(a).toBe(b); "
         );
+        assert_eq!(strip_line_comment("x = 1 -- lua comment", "lua"), "x = 1 ");
     }
 
     #[test]
     fn strip_line_comment_given_hash_inside_string_keeps_it() {
         // then
         assert_eq!(
-            strip_line_comment("assert label == \"#1\""),
+            strip_line_comment("assert label == \"#1\"", "python"),
             "assert label == \"#1\""
+        );
+    }
+
+    #[test]
+    fn strip_line_comment_given_javascript_private_field_keeps_it() {
+        // then
+        assert_eq!(
+            strip_line_comment("#count = 0;", "javascript"),
+            "#count = 0;"
         );
     }
 }

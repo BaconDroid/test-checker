@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 use crate::detector::TestDetector;
-use crate::filters::apply_filters;
+use crate::filters::{SuppressionFilter, apply_filters};
 use crate::language::{is_test_path, language_for_path};
 use crate::models::{Edit, null_default};
 use crate::output::format_hook_message;
+use crate::rules;
 
 pub const EXIT_PASS: i32 = 0;
 pub const EXIT_BLOCK: i32 = 2;
@@ -60,13 +61,32 @@ struct HookInput {
 
 #[must_use]
 pub fn check_hook_input(input: &str, custom_prompt: &str) -> HookCheckResult {
+    check_hook_input_with_options(input, custom_prompt, true, true)
+}
+
+/// Same as [`check_hook_input`], with the include toggles threaded through, mirroring
+/// `comment-checker`'s `include_docstrings`.
+#[must_use]
+pub fn check_hook_input_with_options(
+    input: &str,
+    custom_prompt: &str,
+    include_commented_out_tests: bool,
+    include_body_tests: bool,
+) -> HookCheckResult {
     if input.is_empty() {
         return skip("No input provided");
     }
 
     serde_json::from_str::<HookInput>(input).map_or_else(
         |_| skip("Invalid input format"),
-        |hook_input| evaluate(&hook_input, custom_prompt),
+        |hook_input| {
+            evaluate(
+                &hook_input,
+                custom_prompt,
+                include_commented_out_tests,
+                include_body_tests,
+            )
+        },
     )
 }
 
@@ -77,11 +97,16 @@ pub fn check_hook_input_from_reader<R: std::io::Read>(
 ) -> HookCheckResult {
     serde_json::from_reader::<R, HookInput>(reader).map_or_else(
         |_| skip("Invalid input format"),
-        |hook_input| evaluate(&hook_input, custom_prompt),
+        |hook_input| evaluate(&hook_input, custom_prompt, true, true),
     )
 }
 
-fn evaluate(hook_input: &HookInput, custom_prompt: &str) -> HookCheckResult {
+fn evaluate(
+    hook_input: &HookInput,
+    custom_prompt: &str,
+    include_commented_out_tests: bool,
+    include_body_tests: bool,
+) -> HookCheckResult {
     let file_path = hook_input.tool_input.file_path.as_str();
     if file_path.is_empty() {
         return skip("No file path provided");
@@ -96,19 +121,44 @@ fn evaluate(hook_input: &HookInput, custom_prompt: &str) -> HookCheckResult {
         return skip("Non-test file");
     }
 
+    let suppression = SuppressionFilter;
+    let suppressed = match hook_input.tool_name.as_str() {
+        "Edit" => suppression.is_file_suppressed(&hook_input.tool_input.new_string),
+        "MultiEdit" => hook_input
+            .tool_input
+            .edits
+            .iter()
+            .any(|edit| suppression.is_file_suppressed(&edit.new_string)),
+        _ => suppression.is_file_suppressed(get_content_to_check(hook_input)),
+    };
+    if suppressed {
+        return skip("Suppressed by test-checker: allow");
+    }
+
     let detector = TestDetector::new();
     let findings = match hook_input.tool_name.as_str() {
         "Edit" => {
-            if hook_input.tool_input.new_string.is_empty() {
-                return skip("No content to check");
+            let old_string = hook_input.tool_input.old_string.as_str();
+            let new_string = hook_input.tool_input.new_string.as_str();
+            if new_string.is_empty() {
+                if old_string.is_empty() {
+                    return skip("No content to check");
+                }
+                // A deletion edit has no new content to parse, but it can still remove assertions.
+                if include_body_tests {
+                    rules::diff_findings(old_string, "", file_path)
+                } else {
+                    Vec::new()
+                }
+            } else {
+                detector.detect_edit(
+                    old_string,
+                    new_string,
+                    file_path,
+                    include_commented_out_tests,
+                    include_body_tests,
+                )
             }
-            detector.detect_edit(
-                &hook_input.tool_input.old_string,
-                &hook_input.tool_input.new_string,
-                file_path,
-                true,
-                true,
-            )
         }
         "MultiEdit" => {
             if hook_input.tool_input.edits.is_empty() {
@@ -123,8 +173,8 @@ fn evaluate(hook_input: &HookInput, custom_prompt: &str) -> HookCheckResult {
                     &edit.old_string,
                     &edit.new_string,
                     file_path,
-                    true,
-                    true,
+                    include_commented_out_tests,
+                    include_body_tests,
                 ));
             }
             findings
@@ -134,7 +184,12 @@ fn evaluate(hook_input: &HookInput, custom_prompt: &str) -> HookCheckResult {
             if content.is_empty() {
                 return skip("No content to check");
             }
-            detector.detect(content, file_path, true, true)
+            detector.detect(
+                content,
+                file_path,
+                include_commented_out_tests,
+                include_body_tests,
+            )
         }
     };
 

@@ -1,7 +1,7 @@
-use test_checker::models::{Confidence, Finding};
+use test_checker::models::{Confidence, Edit, Finding};
 
 #[test]
-fn normalized_text_given_whitespace_returns_stripped_lowercase() {
+fn finding_normalized_text_given_whitespace_returns_stripped_lowercase() {
     // given
     let finding = Finding::new(
         "skip-added",
@@ -20,11 +20,29 @@ fn normalized_text_given_whitespace_returns_stripped_lowercase() {
 }
 
 #[test]
-fn identity_given_same_rule_and_text_is_equal_regardless_of_line() {
+fn edit_deserialization_given_camel_case_and_null_fields_falls_back() -> serde_json::Result<()> {
     // given
-    let a = Finding::new("skip-added", Confidence::High, "m", 1, "a.py", "  IT.SKIP ");
-    let b = Finding::new("skip-added", Confidence::High, "m", 9, "b.py", "it.skip");
+    let input = r#"{"oldString":"a","newString":null}"#;
 
-    // when / then
-    assert_eq!(a.identity(), b.identity());
+    // when
+    let edit: Edit = serde_json::from_str(input)?;
+
+    // then
+    assert_eq!(edit.old_string, "a");
+    assert_eq!(edit.new_string, "");
+    Ok(())
+}
+
+#[test]
+fn edit_deserialization_given_snake_case_keys_parses() -> serde_json::Result<()> {
+    // given
+    let input = r#"{"old_string":"a","new_string":"b"}"#;
+
+    // when
+    let edit: Edit = serde_json::from_str(input)?;
+
+    // then
+    assert_eq!(edit.old_string, "a");
+    assert_eq!(edit.new_string, "b");
+    Ok(())
 }
