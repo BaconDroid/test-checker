@@ -56,3 +56,9 @@ Method source: openclaw test-audit skill.
 grammar, clean fixtures must produce no findings, and the languages with a test-body query must
 compile that query and capture a body. Only languages with a framework produce body findings;
 `commented-out-test` works everywhere.
+
+## Parity harness
+`parity/` is shared byte-for-byte with `BaconDroid/comment-checker`: `check.py` is the cross-repo
+drift check, `vectors.json` is the shared hook-contract corpus, and `tests/parity.rs` runs it. CI
+runs `python3 parity/check.py` (the `parity` job). When a shared file changes, change the sibling in
+the same wave.
