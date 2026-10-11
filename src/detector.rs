@@ -1,52 +1,39 @@
-//! AST capture for the test-weakening detector.
-//!
-//! This module owns tree-sitter parsing and test-body extraction only; the
-//! 11 rule classifiers live in [`crate::rules`]. Only added lines are
-//! candidates, comments are stripped, the `is_test_file` gate applies, and
-//! every failure path degrades to no findings (fail-open).
-
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ops::ControlFlow;
 use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
-use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
+use tree_sitter::{ParseOptions, ParseState, Parser, Query, QueryCursor, StreamingIterator};
 
-use crate::filters;
-use crate::language::{LanguageSpec, language_for_path, plugin_language};
-use crate::models::Finding;
-use crate::rules::{self, Derived};
+use crate::language::{
+    comment_query, is_test_callee, is_test_function_name, language_for_path, test_query,
+};
+use crate::models::{Confidence, Finding};
+use crate::rules::{self, AddedLine};
 
-/// A parsed grammar plus its test-body query, built once per language.
+const PARSE_TIME_BUDGET: Duration = Duration::from_millis(50);
+
 struct Runtime {
+    name: String,
     language: tree_sitter::Language,
-    test_query: Query,
+    comment_query: Query,
+    test_query: Option<Query>,
+    injection_query: Option<Query>,
 }
 
-static RUNTIMES: LazyLock<Mutex<HashMap<&'static str, Arc<Runtime>>>> =
+static RUNTIMES: LazyLock<Mutex<HashMap<String, Arc<Runtime>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 thread_local! {
-    static PARSERS: RefCell<HashMap<&'static str, Parser>> = RefCell::new(HashMap::new());
+    static PARSERS: RefCell<HashMap<String, Parser>> = RefCell::new(HashMap::new());
 }
 
-/// One changed file, as the classifiers see it.
-#[derive(Clone, Debug)]
-pub struct Change {
-    pub file_path: String,
-    pub language: &'static str,
-    pub new_text: String,
-    pub old_text: String,
-    pub is_new: bool,
-    pub is_test_file: bool,
-}
-
-/// A whole test body. `start_line` is the declaration line for Python and the
-/// opening brace for the brace languages.
-#[derive(Clone, Debug)]
-pub struct TestBlock {
-    pub start_line: usize,
-    pub end_line: usize,
-    pub lines: Vec<String>,
+#[derive(Clone, Copy, Debug)]
+struct Body {
+    start_byte: usize,
+    end_byte: usize,
+    start_row: usize,
 }
 
 #[derive(Debug, Default)]
@@ -58,233 +45,566 @@ impl TestDetector {
         Self
     }
 
-    /// Gates, parses, captures test blocks, then runs the rule catalog.
+    /// Analyze a whole file's content (`Write`): every line is treated as newly added.
     #[must_use]
-    pub fn detect(&self, change: &Change) -> Vec<Finding> {
-        if !change.is_test_file || filters::is_file_disabled(&change.new_text) {
+    pub fn detect(
+        &self,
+        content: &str,
+        file_path: &str,
+        include_commented_out_tests: bool,
+        include_body_tests: bool,
+    ) -> Vec<Finding> {
+        let Some(name) = language_for_path(file_path) else {
             return Vec::new();
+        };
+        let Some(runtime) = runtime_by_name(name) else {
+            return Vec::new();
+        };
+        let source = content.as_bytes();
+        let Some(tree) = parse_with_runtime(&runtime, source) else {
+            return Vec::new();
+        };
+
+        let mut findings = Vec::new();
+        if include_commented_out_tests {
+            let mut comments = Vec::new();
+            collect_comments(&runtime, &tree, content, 0, &mut comments);
+            findings.extend(commented_out_findings(
+                file_path,
+                &comments,
+                &HashSet::new(),
+            ));
         }
-        let Some(spec) = language_for_path(&change.file_path) else {
+        if include_body_tests {
+            if let Some(query) = &runtime.test_query {
+                let bodies = capture_bodies(&runtime, query, &tree, source);
+                findings.extend(analyze_new_bodies(file_path, content, &bodies));
+            }
+        }
+        findings
+    }
+
+    /// Analyze an edit: report only weakening newly introduced by `new_string`.
+    #[must_use]
+    pub fn detect_edit(
+        &self,
+        old_string: &str,
+        new_string: &str,
+        file_path: &str,
+        include_commented_out_tests: bool,
+        include_body_tests: bool,
+    ) -> Vec<Finding> {
+        let Some(name) = language_for_path(file_path) else {
             return Vec::new();
         };
-        let Some(runtime) = runtime_for(spec) else {
+        let Some(runtime) = runtime_by_name(name) else {
             return Vec::new();
         };
-        let source = change.new_text.as_bytes();
-        let Some(tree) = parse_with_runtime(&runtime, spec.name, source) else {
+        let source = new_string.as_bytes();
+        let Some(tree) = parse_with_runtime(&runtime, source) else {
             return Vec::new();
         };
-        let blocks = find_test_blocks(&runtime, &tree, source, spec);
-        let derived = Derived::new(change, blocks);
-        dedupe_sorted(rules::evaluate(&derived))
+
+        let mut findings = Vec::new();
+        if include_commented_out_tests {
+            let mut old_comments = Vec::new();
+            if let Some(old_tree) = parse_with_runtime(&runtime, old_string.as_bytes()) {
+                collect_comments(&runtime, &old_tree, old_string, 0, &mut old_comments);
+            }
+            let old_texts: HashSet<String> = old_comments
+                .iter()
+                .map(|(_, text)| normalized_comment(text))
+                .collect();
+            let mut new_comments = Vec::new();
+            collect_comments(&runtime, &tree, new_string, 0, &mut new_comments);
+            findings.extend(commented_out_findings(file_path, &new_comments, &old_texts));
+        }
+        if include_body_tests {
+            findings.extend(rules::diff_findings(old_string, new_string, file_path));
+            if let Some(query) = &runtime.test_query {
+                let bodies = capture_bodies(&runtime, query, &tree, source);
+                let added = added_lines(old_string, new_string);
+                findings.extend(analyze_edited_bodies(
+                    file_path, new_string, &bodies, &added,
+                ));
+            }
+        }
+        findings
     }
 }
 
-// --- Runtime cache ---------------------------------------------------------
-
-fn runtime_for(spec: LanguageSpec) -> Option<Arc<Runtime>> {
+fn runtime_by_name(name: &str) -> Option<Arc<Runtime>> {
     let Ok(mut runtimes) = RUNTIMES.lock() else {
         return None;
     };
-    if let Some(runtime) = runtimes.get(spec.name) {
+    if let Some(runtime) = runtimes.get(name) {
         return Some(Arc::clone(runtime));
     }
 
-    let language = tree_sitter_language_pack::get_language(spec.name).ok()?;
-    let test_query = Query::new(&language, spec.test_query).ok()?;
+    let language = tree_sitter_language_pack::get_language(name).ok()?;
+    let comment = Query::new(&language, comment_query(name)).ok()?;
+    let body = test_query(name).and_then(|source| Query::new(&language, source).ok());
+    let injection = tree_sitter_language_pack::get_injections_query(name)
+        .and_then(|source| Query::new(&language, source).ok());
     let runtime = Arc::new(Runtime {
+        name: name.to_owned(),
         language,
-        test_query,
+        comment_query: comment,
+        test_query: body,
+        injection_query: injection,
     });
-    runtimes.insert(spec.name, Arc::clone(&runtime));
+    runtimes.insert(name.to_owned(), Arc::clone(&runtime));
     Some(runtime)
 }
 
-fn parse_with_runtime(
-    runtime: &Runtime,
-    language_name: &'static str,
-    source: &[u8],
-) -> Option<tree_sitter::Tree> {
+/// Whether the language has a compiling test-body query (i.e. can yield body-based findings).
+#[must_use]
+pub fn supports_test_bodies(name: &str) -> bool {
+    runtime_by_name(name).is_some_and(|runtime| runtime.test_query.is_some())
+}
+
+fn parse_with_runtime(runtime: &Runtime, source: &[u8]) -> Option<tree_sitter::Tree> {
     PARSERS.with(|parsers| {
         let mut parsers = parsers.borrow_mut();
-        if let Some(parser) = parsers.get_mut(language_name) {
-            parser.parse(source, None)
+        if let Some(parser) = parsers.get_mut(&runtime.name) {
+            parse_with_budget(parser, source)
         } else {
             let mut parser = Parser::new();
             if parser.set_language(&runtime.language).is_err() {
                 return None;
             }
-            let tree = parser.parse(source, None);
-            parsers.insert(language_name, parser);
+            let tree = parse_with_budget(&mut parser, source);
+            parsers.insert(runtime.name.clone(), parser);
             tree
         }
     })
 }
 
-// --- Test block extraction -------------------------------------------------
+fn parse_with_budget(parser: &mut Parser, source: &[u8]) -> Option<tree_sitter::Tree> {
+    let start = Instant::now();
+    let mut progress = |_state: &ParseState| {
+        if start.elapsed() > PARSE_TIME_BUDGET {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    };
+    let options = ParseOptions::new().progress_callback(&mut progress);
+    let len = source.len();
+    let mut read = |offset: usize, _: tree_sitter::Point| {
+        if offset < len {
+            &source[offset..]
+        } else {
+            Default::default()
+        }
+    };
+    parser.parse_with_options(&mut read, None, Some(options))
+}
 
-fn find_test_blocks(
+fn collect_comments(
     runtime: &Runtime,
     tree: &tree_sitter::Tree,
-    source: &[u8],
-    spec: LanguageSpec,
-) -> Vec<TestBlock> {
-    let names = runtime.test_query.capture_names();
+    content: &str,
+    row_offset: usize,
+    out: &mut Vec<(usize, String)>,
+) {
+    let source = content.as_bytes();
+    let root = tree.root_node();
     let mut cursor = QueryCursor::new();
-    let mut blocks = Vec::new();
-    let plugin = plugin_language(spec.name);
-    let mut matches = cursor.matches(&runtime.test_query, tree.root_node(), source);
-    while let Some(query_match) = matches.next() {
-        let mut name_node: Option<Node<'_>> = None;
-        let mut body_node: Option<Node<'_>> = None;
-        let mut call_node: Option<Node<'_>> = None;
+    cursor.set_byte_range(0..source.len());
+    let mut captures = cursor.captures(&runtime.comment_query, root, source);
+    captures.advance();
+    while let Some((query_match, capture_index)) = captures.get() {
+        if let Some(capture) = query_match.captures.get(*capture_index) {
+            if let Ok(text) = capture.node.utf8_text(source) {
+                out.push((
+                    capture.node.start_position().row + 1 + row_offset,
+                    text.to_string(),
+                ));
+            }
+        }
+        captures.advance();
+    }
+    collect_injected_comments(runtime, tree, content, row_offset, out);
+}
+
+fn collect_injected_comments(
+    runtime: &Runtime,
+    tree: &tree_sitter::Tree,
+    content: &str,
+    row_offset: usize,
+    out: &mut Vec<(usize, String)>,
+) {
+    let Some(query) = &runtime.injection_query else {
+        return;
+    };
+    let source = content.as_bytes();
+    let capture_names = query.capture_names();
+    let mut cursor = QueryCursor::new();
+    cursor.set_byte_range(0..source.len());
+    let mut matches = cursor.matches(query, tree.root_node(), source);
+    matches.advance();
+    while let Some(query_match) = matches.get() {
+        let mut injected_content: Option<tree_sitter::Node> = None;
+        let mut injected_language: Option<&str> = None;
+        for setting in query.property_settings(query_match.pattern_index) {
+            if setting.key.as_ref() == "injection.language" {
+                injected_language = setting.value.as_deref();
+            }
+        }
         for capture in query_match.captures {
-            match names.get(capture.index as usize).copied() {
-                Some("test.name") => name_node = Some(capture.node),
-                Some("test.body") => body_node = Some(capture.node),
-                Some("test.call") => call_node = Some(capture.node),
+            match capture_names.get(capture.index as usize).copied() {
+                Some("injection.content") => injected_content = Some(capture.node),
+                Some("injection.language") => {
+                    injected_language = capture.node.utf8_text(source).ok();
+                }
                 _ => {}
             }
         }
-        match plugin {
-            "python" => {
-                if let (Some(name), Some(body)) = (name_node, body_node) {
-                    if node_text(name, source).starts_with("test_") {
-                        blocks.push(make_block(name, body, source, false));
-                    }
+        if let (Some(node), Some(injected)) = (injected_content, injected_language) {
+            if let (Ok(text), Some(inner)) =
+                (node.utf8_text(source), runtime_by_name(injected.trim()))
+            {
+                if let Some(inner_tree) = parse_with_runtime(&inner, text.as_bytes()) {
+                    collect_comments(
+                        &inner,
+                        &inner_tree,
+                        text,
+                        node.start_position().row + row_offset,
+                        out,
+                    );
                 }
             }
-            "go" => {
-                if let (Some(name), Some(body)) = (name_node, body_node) {
-                    if node_text(name, source).starts_with("Test") {
-                        blocks.push(make_block(body, body, source, true));
-                    }
-                }
-            }
-            "rust" => {
-                if let (Some(name), Some(body)) = (name_node, body_node) {
-                    if let Some(function) = name.parent() {
-                        if rust_has_attribute(function, source, rust_is_test_attribute) {
-                            blocks.push(make_block(body, body, source, true));
-                        }
-                    }
-                }
-            }
-            "js" | "ts" => {
-                if let Some(call) = call_node {
-                    collect_js(call, source, plugin, &mut blocks);
-                }
-            }
-            _ => {}
         }
-    }
-    blocks
-}
-
-fn collect_js(call: Node<'_>, source: &[u8], plugin: &str, out: &mut Vec<TestBlock>) {
-    let Some(function) = call.child_by_field_name("function") else {
-        return;
-    };
-    let function_text = format!("{}(", node_text(function, source));
-    if !filters::is_test_declaration(&function_text, plugin) {
-        return;
-    }
-    let Some(callback) = js_callback(call) else {
-        return;
-    };
-    let Some(body) = callback.child_by_field_name("body") else {
-        return;
-    };
-    if body.kind() == "statement_block" {
-        out.push(make_block(body, body, source, true));
+        matches.advance();
     }
 }
 
-fn make_block(start: Node<'_>, body: Node<'_>, source: &[u8], brace: bool) -> TestBlock {
-    let raw = node_text(body, source);
-    let content = if brace {
-        let inner = raw.strip_prefix('{').unwrap_or(raw);
-        inner.strip_suffix('}').unwrap_or(inner)
-    } else {
-        raw
-    };
-    TestBlock {
-        start_line: start.start_position().row + 1,
-        end_line: body.end_position().row + 1,
-        lines: content.split('\n').map(str::to_owned).collect(),
-    }
+fn commented_out_findings(
+    file_path: &str,
+    comments: &[(usize, String)],
+    old_texts: &HashSet<String>,
+) -> Vec<Finding> {
+    comments
+        .iter()
+        .filter(|(_, text)| {
+            rules::looks_like_commented_out_test(text)
+                && !old_texts.contains(&normalized_comment(text))
+        })
+        .map(|(line, text)| {
+            Finding::new(
+                "commented-out-test",
+                Confidence::High,
+                "Disabled test/assertion code was commented out instead of deleted or fixed.",
+                *line,
+                file_path,
+                text,
+            )
+        })
+        .collect()
 }
 
-fn js_callback(call: Node<'_>) -> Option<Node<'_>> {
-    let arguments = call.child_by_field_name("arguments")?;
-    let count = arguments.named_child_count();
-    for index in (0..count).rev() {
-        let Ok(index) = u32::try_from(index) else {
-            continue;
-        };
-        let Some(argument) = arguments.named_child(index) else {
-            continue;
-        };
-        if matches!(
-            argument.kind(),
-            "arrow_function" | "function_expression" | "function"
-        ) {
-            return Some(argument);
+fn normalized_comment(text: &str) -> String {
+    text.trim().to_lowercase()
+}
+
+fn capture_bodies(
+    runtime: &Runtime,
+    query: &Query,
+    tree: &tree_sitter::Tree,
+    source: &[u8],
+) -> Vec<Body> {
+    let capture_names = query.capture_names();
+    let mut cursor = QueryCursor::new();
+    cursor.set_byte_range(0..source.len());
+    let mut matches = cursor.matches(query, tree.root_node(), source);
+    matches.advance();
+    let mut bodies = Vec::new();
+    while let Some(query_match) = matches.get() {
+        let mut test_node: Option<tree_sitter::Node> = None;
+        let mut identifier: Option<String> = None;
+        for capture in query_match.captures {
+            match capture_names.get(capture.index as usize).copied() {
+                Some("test") => test_node = Some(capture.node),
+                Some("test.name" | "test.callee") => {
+                    identifier = capture.node.utf8_text(source).ok().map(str::to_owned);
+                }
+                _ => {}
+            }
         }
+        if let Some(node) = test_node {
+            if is_body_candidate(&runtime.name, identifier.as_deref(), node, source) {
+                let (start_byte, start_row) = expanded_start(&runtime.name, node);
+                bodies.push(Body {
+                    start_byte,
+                    end_byte: node.end_byte(),
+                    start_row,
+                });
+            }
+        }
+        matches.advance();
     }
-    None
+    bodies
 }
 
-fn rust_has_attribute(node: Node<'_>, source: &[u8], matches: impl Fn(&str) -> bool) -> bool {
-    let mut sibling = node.prev_named_sibling();
+/// Extend a test body upward to include the attribute/marker lines that gate it (Rust
+/// `#[test]`/`#[ignore]`, Elixir `@tag :skip`).
+fn expanded_start(language: &str, node: tree_sitter::Node) -> (usize, usize) {
+    let attribute_kinds: &[&str] = match language {
+        "rust" => &["attribute_item"],
+        "elixir" => &["unary_operator"],
+        _ => &[],
+    };
+    let mut start_byte = node.start_byte();
+    let mut start_row = node.start_position().row;
+    let mut sibling = node.prev_sibling();
+    while let Some(current) = sibling {
+        if !attribute_kinds.contains(&current.kind()) {
+            break;
+        }
+        start_byte = current.start_byte();
+        start_row = current.start_position().row;
+        sibling = current.prev_sibling();
+    }
+    (start_byte, start_row)
+}
+
+fn is_body_candidate(
+    language: &str,
+    identifier: Option<&str>,
+    node: tree_sitter::Node,
+    source: &[u8],
+) -> bool {
+    match language {
+        "python" | "go" => identifier.is_some_and(is_test_function_name),
+        "swift" => {
+            identifier.is_some_and(|name| name.starts_with("test") || name.starts_with("Test"))
+        }
+        "rust" => has_rust_test_attribute(node, source),
+        "java" => node_text_contains(
+            node,
+            source,
+            &[
+                "@Test",
+                "@ParameterizedTest",
+                "@RepeatedTest",
+                "@TestFactory",
+            ],
+        ),
+        "csharp" => node_text_contains(
+            node,
+            source,
+            &["[Test]", "[Fact]", "[Theory]", "[TestMethod]"],
+        ),
+        "kotlin" => node_text_contains(node, source, &["@Test"]),
+        "php" => identifier.is_some_and(|name| {
+            name.starts_with("test") || name.starts_with("Test") || is_test_callee(name)
+        }),
+        "ruby" => identifier.is_some_and(|name| name.starts_with("test_") || is_test_callee(name)),
+        "javascript" | "typescript" | "tsx" | "elixir" | "lua" => {
+            identifier.is_some_and(is_test_callee)
+        }
+        "scala" => identifier.is_some_and(|name| name.starts_with("test") || is_test_callee(name)),
+        _ => false,
+    }
+}
+
+fn node_text_contains(node: tree_sitter::Node, source: &[u8], markers: &[&str]) -> bool {
+    node.utf8_text(source)
+        .is_ok_and(|text| markers.iter().any(|marker| text.contains(marker)))
+}
+
+fn has_rust_test_attribute(node: tree_sitter::Node, source: &[u8]) -> bool {
+    let mut sibling = node.prev_sibling();
     while let Some(current) = sibling {
         if current.kind() != "attribute_item" {
-            return false;
+            break;
         }
-        if matches(&rust_attribute_name(node_text(current, source))) {
-            return true;
+        if let Ok(text) = current.utf8_text(source) {
+            if text.contains("#[test]") || text.contains("#[tokio::test]") {
+                return true;
+            }
         }
-        sibling = current.prev_named_sibling();
+        sibling = current.prev_sibling();
     }
     false
 }
 
-/// Whether a Rust attribute name marks a test: `test`, `rstest`, or any
-/// path-qualified variant ending in `::test` (e.g. `tokio::test`). `cfg` (as
-/// in `#[cfg(test)]`) stays excluded.
-fn rust_is_test_attribute(name: &str) -> bool {
-    name == "test" || name == "rstest" || name.ends_with("::test")
-}
-
-fn rust_attribute_name(attribute: &str) -> String {
-    let mut value = attribute.trim();
-    value = value.strip_prefix('#').unwrap_or(value);
-    value = value.strip_prefix('!').unwrap_or(value);
-    value = value
-        .trim()
-        .strip_prefix('[')
-        .unwrap_or_else(|| value.trim());
-    value = value.strip_suffix(']').unwrap_or(value);
-    let value = value.trim();
-    let end = value.find(['(', ' ', '=']).unwrap_or(value.len());
-    value[..end].trim().to_lowercase()
-}
-
-fn node_text<'a>(node: Node<'_>, source: &'a [u8]) -> &'a str {
-    node.utf8_text(source).unwrap_or("")
-}
-
-// --- Ordering --------------------------------------------------------------
-
-fn dedupe_sorted(mut findings: Vec<Finding>) -> Vec<Finding> {
-    findings.sort_by(|left, right| {
-        left.line
-            .cmp(&right.line)
-            .then_with(|| left.rule.cmp(right.rule))
-            .then_with(|| left.message.cmp(&right.message))
-    });
-    findings.dedup_by(|left, right| {
-        left.line == right.line && left.rule == right.rule && left.message == right.message
-    });
+fn analyze_new_bodies(file_path: &str, content: &str, bodies: &[Body]) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for body in bodies {
+        let lines = body_added_lines(content, body, None);
+        findings.extend(classify_lines(file_path, &lines));
+        findings.extend(rules::classify_test_body(
+            file_path,
+            body.start_row + 1,
+            &lines,
+        ));
+        let signature = body_signature(&lines);
+        if !signature.is_empty() {
+            if let Some(first_line) = seen.get(&signature) {
+                findings.push(Finding::new(
+                    "duplicate-test",
+                    Confidence::Medium,
+                    format!(
+                        "This test duplicates another test already defined at line {first_line}."
+                    ),
+                    body.start_row + 1,
+                    file_path,
+                    "",
+                ));
+            } else {
+                seen.insert(signature, body.start_row + 1);
+            }
+        }
+    }
     findings
+}
+
+fn analyze_edited_bodies(
+    file_path: &str,
+    content: &str,
+    bodies: &[Body],
+    added: &HashSet<usize>,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for body in bodies {
+        let lines = body_added_lines(content, body, Some(added));
+        if lines.is_empty() {
+            continue;
+        }
+        findings.extend(classify_lines(file_path, &lines));
+        let signature = body_signature(&lines);
+        if !signature.is_empty() {
+            if let Some(first_line) = seen.get(&signature) {
+                findings.push(Finding::new(
+                    "duplicate-test",
+                    Confidence::Medium,
+                    format!(
+                        "This test duplicates another test already defined at line {first_line}."
+                    ),
+                    body.start_row + 1,
+                    file_path,
+                    "",
+                ));
+            } else {
+                seen.insert(signature, body.start_row + 1);
+            }
+        }
+    }
+    findings
+}
+
+fn body_added_lines<'a>(
+    content: &'a str,
+    body: &Body,
+    added: Option<&HashSet<usize>>,
+) -> Vec<AddedLine<'a>> {
+    let Some(text) = content.get(body.start_byte..body.end_byte) else {
+        return Vec::new();
+    };
+    text.lines()
+        .enumerate()
+        .filter(|(index, _)| added.is_none_or(|set| set.contains(&(body.start_row + index))))
+        .map(|(index, line)| AddedLine {
+            line_number: body.start_row + 1 + index,
+            text: strip_line_comment(line),
+        })
+        .collect()
+}
+
+fn classify_lines(file_path: &str, lines: &[AddedLine<'_>]) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for index in 0..lines.len() {
+        findings.extend(rules::classify_added_line(file_path, lines, index));
+    }
+    findings
+}
+
+fn body_signature(lines: &[AddedLine<'_>]) -> String {
+    lines
+        .iter()
+        .map(|line| line.text.trim())
+        .filter(|line| !line.is_empty())
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn added_lines(old_content: &str, new_content: &str) -> HashSet<usize> {
+    let old: HashSet<String> = old_content
+        .lines()
+        .map(|line| line.trim().to_string())
+        .collect();
+    new_content
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !old.contains(line.trim()))
+        .map(|(index, _)| index)
+        .collect()
+}
+
+fn strip_line_comment(line: &str) -> &str {
+    let mut in_string = false;
+    let mut quote = '\0';
+    let mut escaped = false;
+    let mut previous_is_space = true;
+    for (index, character) in line.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == quote {
+                in_string = false;
+            }
+            continue;
+        }
+        match character {
+            '"' | '\'' => {
+                in_string = true;
+                quote = character;
+                previous_is_space = false;
+            }
+            '#' if previous_is_space => {
+                let rest = &line[index + 1..];
+                if !rest.starts_with('[') && !rest.starts_with('!') {
+                    return &line[..index];
+                }
+                previous_is_space = false;
+            }
+            '/' if line[index..].starts_with("//") => return &line[..index],
+            _ => previous_is_space = character.is_whitespace(),
+        }
+    }
+    line
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_line_comment;
+
+    #[test]
+    fn strip_line_comment_given_trailing_comment_removes_it() {
+        // then
+        assert_eq!(
+            strip_line_comment("assert x == y  # not a comment marker"),
+            "assert x == y  "
+        );
+        assert_eq!(
+            strip_line_comment("expect(a).toBe(b); // note"),
+            "expect(a).toBe(b); "
+        );
+    }
+
+    #[test]
+    fn strip_line_comment_given_hash_inside_string_keeps_it() {
+        // then
+        assert_eq!(
+            strip_line_comment("assert label == \"#1\""),
+            "assert label == \"#1\""
+        );
+    }
 }

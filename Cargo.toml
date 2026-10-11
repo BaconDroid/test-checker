@@ -1,40 +1,26 @@
 [package]
 name = "test-checker"
-version = "0.2.0"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
-readme = "README.md"
 description = "Multi-language test-weakening detection hook for Claude Code/OpenCode"
 repository = "https://github.com/BaconDroid/test-checker"
 keywords = ["tests", "tree-sitter", "claude-code", "opencode", "hook"]
 categories = ["command-line-utilities", "development-tools"]
-
-[workspace]
-members = ["."]
-resolver = "3"
 
 [[bin]]
 name = "test-checker"
 path = "src/main.rs"
 
 [dependencies]
-clap = { version = "4.5.53", features = ["derive"] }
-itoa = "1.0.15"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 tree-sitter = "0.26.8"
 tree-sitter-language-pack = { version = "1.8.1", default-features = false }
 
-[features]
-default = []
-
-[dev-dependencies]
-criterion = { version = "0.8.0", features = ["html_reports"] }
-tempfile = "3.23.0"
-
 [[bench]]
-name = "detector"
+name = "test_checker"
 harness = false
 
 [profile.release]
@@ -80,9 +66,6 @@ as_ptr_cast_mut = "deny"
 fn_to_numeric_cast_any = "deny"
 clone_on_ref_ptr = "warn"
 dbg_macro = "warn"
-# Duplicate transitive major versions (`getrandom`, `syn`) are pulled in by
-# criterion / tree-sitter-language-pack and cannot be pinned from this crate.
-multiple_crate_versions = "allow"
 print_stderr = "allow"
 print_stdout = "allow"
 module_name_repetitions = "allow"

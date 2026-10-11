@@ -1,15 +1,42 @@
 # Agent notes: test-checker
 
-The Rust crate at the repository root (`src/`, `tests/`, `benches/`) is the only implementation. There is no `bindings/`, `npm/`, or `go/` tree here: this repo is the standalone Rust hook crate.
+The Rust crate at the repository root (`src/`, `tests/`, `benches/`, `npm/`) is the current
+implementation.
 
-The binary reads a JSON hook payload on stdin, inspects the added lines of a test file, and reports test-weakening findings on stderr (exit 2) or exits clean (exit 0). `src/detector.rs` owns tree-sitter parsing and test-body capture; `src/rules.rs` owns the 11-rule catalog and its classifiers; `src/filters.rs` owns the plain-text predicates and suppression markers; `src/language.rs` owns the extension→language map and the test-path globs; `src/output.rs` renders the grouped `<findings>` XML.
-
-## Commands (the same ones CI runs)
+## Commands (the same ones CI runs, `.github/workflows/ci.yml`)
 - Format: `cargo fmt --all -- --check`
-- Lint: `cargo clippy --all-targets --all-features -- -D warnings`
-- Full test: `cargo test --all-targets --all-features`
+- Lint: `cargo clippy -p test-checker --all-targets --all-features -- -D warnings`
+- Full test: `cargo test -p test-checker --all-targets --all-features`
+- Focused test: `cargo test -p test-checker --test <name>`, where `<name>` is one of the files in `tests/*.rs`
+- npm wrapper: `node --test npm/test-checker/*.test.js`
 - Dependency audit: `cargo deny check`
-- Focused test: `cargo test --test <name>`, where `<name>` is one of the files in `tests/*.rs`
+
+## Module map
+`src/api.rs` owns the hook models, the test gate, `evaluate`, and the JSON API. `src/detector.rs`
+owns tree-sitter parsing (per-language `Runtime` + per-thread `Parser` caches, a ~50 ms parse
+budget), test-body capture, comment capture (host + injected), and the edit diff. `src/rules.rs`
+owns the rule catalog: one classifier per rule over the added lines / diff. `src/language.rs` owns
+the extension→grammar map, the per-language test-body query, and the test-path globs.
+`src/filters.rs` owns the BDD/directive allow-lists, the `test-checker: allow` suppression marker,
+and the agent-memo phrase catalog. `src/output.rs` renders the grouped `<findings>` XML.
+
+## Dependency convention
+Direct dependencies are exactly `serde` (data model + serialization), `serde_json` (wire I/O only),
+`tree-sitter` (parsing and matching, via queries), and `tree-sitter-language-pack` (language,
+grammar, and identification only). Do not add dynamic `serde_json::Value` modeling, `TreeCursor`
+walks, or the pack's `get_parser`/`process`/runtime download. Keep direct dependencies to this set
+unless a change is justified and convention-following.
+
+Comments are collected with `tree-sitter` queries, including the pack's injection machinery, so a
+commented-out test inside an embedded block is caught.
+
+## Release platform touchpoints
+Each supported platform (`darwin-arm64`, `darwin-x64`, `linux-arm64`, `linux-x64`, `win32-x64`) is
+named in six places — keep them in sync: `npm/test-checker/index.js` `SUPPORTED_PLATFORMS`,
+`npm/test-checker/postinstall.js` `PLATFORM_MAP`, `npm/test-checker/package.json`
+`optionalDependencies`, `.github/scripts/prepare-npm-packages.sh`,
+`.github/scripts/verify-npm-packages.sh`, and the `.github/workflows/release.yml` build matrix.
+`packages.test.js` ties the first three together.
 
 ## Test authoring gate
 Before adding or changing a test, answer all four; a missing answer means do not add it yet:
@@ -21,3 +48,9 @@ Junk patterns (reject unless the retention bar below applies): assertion-free pr
 Retention bar: keep a pattern match only when it independently guards a public API, protocol, config, migration, storage, security, platform, default, prompt-byte, generated or cross-language, package, release, or architecture contract, and say which one in the test. Static or slow is never a deletion reason. A retained test that fails on the base is a product bug to fix at its owner, never a test to delete.
 A bug regression test must fail on the pre-fix code for the intended reason; an existing owner test that already fails may serve as that proof.
 Method source: openclaw test-audit skill.
+
+## Coverage contract
+`tests/detector.rs` holds the 31-language pipeline coverage table: every language must resolve its
+grammar, clean fixtures must produce no findings, and the languages with a test-body query must
+compile that query and capture a body. Only languages with a framework produce body findings;
+`commented-out-test` works everywhere.

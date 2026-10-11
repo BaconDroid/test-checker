@@ -1,0 +1,22 @@
+{
+  "name": "@bacondroid/test-checker-linux-arm64",
+  "version": "0.1.0",
+  "description": "test-checker native binary for linux-arm64. Installed automatically by @bacondroid/test-checker.",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "bin"
+  ],
+  "preferUnplugged": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BaconDroid/test-checker.git"
+  },
+  "author": "BaconDroid",
+  "license": "MIT",
+  "homepage": "https://github.com/BaconDroid/test-checker#readme"
+}

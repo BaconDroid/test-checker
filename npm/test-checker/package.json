@@ -1,0 +1,45 @@
+{
+  "name": "@bacondroid/test-checker",
+  "version": "0.1.0",
+  "description": "Multi-language test-weakening detection hook for Claude Code/OpenCode. Native binary powered by tree-sitter.",
+  "main": "index.js",
+  "bin": {
+    "test-checker": "cli.js"
+  },
+  "files": [
+    "index.js",
+    "cli.js",
+    "postinstall.js"
+  ],
+  "scripts": {
+    "postinstall": "node postinstall.js"
+  },
+  "optionalDependencies": {
+    "@bacondroid/test-checker-darwin-arm64": "0.1.0",
+    "@bacondroid/test-checker-darwin-x64": "0.1.0",
+    "@bacondroid/test-checker-linux-arm64": "0.1.0",
+    "@bacondroid/test-checker-linux-x64": "0.1.0",
+    "@bacondroid/test-checker-win32-x64": "0.1.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BaconDroid/test-checker.git"
+  },
+  "keywords": [
+    "test-checker",
+    "tree-sitter",
+    "claude-code",
+    "opencode",
+    "hook",
+    "linter"
+  ],
+  "author": "BaconDroid",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/BaconDroid/test-checker/issues"
+  },
+  "homepage": "https://github.com/BaconDroid/test-checker#readme",
+  "engines": {
+    "node": ">=18"
+  }
+}

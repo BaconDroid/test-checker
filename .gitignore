@@ -3,6 +3,11 @@
 target/
 coverage.out
 *.exe
+npm/test-checker/bin/test-checker
+npm/test-checker/bin/test-checker.exe
+npm/test-checker/vendor/**/test-checker
+npm/test-checker/vendor/**/test-checker.exe
+npm/test-checker-*/bin/
 
 # IDE
 .idea/

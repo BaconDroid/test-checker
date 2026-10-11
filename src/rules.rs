@@ -1,733 +1,938 @@
-//! The 11 rule classifiers over one derived change set.
-//!
-//! `Derived` captures the diff (added/removed [`DiffLine`]s, each with its line,
-//! raw text and comment-/string-stripped code, plus the parsed test blocks)
-//! once; each unit struct below classifies it. `evaluate` is the single place a
-//! finding is constructed and stamped with its rule's catalog confidence.
-
-use std::collections::{HashMap, HashSet};
-
-use crate::detector::{Change, TestBlock};
-use crate::filters;
+use crate::filters::is_agent_memo_phrase;
 use crate::models::{Confidence, Finding};
 
-/// One diff occurrence: its 1-based line in the source stream, the raw text, and
-/// the comment-/string-stripped code, all computed once so they cannot drift.
-struct DiffLine {
-    line: usize,
-    text: String,
-    code: String,
+/// A single added line with its real (1-based) line number in the file.
+#[derive(Clone, Copy, Debug)]
+pub struct AddedLine<'a> {
+    pub line_number: usize,
+    pub text: &'a str,
 }
 
-/// A rule hit before its rule id and confidence are stamped from [`RULES`].
-pub struct Hit {
-    pub line: usize,
-    pub message: String,
-}
-
-/// Everything the classifiers need for one changed file, captured once.
-///
-/// `added`/`removed` carry each diff occurrence's real line (in `new_text` for
-/// added, `old_text` for removed) together with its precomputed code text.
-pub struct Derived<'a> {
-    change: &'a Change,
-    added: Vec<DiffLine>,
-    removed: Vec<DiffLine>,
-    added_by_code: HashMap<String, i64>,
-    blocks: Vec<TestBlock>,
-}
-
-impl<'a> Derived<'a> {
-    /// Builds the order-insensitive diff, precomputing each line's code and the
-    /// `strip_comments`-normalized added-line census once.
-    #[must_use]
-    pub fn new(change: &'a Change, blocks: Vec<TestBlock>) -> Self {
-        let (added, removed) = diff_lines(&change.old_text, &change.new_text, change.language);
-        let mut added_by_code: HashMap<String, i64> = HashMap::new();
-        for diff_line in &added {
-            *added_by_code
-                .entry(
-                    filters::strip_comments(&diff_line.text, change.language)
-                        .trim()
-                        .to_owned(),
-                )
-                .or_insert(0) += 1;
-        }
-        Self {
-            change,
-            added,
-            removed,
-            added_by_code,
-            blocks,
-        }
-    }
-
-    const fn language(&self) -> &'static str {
-        self.change.language
-    }
-}
-
-#[derive(Clone, Copy)]
-struct Rule {
-    id: &'static str,
-    confidence: Confidence,
-    hits: fn(&Derived<'_>) -> Vec<Hit>,
-}
-
-const RULES: &[Rule] = &[
-    Rule {
-        id: "skip-focus-added",
-        confidence: Confidence::High,
-        hits: |d| SkipFocusAddedFilter.hits(d),
-    },
-    Rule {
-        id: "tautological-assertion",
-        confidence: Confidence::High,
-        hits: |d| TautologicalAssertionFilter.hits(d),
-    },
-    Rule {
-        id: "empty-test",
-        confidence: Confidence::Medium,
-        hits: |d| EmptyTestFilter.hits(d),
-    },
-    Rule {
-        id: "unknown-test",
-        confidence: Confidence::Medium,
-        hits: |d| UnknownTestFilter.hits(d),
-    },
-    Rule {
-        id: "gutted-test",
-        confidence: Confidence::High,
-        hits: |d| GuttedTestFilter.hits(d),
-    },
-    Rule {
-        id: "swallowed-error",
-        confidence: Confidence::Medium,
-        hits: |d| SwallowedErrorFilter.hits(d),
-    },
-    Rule {
-        id: "duplicate-test",
-        confidence: Confidence::Medium,
-        hits: |d| DuplicateTestFilter.hits(d),
-    },
-    Rule {
-        id: "mock-of-sut",
-        confidence: Confidence::Medium,
-        hits: |d| MockOfSutFilter.hits(d),
-    },
-    Rule {
-        id: "over-mocking",
-        confidence: Confidence::Low,
-        hits: |d| OverMockingFilter.hits(d),
-    },
-    Rule {
-        id: "assertion-roulette",
-        confidence: Confidence::Low,
-        hits: |d| AssertionRouletteFilter.hits(d),
-    },
-    Rule {
-        id: "redundant-assertion",
-        confidence: Confidence::Low,
-        hits: |d| RedundantAssertionFilter.hits(d),
-    },
+const SKIP_MARKERS: &[&str] = &[
+    ".skip(",
+    ".skip)",
+    ".skip;",
+    ".skip ",
+    "test.skip",
+    "it.skip",
+    "describe.skip",
+    "xit(",
+    "xtest(",
+    "xdescribe(",
+    "@pytest.mark.skip",
+    "@pytest.mark.skipif",
+    "@pytest.mark.xfail",
+    "pytest.skip(",
+    "unittest.skip",
+    "self.skipTest(",
+    "t.Skip(",
+    "t.Skipf(",
+    "t.SkipNow(",
+    "testing.Short()",
+    "skip \"",
+    "skip(",
+    "pending()",
+    "markTestSkipped(",
+    "XCTSkip(",
+    "@tag :skip",
+    "cancel(",
+    "#[ignore]",
+    "#[ignore =",
+    "[Ignore]",
+    "@Disabled",
+    "@Ignore",
 ];
 
-/// Every emitted rule id, in catalog order.
-#[must_use]
-pub fn rule_ids() -> Vec<&'static str> {
-    RULES.iter().map(|rule| rule.id).collect()
+const FOCUS_MARKERS: &[&str] = &[
+    ".only(",
+    ".only)",
+    ".only;",
+    "test.only",
+    "it.only",
+    "describe.only",
+    "fit(",
+    "fdescribe(",
+    "iit(",
+];
+
+const WEAKENED_MARKERS: &[&str] = &[
+    ".toBeTruthy()",
+    ".toBeFalsy()",
+    ".toBeDefined()",
+    ".toBeUndefined()",
+    ".not.toBeNull()",
+    "assertIsNotNone(",
+    "assertIsInstance(",
+    ".anything()",
+];
+
+const SNAPSHOT_MARKERS: &[&str] = &[
+    "toMatchSnapshot",
+    "toMatchInlineSnapshot",
+    "toMatchFileSnapshot",
+    "assertSnapshot",
+    "assert_snapshot",
+    "assert_debug_snapshot",
+    "--update-snapshots",
+    "--updateSnapshot",
+    "verifyAll(",
+    "approvals.verify",
+];
+
+const TOLERANCE_MARKERS: &[&str] = &[
+    "assertAlmostEqual",
+    "assertAlmostEquals",
+    "toBeCloseTo(",
+    "assert_allclose",
+    "pytest.approx",
+    "Math.abs(",
+    "epsilon",
+    "tolerance",
+    "delta=",
+    "time.sleep(",
+    "Thread.Sleep",
+    "setTimeout(",
+    "cy.wait(",
+    "await sleep(",
+];
+
+const RETRY_MARKERS: &[&str] = &[
+    "@retry",
+    "@flaky",
+    "@pytest.mark.flaky",
+    "rerun",
+    "retries=",
+    "retry(",
+    "flaky(",
+    "@RepeatedTest",
+    "@Retry",
+    "--reruns",
+    "retryTimes",
+];
+
+const MOCK_MARKERS: &[&str] = &[
+    "mock.patch(",
+    "@patch(",
+    "jest.mock(",
+    "vi.mock(",
+    "sinon.stub(",
+    "mock.patch.object(",
+    "jest.spyOn(",
+    "MagicMock(",
+    "Mock(",
+];
+
+const ASSERTION_MARKERS: &[&str] = &[
+    "assert",
+    "expect(",
+    "expect (",
+    ".should",
+    "assertThat",
+    "assertEquals",
+    "assertEqual",
+    "assertTrue",
+    "assertFalse",
+    "assert_eq!",
+    "assert_ne!",
+    "assert!(",
+    "require.Equal",
+    "assert.Equal",
+    "Assert.Equal(",
+];
+
+fn has_marker(line: &str, markers: &[&str]) -> bool {
+    markers.iter().any(|marker| line.contains(marker))
 }
 
-/// Runs the 11 classifiers and constructs each finding from its rule id and
-/// catalog confidence — the single finding-construction site.
+fn finish(
+    rule: &str,
+    confidence: Confidence,
+    message: &str,
+    line: &AddedLine<'_>,
+    file_path: &str,
+) -> Finding {
+    Finding::new(
+        rule,
+        confidence,
+        message,
+        line.line_number,
+        file_path,
+        line.text,
+    )
+}
+
+/// Classify one added line against the line-oriented rules.
 #[must_use]
-pub fn evaluate(d: &Derived<'_>) -> Vec<Finding> {
+pub fn classify_added_line(file_path: &str, added: &[AddedLine<'_>], index: usize) -> Vec<Finding> {
+    let Some(line) = added.get(index).copied() else {
+        return Vec::new();
+    };
+    let text = line.text.trim();
     let mut findings = Vec::new();
-    for rule in RULES {
-        for hit in (rule.hits)(d) {
-            findings.push(make_finding(&d.change.file_path, rule, hit));
-        }
+
+    if has_marker(text, SKIP_MARKERS) {
+        findings.push(finish(
+            "skip-added",
+            Confidence::High,
+            "A test/assertion was disabled with a skip/ignore marker.",
+            &line,
+            file_path,
+        ));
+    }
+    if has_marker(text, FOCUS_MARKERS) {
+        findings.push(finish(
+            "focus-added",
+            Confidence::High,
+            "A focused test restricts the suite to a subset of tests.",
+            &line,
+            file_path,
+        ));
+    }
+    if let Some(finding) = classify_assertion(file_path, &line, text) {
+        findings.push(finding);
+    }
+    if has_marker(text, WEAKENED_MARKERS) {
+        findings.push(finish(
+            "weakened-assertion",
+            Confidence::Medium,
+            "The assertion was loosened to a weaker matcher.",
+            &line,
+            file_path,
+        ));
+    }
+    if has_marker(text, SNAPSHOT_MARKERS) {
+        findings.push(finish(
+            "snapshot-regenerated",
+            Confidence::Medium,
+            "A snapshot/approval assertion may have been regenerated without review.",
+            &line,
+            file_path,
+        ));
+    }
+    if has_marker(text, TOLERANCE_MARKERS) {
+        findings.push(finish(
+            "tolerance-broadened",
+            Confidence::Medium,
+            "A tolerance/timeout/sleep may have been widened to hide flakiness.",
+            &line,
+            file_path,
+        ));
+    }
+    if has_marker(text, RETRY_MARKERS) {
+        findings.push(finish(
+            "retry-added",
+            Confidence::Medium,
+            "A retry/flaky marker was added to make an unstable test pass.",
+            &line,
+            file_path,
+        ));
+    }
+    if let Some(finding) = classify_swallowed_error(file_path, added, index, text) {
+        findings.push(finding);
+    }
+    if let Some(finding) = classify_conditional_assertion(file_path, added, index, text) {
+        findings.push(finding);
+    }
+    if let Some(finding) = classify_mock_of_sut(file_path, &line, text) {
+        findings.push(finding);
+    }
+    if let Some(finding) = classify_agent_memo(file_path, &line, text) {
+        findings.push(finding);
     }
     findings
 }
 
-/// The single finding-construction helper: pairs a rule hit with its catalog id
-/// and confidence.
-fn make_finding(file: &str, rule: &Rule, hit: Hit) -> Finding {
-    Finding::new(file, hit.line, rule.id, hit.message, rule.confidence)
+fn classify_assertion(file_path: &str, line: &AddedLine<'_>, text: &str) -> Option<Finding> {
+    if is_constant_assertion(text) {
+        return Some(finish(
+            "constant-assertion",
+            Confidence::High,
+            "The assertion compares a literal with a literal and cannot fail.",
+            line,
+            file_path,
+        ));
+    }
+    if let Some((left, right)) = assertion_operands(text) {
+        if left == right && !is_literal(&left) {
+            return Some(finish(
+                "tautological-assertion",
+                Confidence::High,
+                "The assertion compares an expression with itself and cannot fail.",
+                line,
+                file_path,
+            ));
+        }
+    }
+    None
 }
 
-// --- Classifiers -----------------------------------------------------------
-
-/// `skip-focus-added` (high).
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SkipFocusAddedFilter;
-
-impl SkipFocusAddedFilter {
-    #[must_use]
-    pub fn hits(&self, d: &Derived<'_>) -> Vec<Hit> {
-        added_line_findings(
-            d,
-            "A test was disabled or focused (.skip/.only/.todo, xit/xdescribe, skip marker, #[ignore], t.Skip).",
-            |code| filters::skip_focus_hit(code, d.language()),
-            filters::is_conditional_skip,
+fn classify_swallowed_error(
+    file_path: &str,
+    added: &[AddedLine<'_>],
+    index: usize,
+    text: &str,
+) -> Option<Finding> {
+    let next = added.get(index + 1).map(|line| line.text.trim());
+    let window = added
+        .get(index..=index + 2)
+        .map(|slice| {
+            slice
+                .iter()
+                .map(|line| line.text.trim())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let swallows = if text.contains("except") {
+        let tail = text.split("except").nth(1).unwrap_or("");
+        tail.contains("pass")
+            || tail.trim() == ":"
+            || tail.trim() == "Exception:"
+            || tail.trim() == "BaseException:"
+            || next == Some("pass")
+    } else if text.contains("catch") {
+        let brace_empty = text.contains("{}") || text.contains("{ }");
+        let brace_closed_next = next == Some("}") || window.get(1).is_some_and(|line| *line == "}");
+        brace_empty || brace_closed_next
+    } else {
+        false
+    };
+    swallows.then(|| {
+        finish(
+            "swallowed-error",
+            Confidence::High,
+            "The failure is caught and swallowed instead of failing the test.",
+            &added[index],
+            file_path,
         )
-    }
+    })
 }
 
-/// `tautological-assertion` (high).
-#[derive(Clone, Copy, Debug, Default)]
-pub struct TautologicalAssertionFilter;
-
-impl TautologicalAssertionFilter {
-    #[must_use]
-    pub fn hits(&self, d: &Derived<'_>) -> Vec<Hit> {
-        let mut out = Vec::new();
-        for diff_line in &d.added {
-            if diff_line.code.trim().is_empty() || !filters::tautological_hit(&diff_line.code) {
-                continue;
-            }
-            push_hit(
-                &mut out,
-                diff_line.line,
-                "Assertion is tautological (always true).",
-            );
-        }
-        out
-    }
+fn classify_conditional_assertion(
+    file_path: &str,
+    added: &[AddedLine<'_>],
+    index: usize,
+    text: &str,
+) -> Option<Finding> {
+    let next = added.get(index + 1).map(|line| line.text.trim());
+    let assertion_here = has_marker(text, ASSERTION_MARKERS);
+    let conditional_here = text.starts_with("if ")
+        || text.starts_with("if(")
+        || text.contains(" if ")
+        || text.contains("? ");
+    let triggers = conditional_here
+        && (assertion_here || next.is_some_and(|line| has_marker(line, ASSERTION_MARKERS)));
+    triggers.then(|| {
+        finish(
+            "conditional-assertion",
+            Confidence::High,
+            "The assertion is guarded by a runtime condition and may never run.",
+            &added[index],
+            file_path,
+        )
+    })
 }
 
-/// `empty-test` (medium).
-#[derive(Clone, Copy, Debug, Default)]
-pub struct EmptyTestFilter;
-
-impl EmptyTestFilter {
-    #[must_use]
-    pub fn hits(&self, d: &Derived<'_>) -> Vec<Hit> {
-        let mut out = Vec::new();
-        for block in &d.blocks {
-            if !block_is_added(d, block) {
-                continue;
-            }
-            let body = block.lines.join("\n");
-            let executable = filters::count_real_lines(&body, d.language());
-            if executable > 0 && !filters::is_trivial_body(&body) {
-                continue;
-            }
-            push_hit(
-                &mut out,
-                block.start_line,
-                "Test body has no executable statement.",
-            );
-        }
-        out
+fn classify_mock_of_sut(file_path: &str, line: &AddedLine<'_>, text: &str) -> Option<Finding> {
+    let stem = subject_stem(file_path);
+    if stem.is_empty() || !has_marker(text, MOCK_MARKERS) {
+        return None;
     }
-}
-
-/// `unknown-test` (medium).
-#[derive(Clone, Copy, Debug, Default)]
-pub struct UnknownTestFilter;
-
-impl UnknownTestFilter {
-    #[must_use]
-    pub fn hits(&self, d: &Derived<'_>) -> Vec<Hit> {
-        let mut out = Vec::new();
-        for block in &d.blocks {
-            if !block_is_added(d, block) {
-                continue;
-            }
-            let body = block.lines.join("\n");
-            if filters::count_real_lines(&body, d.language()) == 0
-                || filters::is_trivial_body(&body)
-                || filters::has_assertion(&body)
-            {
-                continue;
-            }
-            push_hit(
-                &mut out,
-                block.start_line,
-                "Test has no assertion, expect, fail, or expected exception.",
-            );
-        }
-        out
-    }
-}
-
-/// `gutted-test` (high).
-#[derive(Clone, Copy, Debug, Default)]
-pub struct GuttedTestFilter;
-
-impl GuttedTestFilter {
-    #[must_use]
-    pub fn hits(&self, d: &Derived<'_>) -> Vec<Hit> {
-        let removed = unique_assertions(&d.removed);
-        if removed.is_empty() || !unique_assertions(&d.added).is_empty() {
-            return Vec::new();
-        }
-        if matches!(d.language(), "js" | "ts" | "python" | "go" | "rust") {
-            let before = d
-                .removed
-                .iter()
-                .filter(|line| filters::is_test_declaration(&line.text, d.language()))
-                .count();
-            let after = d
-                .added
-                .iter()
-                .filter(|line| filters::is_test_declaration(&line.text, d.language()))
-                .count();
-            if before != after {
-                return Vec::new();
-            }
-        }
-        let sample = d
-            .removed
-            .iter()
-            .find(|line| filters::is_assertion_line(&line.code))
-            .map(|line| line.line);
-        let Some(line) = sample else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
-        push_hit(
-            &mut out,
+    text.contains(&stem).then(|| {
+        finish(
+            "mock-of-sut",
+            Confidence::Medium,
+            "The system under test itself is mocked or stubbed.",
             line,
-            "All assertions were removed and nothing replaced them.",
-        );
-        out
-    }
+            file_path,
+        )
+    })
 }
 
-/// `swallowed-error` (medium).
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SwallowedErrorFilter;
+fn classify_agent_memo(file_path: &str, line: &AddedLine<'_>, text: &str) -> Option<Finding> {
+    let mut candidates = quoted_strings(text);
+    if let Some(name) = test_name_literal(text) {
+        candidates.push(name);
+    }
+    if candidates.is_empty() {
+        return None;
+    }
+    candidates
+        .iter()
+        .any(|candidate| is_agent_memo_phrase(candidate))
+        .then(|| {
+            finish(
+                "agent-memo-test",
+                Confidence::Medium,
+                "A test name or assertion message describes what changed instead of the behavior.",
+                line,
+                file_path,
+            )
+        })
+}
 
-impl SwallowedErrorFilter {
-    #[must_use]
-    pub fn hits(&self, d: &Derived<'_>) -> Vec<Hit> {
-        let joined = d
-            .added
-            .iter()
-            .map(|line| line.code.as_str())
-            .collect::<Vec<&str>>()
-            .join("\n");
-        if !filters::swallowed_error_hit(&joined, d.language()) {
-            return Vec::new();
-        }
-        let sample = d
-            .added
-            .iter()
-            .find(|line| filters::swallowed_error_hit(&line.code, d.language()))
-            .map(|line| line.line)
-            .or_else(|| d.added.first().map(|line| line.line));
-        let Some(line) = sample else {
-            return Vec::new();
+/// Classify a captured test body for body-level rules that need no diff.
+#[must_use]
+pub fn classify_test_body(
+    file_path: &str,
+    body_start: usize,
+    body: &[AddedLine<'_>],
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let meaningful: Vec<&str> = body
+        .iter()
+        .map(|line| line.text.trim())
+        .filter(|line| !line.is_empty())
+        .collect();
+    if meaningful.is_empty() {
+        let line = AddedLine {
+            line_number: body_start,
+            text: "",
         };
-        let mut out = Vec::new();
-        push_hit(
-            &mut out,
-            line,
-            "Errors are swallowed (empty catch / except pass / Err(_) => {}).",
-        );
-        out
+        findings.push(finish(
+            "gutted-test",
+            Confidence::High,
+            "The test body is empty.",
+            &line,
+            file_path,
+        ));
+        return findings;
     }
+
+    let mock_count = meaningful
+        .iter()
+        .filter(|line| has_marker(line, MOCK_MARKERS))
+        .count();
+    let assertion_count = meaningful
+        .iter()
+        .filter(|line| has_marker(line, ASSERTION_MARKERS))
+        .count();
+    if mock_count >= 2 && mock_count > assertion_count {
+        findings.push(Finding::new(
+            "over-mocking",
+            Confidence::Medium,
+            "Mock setup outnumbers the assertions; the test may be asserting on a mock.",
+            body_start,
+            file_path,
+            meaningful.first().copied().unwrap_or(""),
+        ));
+    }
+    findings
 }
 
-/// `duplicate-test` (medium).
-#[derive(Clone, Copy, Debug, Default)]
-pub struct DuplicateTestFilter;
+/// Diff-only findings: newly introduced weakening between an edit's old and new content.
+#[must_use]
+pub fn diff_findings(old_content: &str, new_content: &str, file_path: &str) -> Vec<Finding> {
+    let old_lines: Vec<&str> = old_content.lines().collect();
+    let new_lines: Vec<&str> = new_content.lines().collect();
+    let mut findings = Vec::new();
 
-impl DuplicateTestFilter {
-    #[must_use]
-    pub fn hits(&self, d: &Derived<'_>) -> Vec<Hit> {
-        let mut seen: HashMap<String, usize> = HashMap::new();
-        let mut out = Vec::new();
-        for block in &d.blocks {
-            let normalized =
-                filters::normalize_body(block.lines.iter().map(String::as_str), d.language());
-            if normalized.is_empty() {
-                continue;
-            }
-            if let Some(first) = seen.get(&normalized) {
-                if !block_is_added(d, block) && !d.change.is_new {
-                    continue;
-                }
-                push_hit(
-                    &mut out,
-                    block.start_line,
-                    format!("Duplicate test body (identical to the test at line {first})."),
-                );
-            } else {
-                seen.insert(normalized, block.start_line);
-            }
-        }
-        out
+    let old_assertions = old_lines
+        .iter()
+        .filter(|line| has_marker(line.trim(), ASSERTION_MARKERS))
+        .count();
+    let new_assertions = new_lines
+        .iter()
+        .filter(|line| has_marker(line.trim(), ASSERTION_MARKERS))
+        .count();
+    if new_assertions < old_assertions {
+        let removed = old_assertions - new_assertions;
+        findings.push(Finding::new(
+            "assertion-removed",
+            Confidence::High,
+            format!("{removed} existing assertion(s) were removed without a replacement."),
+            1,
+            file_path,
+            "",
+        ));
+        findings.push(Finding::new(
+            "gutted-test",
+            Confidence::High,
+            "The test was stripped of assertions (or emptied) by this edit.",
+            1,
+            file_path,
+            "",
+        ));
     }
-}
 
-/// `mock-of-sut` (medium).
-#[derive(Clone, Copy, Debug, Default)]
-pub struct MockOfSutFilter;
-
-impl MockOfSutFilter {
-    #[must_use]
-    pub fn hits(&self, d: &Derived<'_>) -> Vec<Hit> {
-        match d.language() {
-            "js" | "ts" => mock_of_sut_javascript(d),
-            "python" => mock_of_sut_python(d),
-            _ => Vec::new(),
-        }
-    }
-}
-
-const MOCK_OF_SUT_MESSAGE: &str =
-    "The module under test is mocked; asserting on the mock cannot validate real behavior.";
-
-fn mock_of_sut_javascript(d: &Derived<'_>) -> Vec<Hit> {
-    let stem = filters::test_stem(&d.change.file_path);
-    if stem.is_empty() {
-        return Vec::new();
-    }
-    let imported = filters::imported_names_from_stem(&d.change.new_text, &stem, d.language());
-    let mut out = Vec::new();
-    for diff_line in &d.added {
-        let code = filters::strip_comments(&diff_line.text, d.language());
-        let code = code.trim();
-        if code.is_empty() {
-            continue;
-        }
-        let hit = filters::extract_js_mock_target(code)
-            .is_some_and(|target| filters::mocked_module_stem(&target) == stem)
-            || filters::extract_js_spy_target(code).is_some_and(|name| imported.contains(&name));
-        if !hit {
-            continue;
-        }
-        push_hit(&mut out, diff_line.line, MOCK_OF_SUT_MESSAGE);
-    }
-    out
-}
-
-fn mock_of_sut_python(d: &Derived<'_>) -> Vec<Hit> {
-    let stem = filters::test_stem(&d.change.file_path);
-    if stem.is_empty() {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    for diff_line in &d.added {
-        let code = filters::strip_comments(&diff_line.text, d.language());
-        let code = code.trim();
-        if code.is_empty() {
-            continue;
-        }
-        let Some(target) = filters::extract_python_patch_target(code) else {
+    for (index, new_line) in new_lines.iter().enumerate() {
+        let trimmed = new_line.trim();
+        let Some((left, right)) = assertion_operands(trimmed) else {
             continue;
         };
-        if filters::patched_module_root(&target) != stem {
+        if left != right || is_literal(&left) {
             continue;
         }
-        push_hit(&mut out, diff_line.line, MOCK_OF_SUT_MESSAGE);
-    }
-    out
-}
-
-/// `over-mocking` (low).
-#[derive(Clone, Copy, Debug, Default)]
-pub struct OverMockingFilter;
-
-impl OverMockingFilter {
-    #[must_use]
-    pub fn hits(&self, d: &Derived<'_>) -> Vec<Hit> {
-        let added = d
-            .added
-            .iter()
-            .filter(|line| filters::mock_identifier_hit(&line.code))
-            .count();
-        let removed = d
-            .removed
-            .iter()
-            .filter(|line| filters::mock_identifier_hit(&line.code))
-            .count();
-        if added <= removed {
-            return Vec::new();
+        let was_literal = old_lines.iter().any(|old_line| {
+            assertion_operands(old_line.trim())
+                .is_some_and(|(old_left, old_right)| old_left == left && is_literal(&old_right))
+        });
+        if was_literal {
+            findings.push(Finding::new(
+                "expected-copied-from-actual",
+                Confidence::High,
+                "The expected value was replaced by a copy of the actual value.",
+                index + 1,
+                file_path,
+                *new_line,
+            ));
         }
-        let sample = d
-            .added
-            .iter()
-            .find(|line| filters::mock_identifier_hit(&line.code))
-            .map(|line| line.line);
-        let Some(line) = sample else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
-        push_hit(
-            &mut out,
-            line,
-            format!("New mock identifiers added (net +{}).", added - removed),
-        );
-        out
     }
+
+    findings
 }
 
-/// `assertion-roulette` (low).
-#[derive(Clone, Copy, Debug, Default)]
-pub struct AssertionRouletteFilter;
-
-impl AssertionRouletteFilter {
-    #[must_use]
-    pub fn hits(&self, d: &Derived<'_>) -> Vec<Hit> {
-        let mut out = Vec::new();
-        for block in &d.blocks {
-            if !block_is_added(d, block) {
-                continue;
-            }
-            let assertions = block
-                .lines
-                .iter()
-                .filter(|line| filters::is_assertion_line(&filters::code_text(line, d.language())))
-                .count();
-            if assertions <= 1 {
-                continue;
-            }
-            let body = block.lines.join("\n");
-            if filters::has_assertion_message(&body) {
-                continue;
-            }
-            push_hit(
-                &mut out,
-                block.start_line,
-                format!("{assertions} assertions with no message; failures are indistinguishable."),
-            );
+fn subject_stem(file_path: &str) -> String {
+    let file = file_path
+        .replace('\\', "/")
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_lowercase();
+    let mut stem = file.split('.').next().unwrap_or_default().to_string();
+    stem = stem
+        .strip_prefix("test_")
+        .or_else(|| stem.strip_prefix("test-"))
+        .unwrap_or(&stem)
+        .to_string();
+    for suffix in ["_test", "-test", "_spec", "-spec"] {
+        if let Some(stripped) = stem.strip_suffix(suffix) {
+            stem = stripped.to_string();
         }
-        out
     }
+    stem
 }
 
-/// `redundant-assertion` (low).
-#[derive(Clone, Copy, Debug, Default)]
-pub struct RedundantAssertionFilter;
-
-impl RedundantAssertionFilter {
-    #[must_use]
-    pub fn hits(&self, d: &Derived<'_>) -> Vec<Hit> {
-        let mut out = Vec::new();
-        for block in &d.blocks {
-            if !block_is_added(d, block) {
-                continue;
-            }
-            let mut seen: HashSet<String> = HashSet::new();
-            for raw in &block.lines {
-                let code = filters::code_text(raw, d.language());
-                let code = code.trim();
-                if code.is_empty() || !filters::is_assertion_line(code) {
-                    continue;
-                }
-                if !seen.insert(code.to_owned()) {
-                    push_hit(
-                        &mut out,
-                        locate_within_block(&d.change.new_text, block, raw),
-                        "The same assertion is repeated in one test.",
-                    );
-                    break;
-                }
-            }
-        }
-        out
-    }
-}
-
-// --- Shared rule plumbing --------------------------------------------------
-
-fn added_line_findings<F, S>(
-    d: &Derived<'_>,
-    message: &'static str,
-    predicate: F,
-    skip: S,
-) -> Vec<Hit>
-where
-    F: Fn(&str) -> bool,
-    S: Fn(&str) -> bool,
-{
-    let mut out = Vec::new();
-    for diff_line in &d.added {
-        if diff_line.code.trim().is_empty() || skip(&diff_line.text) || !predicate(&diff_line.code)
-        {
+fn quoted_strings(text: &str) -> Vec<String> {
+    let mut strings = Vec::new();
+    let mut chars = text.char_indices().peekable();
+    while let Some((start, character)) = chars.next() {
+        if character != '"' && character != '\'' {
             continue;
         }
-        push_hit(&mut out, diff_line.line, message);
-    }
-    out
-}
-
-fn push_hit(out: &mut Vec<Hit>, line: usize, message: impl Into<String>) {
-    out.push(Hit {
-        line,
-        message: message.into(),
-    });
-}
-
-fn unique_assertions(lines: &[DiffLine]) -> Vec<String> {
-    let mut set: HashSet<String> = HashSet::new();
-    for diff_line in lines {
-        let code = diff_line.code.trim();
-        if code.is_empty() || !filters::is_assertion_line(code) {
-            continue;
+        let quote = character;
+        let content_start = start + quote.len_utf8();
+        let mut end = None;
+        while let Some(&(index, next)) = chars.peek() {
+            if next == quote {
+                end = Some(index);
+                chars.next();
+                break;
+            }
+            chars.next();
         }
-        set.insert(filters::normalize_assertion(code));
+        if let Some(end) = end {
+            if end > content_start {
+                strings.push(text[content_start..end].to_string());
+            }
+        }
     }
-    set.into_iter().collect()
+    strings
 }
 
-fn block_is_added(d: &Derived<'_>, block: &TestBlock) -> bool {
-    if d.change.is_new {
+fn test_name_literal(text: &str) -> Option<String> {
+    let marker = ["it(", "test(", "describe(", "specify(", "context("]
+        .into_iter()
+        .find(|marker| text.contains(*marker))?;
+    let after = &text[text.find(marker)?..];
+    quoted_strings(after).into_iter().next()
+}
+
+fn is_constant_assertion(text: &str) -> bool {
+    let compact: String = text.split_whitespace().collect();
+    if compact.contains("assertTrue(true)")
+        || compact.contains("assertFalse(false)")
+        || compact.contains("assert(true)")
+    {
         return true;
     }
-    let mut needed: HashMap<String, i64> = HashMap::new();
-    let mut code_lines = 0_usize;
-    for raw in &block.lines {
-        let stripped = filters::strip_comments(raw, d.language());
-        let line = stripped.trim();
-        if line.is_empty() || filters::is_comment_line(raw, d.language()) {
-            continue;
-        }
-        code_lines += 1;
-        *needed.entry(line.to_owned()).or_insert(0) += 1;
-    }
-    code_lines > 0
-        && needed
-            .iter()
-            .all(|(line, count)| d.added_by_code.get(line).is_some_and(|have| have >= count))
+    assertion_operands(text).is_some_and(|(left, right)| is_literal(&left) && is_literal(&right))
 }
 
-// --- Diff and line helpers -------------------------------------------------
-
-fn split_lines(text: &str) -> Vec<&str> {
-    if text.is_empty() {
-        return Vec::new();
+fn is_literal(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty() {
+        return false;
     }
-    text.split('\n').collect()
-}
-
-/// Order-insensitive multiset line diff that preserves each occurrence's real
-/// line number.
-///
-/// `added` carries the occurrence's line in `new_text` and `removed` its line in
-/// `old_text`, each paired with the precomputed code text. For a text with `old`
-/// and `new` occurrences, the first `min(old, new)` occurrences are treated as
-/// matched; any surplus is the additive/removal set. Tracking the line per
-/// occurrence keeps two identical added lines as two distinct findings instead
-/// of collapsing them onto the first match. Texts stay grouped by first
-/// appearance, as before, so the only behavioral change is the line/code pairing.
-fn diff_lines(old_text: &str, new_text: &str, language: &str) -> (Vec<DiffLine>, Vec<DiffLine>) {
-    let old_lines = split_lines(old_text);
-    let new_lines = split_lines(new_text);
-    let old_count = count_occurrences(&old_lines);
-    let new_count = count_occurrences(&new_lines);
-    (
-        surplus_lines(&new_lines, &old_count, &new_count, language),
-        surplus_lines(&old_lines, &new_count, &old_count, language),
+    if value.parse::<i64>().is_ok() || value.parse::<f64>().is_ok() {
+        return true;
+    }
+    if (value.starts_with('"') && value.ends_with('"') && value.len() >= 2)
+        || (value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2)
+    {
+        return true;
+    }
+    matches!(
+        value,
+        "true" | "false" | "True" | "False" | "None" | "null" | "nil" | "undefined"
     )
 }
 
-/// Occurrences of `lines` beyond the `min(mine, other)` match count, grouped by
-/// first appearance and carrying each occurrence's 1-based line and code text.
-fn surplus_lines(
-    lines: &[&str],
-    other: &HashMap<&str, usize>,
-    mine: &HashMap<&str, usize>,
-    language: &str,
-) -> Vec<DiffLine> {
-    let mut out = Vec::new();
-    let mut seen: HashSet<&str> = HashSet::new();
-    for line in lines {
-        let key = *line;
-        if !seen.insert(key) {
+/// Extract the two compared operands of an equality-style assertion, if any.
+#[must_use]
+pub fn assertion_operands(line: &str) -> Option<(String, String)> {
+    let stripped = line.trim();
+    if !has_marker(stripped, ASSERTION_MARKERS) {
+        return None;
+    }
+    if let Some(inner) = inner_args(stripped, "assert_eq!(") {
+        return split_two(inner);
+    }
+    if let Some(inner) = inner_args(stripped, "assert!(") {
+        if inner.contains("==") {
+            return split_two(&inner.replace("==", ","));
+        }
+        return None;
+    }
+    if let Some(inner) = inner_args(stripped, "assertEqual(") {
+        return split_two(inner);
+    }
+    if let Some(inner) = inner_args(stripped, "assertEquals(") {
+        return split_two(inner);
+    }
+    if let Some(inner) = inner_args(stripped, "assert.Equal(") {
+        return split_skip_first(inner);
+    }
+    if let Some(inner) = inner_args(stripped, "require.Equal(") {
+        return split_skip_first(inner);
+    }
+    if let Some((expected, actual)) = expect_to_operands(stripped) {
+        return Some((expected, actual));
+    }
+    if let Some((_left, right)) = stripped.split_once("assert ") {
+        let right = right.trim();
+        if let Some((left, right)) = right.split_once(" == ") {
+            let (left, right) = (left.trim(), right.trim());
+            if !left.is_empty() && !right.is_empty() && !left.contains('=') {
+                return Some((left.to_string(), right.to_string()));
+            }
+        }
+    }
+    None
+}
+
+fn expect_to_operands(line: &str) -> Option<(String, String)> {
+    let inner = inner_args(line, "expect(")?;
+    let matcher = [".toBe(", ".toEqual(", ".toStrictEqual("]
+        .iter()
+        .find_map(|matcher| inner_args(line, matcher))?;
+    Some((inner.trim().to_string(), matcher.trim().to_string()))
+}
+
+fn inner_args<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
+    let start = line.find(marker)? + marker.len();
+    let rest = &line[start..];
+    let mut depth = 1_u32;
+    for (index, character) in rest.char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&rest[..index]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn split_two(inner: &str) -> Option<(String, String)> {
+    match split_top_level(inner).as_slice() {
+        [left, right] => Some((left.trim().to_string(), right.trim().to_string())),
+        _ => None,
+    }
+}
+
+fn split_skip_first(inner: &str) -> Option<(String, String)> {
+    let parts = split_top_level(inner);
+    match parts.as_slice() {
+        [_skip, left, right] => Some((left.trim().to_string(), right.trim().to_string())),
+        _ => None,
+    }
+}
+
+fn split_top_level(inner: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut depth = 0_u32;
+    let mut in_string = false;
+    let mut quote = '\0';
+    let mut current = String::new();
+    let mut escaped = false;
+    for character in inner.chars() {
+        if in_string {
+            current.push(character);
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == quote {
+                in_string = false;
+            }
             continue;
         }
-        let matched = other
-            .get(key)
-            .copied()
-            .unwrap_or(0)
-            .min(mine.get(key).copied().unwrap_or(0));
-        let mut occurrence = 0_usize;
-        for (index, candidate) in lines.iter().enumerate() {
-            if *candidate != key {
-                continue;
+        match character {
+            '"' | '\'' => {
+                in_string = true;
+                quote = character;
+                current.push(character);
             }
-            occurrence += 1;
-            if occurrence > matched {
-                out.push(DiffLine {
-                    line: index + 1,
-                    text: key.to_owned(),
-                    code: filters::code_text(key, language),
-                });
+            '(' | '[' | '{' => {
+                depth += 1;
+                current.push(character);
             }
+            ')' | ']' | '}' => {
+                depth = depth.saturating_sub(1);
+                current.push(character);
+            }
+            ',' if depth == 0 => {
+                parts.push(std::mem::take(&mut current));
+            }
+            _ => current.push(character),
         }
     }
-    out
-}
-
-fn count_occurrences<'a>(lines: &[&'a str]) -> HashMap<&'a str, usize> {
-    let mut counts: HashMap<&str, usize> = HashMap::new();
-    for line in lines {
-        *counts.entry(line).or_insert(0) += 1;
+    if !current.trim().is_empty() || !parts.is_empty() {
+        parts.push(current);
     }
-    counts
+    parts
 }
 
-/// Locates `needle` within `block`'s own line range in `text` (1-based),
-/// falling back to the block's start line. Restricting the search to the block
-/// keeps each test's duplicate assertion at its own line instead of collapsing
-/// onto the first match in the file. Exact matches win over trimmed ones.
-fn locate_within_block(text: &str, block: &TestBlock, needle: &str) -> usize {
-    let lines: Vec<&str> = text.split('\n').collect();
-    let start = block.start_line.max(1);
-    let end = block.end_line.min(lines.len());
-    let trimmed = needle.trim();
-    for exact in [true, false] {
-        for line_number in start..=end {
-            let Some(line) = lines.get(line_number - 1) else {
-                continue;
-            };
-            let hit = if exact {
-                *line == needle
-            } else {
-                line.trim() == trimmed
-            };
-            if hit {
-                return line_number;
-            }
+/// Whether a comment body looks like commented-out test/assertion code.
+#[must_use]
+pub fn looks_like_commented_out_test(comment_body: &str) -> bool {
+    let stripped = strip_comment_markers(comment_body);
+    let text = stripped.trim();
+    if text.is_empty() {
+        return false;
+    }
+    let starts_like_test = [
+        "def test",
+        "func Test",
+        "func Benchmark",
+        "#[test]",
+        "@Test",
+        "@Fact",
+        "it(",
+        "test(",
+        "describe(",
+        "xit(",
+        "xtest(",
+        "xdescribe(",
+        "specify(",
+        "context(",
+    ]
+    .iter()
+    .any(|marker| text.starts_with(marker));
+    if starts_like_test {
+        return true;
+    }
+    let includes_assertion_call = [
+        "assertEqual(",
+        "assertEquals(",
+        "assertTrue(",
+        "assertFalse(",
+        "assert_eq!(",
+        "assert!(",
+        "expect(",
+        ".toBe(",
+        ".toEqual(",
+        ".toStrictEqual(",
+        "pytest.raises(",
+        "self.assert",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker));
+    if includes_assertion_call {
+        return true;
+    }
+    text.contains("assert ") && (text.contains("==") || text.contains("!=") || text.contains('('))
+}
+
+fn strip_comment_markers(text: &str) -> &str {
+    let mut stripped = text.trim();
+    for prefix in ["#", "//", "--", "*", "/*", "--[[", "<!--"] {
+        if let Some(rest) = stripped.strip_prefix(prefix) {
+            stripped = rest;
+            break;
         }
     }
-    block.start_line
+    stripped.trim()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Confidence, RULES};
+    use super::{
+        AddedLine, assertion_operands, classify_added_line, diff_findings,
+        looks_like_commented_out_test,
+    };
+
+    fn lines<'a>(texts: &'a [&'a str]) -> Vec<AddedLine<'a>> {
+        texts
+            .iter()
+            .enumerate()
+            .map(|(index, text)| AddedLine {
+                line_number: index + 1,
+                text,
+            })
+            .collect()
+    }
 
     #[test]
-    fn rules_table_pins_each_id_and_confidence_in_order() {
-        // given: the frozen (id, confidence) wire contract
-        let expected = [
-            ("skip-focus-added", Confidence::High),
-            ("tautological-assertion", Confidence::High),
-            ("empty-test", Confidence::Medium),
-            ("unknown-test", Confidence::Medium),
-            ("gutted-test", Confidence::High),
-            ("swallowed-error", Confidence::Medium),
-            ("duplicate-test", Confidence::Medium),
-            ("mock-of-sut", Confidence::Medium),
-            ("over-mocking", Confidence::Low),
-            ("assertion-roulette", Confidence::Low),
-            ("redundant-assertion", Confidence::Low),
-        ];
+    fn classify_added_line_given_skip_marker_reports_skip_added() {
+        // given
+        let added = lines(&["    @pytest.mark.skip"]);
 
         // when
-        let actual: Vec<(&str, Confidence)> = RULES
-            .iter()
-            .map(|rule| (rule.id, rule.confidence))
-            .collect();
+        let findings = classify_added_line("tests/test_app.py", &added, 0);
 
         // then
-        assert_eq!(actual, expected);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, "skip-added");
+    }
+
+    #[test]
+    fn classify_added_line_given_focus_marker_reports_focus_added() {
+        // given
+        let added = lines(&["it.only('adds', () => {})"]);
+
+        // when
+        let findings = classify_added_line("app.test.js", &added, 0);
+
+        // then
+        assert!(findings.iter().any(|finding| finding.rule == "focus-added"));
+    }
+
+    #[test]
+    fn classify_added_line_given_tautology_reports_tautological_assertion() {
+        // given
+        let added = lines(&["    assert value == value"]);
+
+        // when
+        let findings = classify_added_line("tests/test_app.py", &added, 0);
+
+        // then
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "tautological-assertion")
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_literal_pair_reports_constant_assertion() {
+        // given
+        let added = lines(&["    assertEquals(1, 1)"]);
+
+        // when
+        let findings = classify_added_line("src/test/java/AppTest.java", &added, 0);
+
+        // then
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "constant-assertion")
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_swallowed_except_reports_swallowed_error() {
+        // given
+        let added = lines(&["    except Exception:", "        pass"]);
+
+        // when
+        let findings = classify_added_line("tests/test_app.py", &added, 0);
+
+        // then
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "swallowed-error")
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_conditional_assert_reports_conditional_assertion() {
+        // given
+        let added = lines(&["    if flag:", "        assert value == expected"]);
+
+        // when
+        let findings = classify_added_line("tests/test_app.py", &added, 0);
+
+        // then
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "conditional-assertion")
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_clean_line_reports_nothing() {
+        // given
+        let added = lines(&["    result = add(1, 2)"]);
+
+        // when
+        let findings = classify_added_line("tests/test_app.py", &added, 0);
+
+        // then
+        assert_eq!(findings.len(), 0);
+    }
+
+    #[test]
+    fn assertion_operands_given_go_equality_skips_the_testing_argument() {
+        // when
+        let operands = assertion_operands("assert.Equal(t, expected, actual)");
+
+        // then
+        assert_eq!(
+            operands,
+            Some(("expected".to_string(), "actual".to_string()))
+        );
+    }
+
+    #[test]
+    fn diff_findings_given_removed_assertion_reports_assertion_removed() {
+        // given
+        let old = "def test_a():\n    assert add(1, 1) == 2\n    assert add(2, 2) == 4\n";
+        let new = "def test_a():\n    assert add(1, 1) == 2\n";
+
+        // when
+        let findings = diff_findings(old, new, "tests/test_app.py");
+
+        // then
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "assertion-removed")
+        );
+    }
+
+    #[test]
+    fn diff_findings_given_expected_copied_reports_expected_copied_from_actual() {
+        // given
+        let old = "def test_a():\n    assert compute() == 5\n";
+        let new = "def test_a():\n    assert compute() == compute()\n";
+
+        // when
+        let findings = diff_findings(old, new, "tests/test_app.py");
+
+        // then
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "expected-copied-from-actual")
+        );
+    }
+
+    #[test]
+    fn looks_like_commented_out_test_given_test_code_returns_true() {
+        // then
+        assert!(looks_like_commented_out_test("# assert x == y"));
+        assert!(looks_like_commented_out_test("// expect(x).toBe(y)"));
+        assert!(looks_like_commented_out_test("# def test_foo():"));
+        assert!(looks_like_commented_out_test("// it('adds', () => {})"));
+        assert!(!looks_like_commented_out_test(
+            "# explain the algorithm below"
+        ));
     }
 }
