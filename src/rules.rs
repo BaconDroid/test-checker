@@ -143,9 +143,6 @@ pub struct SkipFocusAddedFilter;
 impl SkipFocusAddedFilter {
     #[must_use]
     pub fn hits(&self, d: &Derived<'_>) -> Vec<Finding> {
-        if !d.change.is_test_file {
-            return Vec::new();
-        }
         added_line_findings(
             d,
             FindingSpec {
@@ -191,9 +188,6 @@ pub struct EmptyTestFilter;
 impl EmptyTestFilter {
     #[must_use]
     pub fn hits(&self, d: &Derived<'_>) -> Vec<Finding> {
-        if !d.change.is_test_file {
-            return Vec::new();
-        }
         let mut out = Vec::new();
         for block in &d.blocks {
             if !block_is_added(d, block) {
@@ -223,16 +217,15 @@ pub struct UnknownTestFilter;
 impl UnknownTestFilter {
     #[must_use]
     pub fn hits(&self, d: &Derived<'_>) -> Vec<Finding> {
-        if !d.change.is_test_file {
-            return Vec::new();
-        }
         let mut out = Vec::new();
         for block in &d.blocks {
             if !block_is_added(d, block) {
                 continue;
             }
             let body = block.lines.join("\n");
-            if filters::count_real_lines(&body, d.language()) == 0 || filters::has_assertion(&body)
+            if filters::count_real_lines(&body, d.language()) == 0
+                || filters::is_trivial_body(&body)
+                || filters::has_assertion(&body)
             {
                 continue;
             }
@@ -334,9 +327,6 @@ pub struct DuplicateTestFilter;
 impl DuplicateTestFilter {
     #[must_use]
     pub fn hits(&self, d: &Derived<'_>) -> Vec<Finding> {
-        if !d.change.is_test_file {
-            return Vec::new();
-        }
         let mut seen: HashMap<String, usize> = HashMap::new();
         let mut out = Vec::new();
         for block in &d.blocks {
@@ -371,9 +361,6 @@ pub struct MockOfSutFilter;
 impl MockOfSutFilter {
     #[must_use]
     pub fn hits(&self, d: &Derived<'_>) -> Vec<Finding> {
-        if !d.change.is_test_file {
-            return Vec::new();
-        }
         match d.language() {
             "js" | "ts" => mock_of_sut_javascript(d),
             "python" => mock_of_sut_python(d),
@@ -492,9 +479,6 @@ pub struct AssertionRouletteFilter;
 impl AssertionRouletteFilter {
     #[must_use]
     pub fn hits(&self, d: &Derived<'_>) -> Vec<Finding> {
-        if !d.change.is_test_file {
-            return Vec::new();
-        }
         let mut out = Vec::new();
         for block in &d.blocks {
             if !block_is_added(d, block) {
@@ -531,9 +515,6 @@ pub struct RedundantAssertionFilter;
 impl RedundantAssertionFilter {
     #[must_use]
     pub fn hits(&self, d: &Derived<'_>) -> Vec<Finding> {
-        if !d.change.is_test_file {
-            return Vec::new();
-        }
         let mut out = Vec::new();
         for block in &d.blocks {
             if !block_is_added(d, block) {
@@ -695,7 +676,8 @@ fn block_is_added(d: &Derived<'_>, block: &TestBlock) -> bool {
     }
     let mut code_lines = 0_usize;
     for raw in &block.lines {
-        let line = raw.trim();
+        let stripped = filters::strip_comments(raw, d.language());
+        let line = stripped.trim();
         if line.is_empty() || filters::is_comment_line(raw, d.language()) {
             continue;
         }
@@ -842,11 +824,18 @@ fn extract_js_spy_target(code: &str) -> Option<String> {
 }
 
 fn extract_python_patch_target(code: &str) -> Option<String> {
-    let rest = code
-        .split_once("patch(")
-        .map(|(_, tail)| tail)
-        .or_else(|| code.strip_prefix("patch("))?;
-    read_quoted(rest)
+    let bytes = code.as_bytes();
+    let mut start = 0;
+    while let Some(offset) = code[start..].find("patch(") {
+        let index = start + offset;
+        // Require a non-word byte before `patch(` so `mocker.patch(`,
+        // `patch(` and `@patch(` match, while `dispatch(` does not.
+        if index == 0 || !filters::is_word_byte(bytes[index - 1]) {
+            return read_quoted(&code[index + "patch(".len()..]);
+        }
+        start = index + "patch(".len();
+    }
+    None
 }
 
 fn read_quoted(text: &str) -> Option<String> {

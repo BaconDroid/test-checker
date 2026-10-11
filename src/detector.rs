@@ -164,7 +164,7 @@ fn find_test_blocks(
             "rust" => {
                 if let (Some(name), Some(body)) = (name_node, body_node) {
                     if let Some(function) = name.parent() {
-                        if rust_has_attribute(function, source, "test") {
+                        if rust_has_attribute(function, source, rust_is_test_attribute) {
                             blocks.push(make_block(body, body, source, true));
                         }
                     }
@@ -178,7 +178,25 @@ fn find_test_blocks(
             _ => {}
         }
     }
-    blocks
+    drop_container_blocks(&blocks)
+}
+
+/// Drops any block that strictly contains another collected block, so a
+/// `describe(…)` container does not duplicate a nested `it(…)` finding.
+fn drop_container_blocks(blocks: &[TestBlock]) -> Vec<TestBlock> {
+    let mut kept = Vec::with_capacity(blocks.len());
+    for (index, block) in blocks.iter().enumerate() {
+        let encloses_other = blocks.iter().enumerate().any(|(other_index, other)| {
+            index != other_index
+                && block.start_line <= other.start_line
+                && block.end_line >= other.end_line
+                && (block.start_line != other.start_line || block.end_line != other.end_line)
+        });
+        if !encloses_other {
+            kept.push(block.clone());
+        }
+    }
+    kept
 }
 
 fn collect_js(call: Node<'_>, source: &[u8], plugin: &str, out: &mut Vec<TestBlock>) {
@@ -235,18 +253,25 @@ fn js_callback(call: Node<'_>) -> Option<Node<'_>> {
     None
 }
 
-fn rust_has_attribute(node: Node<'_>, source: &[u8], name: &str) -> bool {
+fn rust_has_attribute(node: Node<'_>, source: &[u8], matches: impl Fn(&str) -> bool) -> bool {
     let mut sibling = node.prev_named_sibling();
     while let Some(current) = sibling {
         if current.kind() != "attribute_item" {
             return false;
         }
-        if rust_attribute_name(node_text(current, source)) == name {
+        if matches(&rust_attribute_name(node_text(current, source))) {
             return true;
         }
         sibling = current.prev_named_sibling();
     }
     false
+}
+
+/// Whether a Rust attribute name marks a test: `test`, `rstest`, or any
+/// path-qualified variant ending in `::test` (e.g. `tokio::test`). `cfg` (as
+/// in `#[cfg(test)]`) stays excluded.
+fn rust_is_test_attribute(name: &str) -> bool {
+    name == "test" || name == "rstest" || name.ends_with("::test")
 }
 
 fn rust_attribute_name(attribute: &str) -> String {

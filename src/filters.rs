@@ -256,6 +256,7 @@ pub fn tautological_hit(code: &str) -> bool {
 #[must_use]
 pub fn has_assertion(text: &str) -> bool {
     contains_word(text, "assert")
+        || has_assert_call(text)
         || has_call(text, "expect")
         || has_word_call(text, "fail")
         || has_word_call(text, "verify")
@@ -283,7 +284,43 @@ pub fn is_assertion_line(code: &str) -> bool {
 
 #[must_use]
 pub fn has_assertion_message(body: &str) -> bool {
-    call_has_message(body, "assert") || call_has_message(body, "expect")
+    call_has_message(body, "assert")
+        || call_has_message(body, "expect")
+        || python_assert_message(body)
+}
+
+/// Reports whether a Python `assert <expr>, "<msg>"` statement carries a
+/// message: a top-level `assert` whose expression is followed, outside any
+/// nested brackets, by a comma and then a string literal.
+fn python_assert_message(body: &str) -> bool {
+    for line in body.split('\n') {
+        let trimmed = line.trim_start();
+        if let Some(rest) = after_word(trimmed, "assert") {
+            if top_level_comma_then_string(rest) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn top_level_comma_then_string(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut depth: i32 = 0;
+    for (index, byte) in bytes.iter().enumerate() {
+        match byte {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b',' if depth == 0 => {
+                let tail = text[index + 1..].trim_start();
+                if tail.starts_with(['"', '\'']) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 #[must_use]
@@ -418,20 +455,30 @@ fn has_assert_call(code: &str) -> bool {
     let mut start = 0;
     while let Some(offset) = code[start..].find("assert") {
         let index = start + offset;
-        let before_ok = index == 0 || !is_word_byte(bytes[index - 1]);
-        if !before_ok {
-            start = index + "assert".len();
-            continue;
+        // Walk back to the start of the identifier so the `debug_assert`
+        // family is recognized, then accept only the Rust assert macro
+        // families (plain `assert` / `debug_assert`), not arbitrary
+        // identifiers that merely end in `assert`.
+        let mut ident_start = index;
+        while ident_start > 0 && is_word_byte(bytes[ident_start - 1]) {
+            ident_start -= 1;
         }
-        let mut end = index + "assert".len();
-        while end < bytes.len() && is_word_byte(bytes[end]) {
-            end += 1;
+        let ident = &code[ident_start..];
+        let accepted = ident.starts_with("assert") || ident.starts_with("debug_assert");
+        if accepted {
+            let mut end = index + "assert".len();
+            while end < bytes.len() && is_word_byte(bytes[end]) {
+                end += 1;
+            }
+            let mut rest = code[end..].trim_start();
+            if let Some(after) = rest.strip_prefix('!') {
+                rest = after.trim_start();
+            }
+            if rest.starts_with('(') {
+                return true;
+            }
         }
-        let rest = code[end..].trim_start();
-        if rest.starts_with('(') {
-            return true;
-        }
-        start = end;
+        start = index + "assert".len();
     }
     false
 }
@@ -651,41 +698,6 @@ fn find_comment_index(line: &str, marker: &str) -> Option<usize> {
         index += 1;
     }
     None
-}
-
-/// Zero-dependency glob matcher supporting `**`, `*` and `?`.
-#[must_use]
-pub fn glob_match(pattern: &str, path: &str) -> bool {
-    glob_match_bytes(pattern.as_bytes(), path.as_bytes())
-}
-
-fn glob_match_bytes(pattern: &[u8], path: &[u8]) -> bool {
-    if pattern.is_empty() {
-        return path.is_empty();
-    }
-    match pattern[0] {
-        b'*' => {
-            if pattern.len() >= 2 && pattern[1] == b'*' {
-                let mut rest = &pattern[2..];
-                if rest.first() == Some(&b'/') {
-                    rest = &rest[1..];
-                    if glob_match_bytes(rest, path) {
-                        return true;
-                    }
-                }
-                return (0..=path.len()).any(|index| glob_match_bytes(rest, &path[index..]));
-            }
-            let rest = &pattern[1..];
-            let limit = path
-                .iter()
-                .position(|byte| *byte == b'/')
-                .unwrap_or(path.len());
-            glob_match_bytes(rest, path)
-                || (0..limit).any(|index| glob_match_bytes(rest, &path[index + 1..]))
-        }
-        b'?' => !path.is_empty() && path[0] != b'/' && glob_match_bytes(&pattern[1..], &path[1..]),
-        byte => !path.is_empty() && path[0] == byte && glob_match_bytes(&pattern[1..], &path[1..]),
-    }
 }
 
 #[cfg(test)]

@@ -688,6 +688,152 @@ fn redundant_assertion_given_distinct_lines_skips_rule() {
     assert!(!rule_present(&findings, "redundant-assertion"));
 }
 
+// --- Regression: assertion / capture correctness ---------------------------
+
+#[test]
+fn unknown_test_given_rust_assert_macros_skips_rule() {
+    // given: every Rust assertion macro form must count as an assertion
+    let bodies = [
+        "#[test]\nfn t() {\n    assert!(x);\n}\n",
+        "#[test]\nfn t() {\n    assert_eq!(2 + 2, 4);\n}\n",
+        "#[test]\nfn t() {\n    assert_ne!(a, b);\n}\n",
+        "#[test]\nfn t() {\n    debug_assert!(x);\n}\n",
+    ];
+    for body in bodies {
+        let change = make_change("src/foo_test.rs", "rust", "", body, true);
+
+        // when
+        let findings = TestDetector::new().detect(&change);
+
+        // then
+        assert!(!rule_present(&findings, "unknown-test"), "body: {body}");
+    }
+}
+
+#[test]
+fn unknown_test_given_tokio_and_rstest_attributes_reports_rule() {
+    // given: attribute macros beyond `#[test]` must still capture the body,
+    // while `#[cfg(test)]` stays excluded
+    let captured = [
+        "#[tokio::test]\nasync fn t() {\n    do_work();\n}\n",
+        "#[rstest]\nfn t() {\n    do_work();\n}\n",
+    ];
+    for body in captured {
+        let change = make_change("src/foo_test.rs", "rust", "", body, true);
+
+        // when
+        let findings = TestDetector::new().detect(&change);
+
+        // then
+        assert!(rule_present(&findings, "unknown-test"), "body: {body}");
+    }
+    let cfg = "#[cfg(test)]\nfn t() {\n    do_work();\n}\n";
+    let change = make_change("src/foo_test.rs", "rust", "", cfg, true);
+
+    // when
+    let findings = TestDetector::new().detect(&change);
+
+    // then
+    assert!(!rule_present(&findings, "unknown-test"), "body: {cfg}");
+}
+
+#[test]
+fn unknown_test_given_edited_block_with_trailing_comment_reports_rule() {
+    // given: an edit adds a body line whose trailing comment is stripped when
+    // the added-line multiset is keyed
+    let change = make_change(
+        "tests/test_a.py",
+        "python",
+        "def test_a():\n    pass\n",
+        "def test_a():\n    do_work()  # wip\n",
+        false,
+    );
+
+    // when
+    let findings = TestDetector::new().detect(&change);
+
+    // then
+    assert!(rule_present(&findings, "unknown-test"));
+}
+
+#[test]
+fn unknown_test_given_trivial_body_skips_rule() {
+    // given: a `pass` body is empty-test, not also unknown-test
+    let change = make_change(
+        "tests/test_a.py",
+        "python",
+        "",
+        "def test_a():\n    pass\n",
+        true,
+    );
+
+    // when
+    let findings = TestDetector::new().detect(&change);
+
+    // then
+    assert!(rule_present(&findings, "empty-test"));
+    assert!(!rule_present(&findings, "unknown-test"));
+}
+
+#[test]
+fn unknown_test_given_describe_container_skips_container_block() {
+    // given: a `describe` wraps an `it`; only the inner block is a test body
+    let change = make_change(
+        "src/app.test.ts",
+        "ts",
+        "",
+        "describe(\"group\", () => {\n  it(\"a\", () => {\n    doWork();\n  });\n});\n",
+        true,
+    );
+
+    // when
+    let findings = TestDetector::new().detect(&change);
+
+    // then
+    let unknown: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.rule == "unknown-test")
+        .collect();
+    assert_eq!(unknown.len(), 1);
+    assert_eq!(unknown[0].line, 2);
+}
+
+#[test]
+fn assertion_roulette_given_python_assert_messages_skips_rule() {
+    // given: two Python asserts, each carrying a trailing message
+    let change = make_change(
+        "tests/test_a.py",
+        "python",
+        "",
+        "def test_a():\n    assert a == b, \"first\"\n    assert c == d, \"second\"\n",
+        true,
+    );
+
+    // when
+    let findings = TestDetector::new().detect(&change);
+
+    // then
+    assert!(!rule_present(&findings, "assertion-roulette"));
+}
+
+#[test]
+fn mock_of_sut_given_python_dispatch_call_skips_rule() {
+    // given: `dispatch(` only contains `patch(`; it is not a patch call
+    let change = make_change(
+        "tests/test_evt.py",
+        "python",
+        "",
+        "def test_evt():\n    dispatch(\"evt\")\n",
+        true,
+    );
+
+    // when
+    let findings = TestDetector::new().detect(&change);
+
+    // then
+    assert!(!rule_present(&findings, "mock-of-sut"));
+}
+
 // --- Cross-cutting gates ---------------------------------------------------
 
 #[test]
