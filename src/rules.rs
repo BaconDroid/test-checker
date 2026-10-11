@@ -540,7 +540,7 @@ impl RedundantAssertionFilter {
                 if !seen.insert(code.to_owned()) {
                     out.push(Finding::new(
                         &d.change.file_path,
-                        locate_line(&d.change.new_text, raw),
+                        locate_within_block(&d.change.new_text, block, raw),
                         "redundant-assertion",
                         "The same assertion is repeated in one test.",
                         Confidence::Low,
@@ -778,16 +778,31 @@ fn count_occurrences<'a>(lines: &[&'a str]) -> HashMap<&'a str, usize> {
     counts
 }
 
-fn locate_line(new_text: &str, needle: &str) -> usize {
-    let lines: Vec<&str> = new_text.split('\n').collect();
-    if let Some(index) = lines.iter().position(|line| *line == needle) {
-        return index + 1;
-    }
+/// Locates `needle` within `block`'s own line range in `text` (1-based),
+/// falling back to the block's start line. Restricting the search to the block
+/// keeps each test's duplicate assertion at its own line instead of collapsing
+/// onto the first match in the file. Exact matches win over trimmed ones.
+fn locate_within_block(text: &str, block: &TestBlock, needle: &str) -> usize {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let start = block.start_line.max(1);
+    let end = block.end_line.min(lines.len());
     let trimmed = needle.trim();
-    lines
-        .iter()
-        .position(|line| line.trim() == trimmed)
-        .map_or(0, |index| index + 1)
+    for exact in [true, false] {
+        for line_number in start..=end {
+            let Some(line) = lines.get(line_number - 1) else {
+                continue;
+            };
+            let hit = if exact {
+                *line == needle
+            } else {
+                line.trim() == trimmed
+            };
+            if hit {
+                return line_number;
+            }
+        }
+    }
+    block.start_line
 }
 
 // --- Module-under-test helpers --------------------------------------------

@@ -364,6 +364,30 @@ fn apply_filters_given_js_finding_near_allow_marker_drops_it() {
 }
 
 #[test]
+fn apply_filters_given_gutted_test_with_same_line_marker_keeps_gutted() {
+    // given: an assertion removed, with an allow marker on the same numeric
+    // line in new_text (the gutted finding reports an old-text line)
+    let change = Change {
+        file_path: "tests/test_a.py".to_owned(),
+        language: "python",
+        new_text: "def test_a():\n    # test-guard: allow\n    pass\n".to_owned(),
+        old_text: "def test_a():\n    assert foo() == 1\n".to_owned(),
+        is_new: false,
+        is_test_file: true,
+    };
+
+    // when
+    let findings = TestDetector::new().detect(&change);
+    let findings = apply_filters(&findings, &change.new_text);
+
+    // then: gutted-test is exempt from the new-text bypass window
+    assert!(
+        findings.iter().any(|finding| finding.rule == "gutted-test"),
+        "gutted-test must survive an unrelated same-line marker"
+    );
+}
+
+#[test]
 fn apply_filters_given_finding_far_from_marker_keeps_it() {
     // given: a tautological assertion 5 lines above the only allow marker
     let change = Change {
