@@ -33,18 +33,31 @@ pub struct Derived<'a> {
     change: &'a Change,
     added: Vec<DiffLine>,
     removed: Vec<DiffLine>,
+    added_by_code: HashMap<String, i64>,
     blocks: Vec<TestBlock>,
 }
 
 impl<'a> Derived<'a> {
-    /// Builds the order-insensitive diff, precomputing each line's code once.
+    /// Builds the order-insensitive diff, precomputing each line's code and the
+    /// `strip_comments`-normalized added-line census once.
     #[must_use]
     pub fn new(change: &'a Change, blocks: Vec<TestBlock>) -> Self {
         let (added, removed) = diff_lines(&change.old_text, &change.new_text, change.language);
+        let mut added_by_code: HashMap<String, i64> = HashMap::new();
+        for diff_line in &added {
+            *added_by_code
+                .entry(
+                    filters::strip_comments(&diff_line.text, change.language)
+                        .trim()
+                        .to_owned(),
+                )
+                .or_insert(0) += 1;
+        }
         Self {
             change,
             added,
             removed,
+            added_by_code,
             blocks,
         }
     }
@@ -297,13 +310,13 @@ impl SwallowedErrorFilter {
             .map(|line| line.code.as_str())
             .collect::<Vec<&str>>()
             .join("\n");
-        if !swallowed_error_hit(&joined, d.language()) {
+        if !filters::swallowed_error_hit(&joined, d.language()) {
             return Vec::new();
         }
         let sample = d
             .added
             .iter()
-            .find(|line| swallowed_error_hit(&line.code, d.language()))
+            .find(|line| filters::swallowed_error_hit(&line.code, d.language()))
             .map(|line| line.line)
             .or_else(|| d.added.first().map(|line| line.line));
         let Some(line) = sample else {
@@ -370,11 +383,11 @@ const MOCK_OF_SUT_MESSAGE: &str =
     "The module under test is mocked; asserting on the mock cannot validate real behavior.";
 
 fn mock_of_sut_javascript(d: &Derived<'_>) -> Vec<Hit> {
-    let stem = test_stem(&d.change.file_path);
+    let stem = filters::test_stem(&d.change.file_path);
     if stem.is_empty() {
         return Vec::new();
     }
-    let imported = imported_names_from_stem(&d.change.new_text, &stem, d.language());
+    let imported = filters::imported_names_from_stem(&d.change.new_text, &stem, d.language());
     let mut out = Vec::new();
     for diff_line in &d.added {
         let code = filters::strip_comments(&diff_line.text, d.language());
@@ -382,9 +395,9 @@ fn mock_of_sut_javascript(d: &Derived<'_>) -> Vec<Hit> {
         if code.is_empty() {
             continue;
         }
-        let hit = extract_js_mock_target(code)
-            .is_some_and(|target| mocked_module_stem(&target) == stem)
-            || extract_js_spy_target(code).is_some_and(|name| imported.contains(&name));
+        let hit = filters::extract_js_mock_target(code)
+            .is_some_and(|target| filters::mocked_module_stem(&target) == stem)
+            || filters::extract_js_spy_target(code).is_some_and(|name| imported.contains(&name));
         if !hit {
             continue;
         }
@@ -394,7 +407,7 @@ fn mock_of_sut_javascript(d: &Derived<'_>) -> Vec<Hit> {
 }
 
 fn mock_of_sut_python(d: &Derived<'_>) -> Vec<Hit> {
-    let stem = test_stem(&d.change.file_path);
+    let stem = filters::test_stem(&d.change.file_path);
     if stem.is_empty() {
         return Vec::new();
     }
@@ -405,10 +418,10 @@ fn mock_of_sut_python(d: &Derived<'_>) -> Vec<Hit> {
         if code.is_empty() {
             continue;
         }
-        let Some(target) = extract_python_patch_target(code) else {
+        let Some(target) = filters::extract_python_patch_target(code) else {
             continue;
         };
-        if patched_module_root(&target) != stem {
+        if filters::patched_module_root(&target) != stem {
             continue;
         }
         push_hit(&mut out, diff_line.line, MOCK_OF_SUT_MESSAGE);
@@ -563,78 +576,11 @@ fn unique_assertions(lines: &[DiffLine]) -> Vec<String> {
     set.into_iter().collect()
 }
 
-fn swallowed_error_hit(joined: &str, language: &str) -> bool {
-    match language {
-        "js" | "ts" => has_empty_catch(joined),
-        "python" => has_except_pass(joined),
-        "rust" => has_empty_err_arm(joined),
-        _ => false,
-    }
-}
-
-fn has_empty_catch(text: &str) -> bool {
-    let mut start = 0;
-    while let Some(offset) = text[start..].find("catch") {
-        let index = start + offset;
-        let mut rest = text[index + "catch".len()..].trim_start();
-        if let Some(after) = rest.strip_prefix('(') {
-            if let Some(close) = after.find(')') {
-                rest = after[close + 1..].trim_start();
-            }
-        }
-        if let Some(body) = rest.strip_prefix('{') {
-            if body
-                .split('}')
-                .next()
-                .is_some_and(|inner| inner.trim().is_empty())
-            {
-                return true;
-            }
-        }
-        start = index + "catch".len();
-    }
-    false
-}
-
-fn has_except_pass(text: &str) -> bool {
-    let mut start = 0;
-    while let Some(offset) = text[start..].find("except") {
-        let index = start + offset;
-        let rest = &text[index + "except".len()..];
-        if let Some((clause, tail)) = rest.split_once(':') {
-            let clause = clause.trim();
-            if matches!(clause, "" | "Exception" | "BaseException") {
-                if let Some(after) = tail.trim_start().strip_prefix("pass") {
-                    if after.is_empty() || !filters::is_word_byte(after.as_bytes()[0]) {
-                        return true;
-                    }
-                }
-            }
-        }
-        start = index + "except".len();
-    }
-    false
-}
-
-fn has_empty_err_arm(text: &str) -> bool {
-    let squashed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-    squashed.contains("Err(_)=>{}") || squashed.contains("Err(_)=>()")
-}
-
 fn block_is_added(d: &Derived<'_>, block: &TestBlock) -> bool {
     if d.change.is_new {
         return true;
     }
-    let mut added: HashMap<String, i64> = HashMap::new();
-    for diff_line in &d.added {
-        *added
-            .entry(
-                filters::strip_comments(&diff_line.text, d.language())
-                    .trim()
-                    .to_owned(),
-            )
-            .or_insert(0) += 1;
-    }
+    let mut needed: HashMap<String, i64> = HashMap::new();
     let mut code_lines = 0_usize;
     for raw in &block.lines {
         let stripped = filters::strip_comments(raw, d.language());
@@ -643,13 +589,12 @@ fn block_is_added(d: &Derived<'_>, block: &TestBlock) -> bool {
             continue;
         }
         code_lines += 1;
-        let entry = added.get_mut(line);
-        match entry {
-            Some(count) if *count > 0 => *count -= 1,
-            _ => return false,
-        }
+        *needed.entry(line.to_owned()).or_insert(0) += 1;
     }
     code_lines > 0
+        && needed
+            .iter()
+            .all(|(line, count)| d.added_by_code.get(line).is_some_and(|have| have >= count))
 }
 
 // --- Diff and line helpers -------------------------------------------------
@@ -755,173 +700,34 @@ fn locate_within_block(text: &str, block: &TestBlock, needle: &str) -> usize {
     block.start_line
 }
 
-// --- Module-under-test helpers --------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::{Confidence, RULES};
 
-fn test_stem(file_path: &str) -> String {
-    let base = file_path
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(file_path)
-        .to_owned();
-    let Some(dot) = base.rfind('.') else {
-        return base;
-    };
-    let mut stem = base[..dot].to_owned();
-    if let Some(inner) = stem.strip_suffix(".test") {
-        stem = inner.to_owned();
-    } else if let Some(inner) = stem.strip_suffix(".spec") {
-        stem = inner.to_owned();
-    } else if let Some(inner) = stem.strip_prefix("test_") {
-        stem = inner.to_owned();
-    } else if let Some(inner) = stem.strip_suffix("_test") {
-        stem = inner.to_owned();
-    }
-    stem
-}
+    #[test]
+    fn rules_table_pins_each_id_and_confidence_in_order() {
+        // given: the frozen (id, confidence) wire contract
+        let expected = [
+            ("skip-focus-added", Confidence::High),
+            ("tautological-assertion", Confidence::High),
+            ("empty-test", Confidence::Medium),
+            ("unknown-test", Confidence::Medium),
+            ("gutted-test", Confidence::High),
+            ("swallowed-error", Confidence::Medium),
+            ("duplicate-test", Confidence::Medium),
+            ("mock-of-sut", Confidence::Medium),
+            ("over-mocking", Confidence::Low),
+            ("assertion-roulette", Confidence::Low),
+            ("redundant-assertion", Confidence::Low),
+        ];
 
-fn mocked_module_stem(spec: &str) -> String {
-    let mut spec = spec.trim().to_owned();
-    if let Some(index) = spec.rfind(['/', '\\']) {
-        spec = spec[index + 1..].to_owned();
-    }
-    if let Some(index) = spec.rfind('.') {
-        if index > 0 {
-            spec = spec[..index].to_owned();
-        }
-    }
-    spec
-}
+        // when
+        let actual: Vec<(&str, Confidence)> = RULES
+            .iter()
+            .map(|rule| (rule.id, rule.confidence))
+            .collect();
 
-fn patched_module_root(spec: &str) -> String {
-    let spec = spec.trim();
-    spec.find(['.', '/'])
-        .map_or_else(|| spec.to_owned(), |index| spec[..index].to_owned())
-}
-
-fn extract_js_mock_target(code: &str) -> Option<String> {
-    for prefix in ["vi.mock(", "jest.mock("] {
-        if let Some(rest) = code.split_once(prefix).map(|(_, tail)| tail) {
-            if let Some(target) = read_quoted(rest) {
-                return Some(target);
-            }
-        }
-    }
-    None
-}
-
-fn extract_js_spy_target(code: &str) -> Option<String> {
-    for prefix in ["vi.spyOn(", "jest.spyOn("] {
-        if let Some(rest) = code.split_once(prefix).map(|(_, tail)| tail) {
-            let name: String = rest
-                .trim_start()
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$')
-                .collect();
-            if !name.is_empty() {
-                return Some(name);
-            }
-        }
-    }
-    None
-}
-
-fn extract_python_patch_target(code: &str) -> Option<String> {
-    let bytes = code.as_bytes();
-    let mut start = 0;
-    while let Some(offset) = code[start..].find("patch(") {
-        let index = start + offset;
-        // Require a non-word byte before `patch(` so `mocker.patch(`,
-        // `patch(` and `@patch(` match, while `dispatch(` does not.
-        if index == 0 || !filters::is_word_byte(bytes[index - 1]) {
-            return read_quoted(&code[index + "patch(".len()..]);
-        }
-        start = index + "patch(".len();
-    }
-    None
-}
-
-fn read_quoted(text: &str) -> Option<String> {
-    let trimmed = text.trim_start();
-    let quote = trimmed.chars().next()?;
-    if !matches!(quote, '"' | '\'') {
-        return None;
-    }
-    let rest = &trimmed[quote.len_utf8()..];
-    let end = rest.find(quote)?;
-    Some(rest[..end].to_owned())
-}
-
-fn imported_names_from_stem(text: &str, stem: &str, language: &str) -> HashSet<String> {
-    let mut names = HashSet::new();
-    for raw in text.split('\n') {
-        let line = filters::strip_comments(raw, language);
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Some(clause) = line.strip_prefix("import ") {
-            if let Some((binding, spec)) = clause.split_once(" from ") {
-                if let Some(module) = read_quoted(spec) {
-                    if mocked_module_stem(&module) == stem {
-                        collect_js_bindings(binding, &mut names);
-                    }
-                }
-            }
-            continue;
-        }
-        if let Some(eq) = line.find('=') {
-            let binding = line[..eq]
-                .trim()
-                .trim_start_matches("const ")
-                .trim_start_matches("let ")
-                .trim_start_matches("var ")
-                .trim();
-            if let Some(rest) = line[eq + 1..].trim().strip_prefix("require(") {
-                if let Some(module) = read_quoted(rest) {
-                    if mocked_module_stem(&module) == stem {
-                        collect_js_bindings(binding, &mut names);
-                    }
-                }
-            }
-        }
-    }
-    names
-}
-
-fn collect_js_bindings(binding: &str, names: &mut HashSet<String>) {
-    let mut binding = binding.trim().to_owned();
-    if let Some(open) = binding.find('{') {
-        if let Some(close) = binding[open..].find('}') {
-            collect_named_bindings(&binding[open + 1..open + close], names);
-            let mut combined = binding[..open].to_owned();
-            combined.push_str(&binding[open + close + 1..]);
-            binding = combined;
-        }
-    }
-    let binding = binding.trim().trim_end_matches(',').trim();
-    if binding.is_empty() {
-        return;
-    }
-    if let Some(rest) = binding.strip_prefix('*') {
-        if let Some((_, alias)) = rest.trim().rsplit_once(' ') {
-            names.insert(alias.trim().to_owned());
-        }
-        return;
-    }
-    if let Some(first) = binding.split_whitespace().next() {
-        names.insert(first.to_owned());
-    }
-}
-
-fn collect_named_bindings(inner: &str, names: &mut HashSet<String>) {
-    for part in inner.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        let local = part
-            .split_once(" as ")
-            .map_or(part, |(_, alias)| alias.trim());
-        names.insert(local.to_owned());
+        // then
+        assert_eq!(actual, expected);
     }
 }

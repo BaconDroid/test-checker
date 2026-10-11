@@ -1,5 +1,5 @@
 use test_checker::models::{Confidence, Finding};
-use test_checker::output::{build_findings_xml, format_hook_message};
+use test_checker::output::{build_findings_xml, build_findings_xml_refs, format_hook_message};
 
 #[test]
 fn build_findings_xml_given_single_finding_returns_exact_shape() {
@@ -65,6 +65,35 @@ fn build_findings_xml_given_empty_findings_returns_empty_string() {
 
     // then
     assert_eq!(xml, "");
+}
+
+#[test]
+fn build_findings_xml_refs_given_borrowed_findings_renders_same_bytes_as_owned() {
+    // given: the grouped path should render from borrowed findings without cloning
+    let findings = [
+        Finding::new(
+            "src/a.ts",
+            1,
+            "tautological-assertion",
+            "first",
+            Confidence::High,
+        ),
+        Finding::new("src/a.ts", 3, "unknown-test", "third", Confidence::Low),
+    ];
+    let refs: Vec<&Finding> = findings.iter().collect();
+
+    // when
+    let borrowed = build_findings_xml_refs(&refs, "src/a.ts");
+
+    // then: byte-identical to the owned entry point
+    assert_eq!(borrowed, build_findings_xml(&findings, "src/a.ts"));
+    assert_eq!(
+        borrowed,
+        "<findings file=\"src/a.ts\">\n\
+         <finding line-number=\"1\" rule=\"tautological-assertion\" confidence=\"high\">first</finding>\n\
+         <finding line-number=\"3\" rule=\"unknown-test\" confidence=\"low\">third</finding>\n\
+         </findings>"
+    );
 }
 
 #[test]

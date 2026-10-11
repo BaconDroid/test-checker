@@ -2,7 +2,8 @@ use test_checker::detector::{Change, TestDetector};
 use test_checker::filters::{
     apply_filters, code_text, count_real_lines, is_conditional_skip, is_file_disabled,
     is_test_declaration, is_trivial_body, mock_identifier_hit, normalize_assertion, normalize_body,
-    skip_focus_hit, strip_comments, strip_string_literals, tautological_hit, within_bypass,
+    skip_focus_hit, strip_comments, strip_string_literals, swallowed_error_hit, tautological_hit,
+    within_bypass,
 };
 
 // --- Comment / code text helpers -------------------------------------------
@@ -279,6 +280,27 @@ fn tautological_given_meaningful_assertions_returns_false() {
     // given / when / then
     assert!(!tautological_hit("assert foo() == bar()"));
     assert!(!tautological_hit("expect(value).toBe(1)"));
+}
+
+// --- Error swallowing ------------------------------------------------------
+
+#[test]
+fn swallowed_error_given_empty_handlers_returns_true() {
+    // given / when / then
+    assert!(swallowed_error_hit("try {} catch (e) {}", "js"));
+    assert!(swallowed_error_hit("except Exception:\n    pass", "python"));
+    assert!(swallowed_error_hit("Err(_) => {}", "rust"));
+}
+
+#[test]
+fn swallowed_error_given_filled_handlers_returns_false() {
+    // given / when / then
+    assert!(!swallowed_error_hit("catch (e) { log(e); }", "js"));
+    assert!(!swallowed_error_hit(
+        "except Exception:\n    raise",
+        "python"
+    ));
+    assert!(!swallowed_error_hit("Err(_) => report()", "rust"));
 }
 
 // --- Declaration / body ----------------------------------------------------

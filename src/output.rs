@@ -10,6 +10,14 @@ pub const DEFAULT_TEMPLATE: &str =
 /// Renders one file's findings as a `<findings>` block.
 #[must_use]
 pub fn build_findings_xml(findings: &[Finding], file_path: &str) -> String {
+    let refs: Vec<&Finding> = findings.iter().collect();
+    build_findings_xml_refs(&refs, file_path)
+}
+
+/// Renders one file's findings as a `<findings>` block, borrowing each finding
+/// so grouping never clones the findings it renders.
+#[must_use]
+pub fn build_findings_xml_refs(findings: &[&Finding], file_path: &str) -> String {
     if findings.is_empty() {
         return String::new();
     }
@@ -26,7 +34,7 @@ pub fn build_findings_xml(findings: &[Finding], file_path: &str) -> String {
         output.push_str("\" confidence=\"");
         output.push_str(finding.confidence.as_str());
         output.push_str("\">");
-        push_escaped(&mut output, &finding.message);
+        push_escaped(&mut output, finding.message.as_str());
         output.push_str("</finding>\n");
     }
     output.push_str("</findings>");
@@ -65,16 +73,9 @@ fn findings_xml(findings: &[Finding]) -> String {
     }
     let mut blocks = Vec::with_capacity(order.len());
     for file in order {
-        let file_findings = by_file
-            .get(file)
-            .map(|items| {
-                items
-                    .iter()
-                    .map(|finding| (*finding).clone())
-                    .collect::<Vec<Finding>>()
-            })
-            .unwrap_or_default();
-        blocks.push(build_findings_xml(&file_findings, file));
+        if let Some(items) = by_file.get(file) {
+            blocks.push(build_findings_xml_refs(items, file));
+        }
     }
     blocks.join("\n")
 }
