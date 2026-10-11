@@ -72,8 +72,43 @@ pub fn format_hook_message(findings: &[Finding], custom_prompt: &str) -> String 
         return custom_prompt.replace("{{findings}}", &findings_xml);
     }
 
+    let agent_memo: Vec<&Finding> = findings
+        .iter()
+        .filter(|finding| finding.rule == "agent-memo-test")
+        .collect();
+
     let mut output = String::new();
-    output.push_str("TEST-WEAKENING DETECTED - IMMEDIATE ACTION REQUIRED\n\n");
+    if findings
+        .iter()
+        .any(|finding| finding.rule != "agent-memo-test")
+    {
+        output.push_str("TEST-WEAKENING DETECTED - IMMEDIATE ACTION REQUIRED\n\n");
+    }
+    if !agent_memo.is_empty() {
+        output.push_str("🚨 AGENT MEMO TEST DETECTED - CODE SMELL ALERT 🚨\n\n");
+        output.push_str("⚠️  A test name or assertion message describes WHAT changed instead of WHAT the behavior is.  ⚠️\n\n");
+        output.push_str("Examples of agent memo patterns detected:\n");
+        output.push_str("  - \"Changed from X to Y\", \"Updated from...\", \"Migrated to...\"\n");
+        output.push_str("  - \"Now this uses...\", \"Previously...\", \"Note:\"\n");
+        output.push_str("  - \"This implements/adds/removes/changes/fixes...\"\n");
+        output.push_str("  - \"oldValue -> newValue\"\n");
+        output.push_str("WHY THIS IS BAD:\n");
+        output.push_str("  1. A test name should describe the behavior it verifies, not the edit that produced it\n");
+        output
+            .push_str("  2. These names become outdated immediately and mislead future readers\n");
+        output.push_str("  3. Git history already tracks what changed\n\n");
+        output.push_str("ACTION REQUIRED:\n");
+        output.push_str("  -> RENAME the test (or its assertion message) to describe the behavior under test\n\n");
+        output.push_str("Detected agent memo findings:\n");
+        for memo in agent_memo {
+            output.push_str("  - Line ");
+            output.push_str(&memo.line_number.to_string());
+            output.push_str(": ");
+            output.push_str(memo.text.trim());
+            output.push('\n');
+        }
+        output.push_str("\n---\n\n");
+    }
     output.push_str("Your recent change weakens a test. This triggered the hook and requires immediate action.\n");
     output.push_str("STOP: do not modify the test to make it pass. If the test is wrong, stop and tell the user instead of weakening it.\n\n");
     output.push_str("CRITICAL WARNING: This hook message MUST NEVER be ignored, even if you receive it multiple times.\n");

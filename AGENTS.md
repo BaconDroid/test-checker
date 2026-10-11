@@ -17,8 +17,10 @@ owns tree-sitter parsing (per-language `Runtime` + per-thread `Parser` caches, a
 budget), test-body capture, comment capture (host + injected), and the edit diff. `src/rules.rs`
 owns the rule catalog: one classifier per rule over the added lines / diff. `src/language.rs` owns
 the extension→grammar map, the per-language test-body query, and the test-path globs.
-`src/filters.rs` owns the BDD/directive allow-lists, the `test-checker: allow` suppression marker,
-and the agent-memo phrase catalog. `src/output.rs` renders the grouped `<findings>` XML.
+`src/filters.rs` owns the BDD/directive/shebang allow-lists, the `test-checker: allow` suppression
+marker, and the agent-memo phrase catalog. `src/output.rs` renders the grouped `<findings>` XML and
+the dedicated agent-memo banner. `tests/contract.rs` is the single owner of the shared hook wire
+contract (message prefix, exit-code mapping, XML shape, fail-open skip reasons).
 
 ## Dependency convention
 Direct dependencies are exactly `serde` (data model + serialization), `serde_json` (wire I/O only),

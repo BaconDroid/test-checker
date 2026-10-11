@@ -65,6 +65,16 @@ impl DirectiveFilter {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+pub struct ShebangFilter;
+
+impl ShebangFilter {
+    #[must_use]
+    pub fn should_skip(&self, finding: &Finding) -> bool {
+        finding.text.trim().starts_with("#!")
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
 pub struct SuppressionFilter;
 
 impl SuppressionFilter {
@@ -89,12 +99,14 @@ pub fn is_line_suppressed(text: &str) -> bool {
 pub fn apply_filters(findings: &[Finding]) -> Vec<Finding> {
     let bdd = BddFilter;
     let directive = DirectiveFilter;
+    let shebang = ShebangFilter;
     let suppression = SuppressionFilter;
     findings
         .iter()
         .filter(|finding| {
             !bdd.should_skip(finding)
                 && !directive.should_skip(finding)
+                && !shebang.should_skip(finding)
                 && !suppression.should_skip(finding)
         })
         .cloned()

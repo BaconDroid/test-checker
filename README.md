@@ -62,8 +62,12 @@ the captured test bodies (comments stripped); diff rules compare an edit's old a
 
 - **BDD keywords** (`given`, `when`, `then`, `arrange`, `act`, `assert`, …) are allowed.
 - **Directives** (`noqa`, `ts-ignore`, `eslint-disable`, `clippy:`, `allow`, …) are allowed.
+- **Shebang lines** (`#!…`) are allowed.
 - **Opt-out marker** `test-checker: allow` on a line suppresses findings for that finding's line;
   present anywhere in the file it suppresses the file.
+
+`agent-memo-test` findings are additionally summarised under a dedicated banner, pointing at the test
+name/assertion message that describes a change instead of the behavior.
 
 ## Library
 
