@@ -1,3 +1,4 @@
+use crate::engine;
 use crate::models::Finding;
 
 #[must_use]
@@ -15,32 +16,9 @@ pub fn build_findings_xml(findings: &[Finding], file_path: &str) -> String {
     output
 }
 
-fn push_escaped_text(output: &mut String, text: &str) {
-    for character in text.chars() {
-        match character {
-            '&' => output.push_str("&amp;"),
-            '<' => output.push_str("&lt;"),
-            '>' => output.push_str("&gt;"),
-            _ => output.push(character),
-        }
-    }
-}
-
-fn push_escaped_attribute(output: &mut String, text: &str) {
-    for character in text.chars() {
-        match character {
-            '&' => output.push_str("&amp;"),
-            '<' => output.push_str("&lt;"),
-            '>' => output.push_str("&gt;"),
-            '"' => output.push_str("&quot;"),
-            _ => output.push(character),
-        }
-    }
-}
-
 fn push_findings_xml_header(output: &mut String, file_path: &str) {
     output.push_str("<findings file=\"");
-    push_escaped_attribute(output, file_path);
+    engine::push_escaped_attribute(output, file_path);
     output.push_str("\">\n");
 }
 
@@ -48,11 +26,11 @@ fn push_finding_xml(output: &mut String, finding: &Finding) {
     output.push_str("\t<finding line-number=\"");
     output.push_str(&finding.line_number.to_string());
     output.push_str("\" rule=\"");
-    push_escaped_attribute(output, &finding.rule);
+    engine::push_escaped_attribute(output, &finding.rule);
     output.push_str("\" confidence=\"");
     output.push_str(finding.confidence.as_str());
     output.push_str("\">");
-    push_escaped_text(output, &finding.message);
+    engine::push_escaped_text(output, &finding.message);
     output.push_str("</finding>\n");
 }
 
