@@ -426,6 +426,24 @@ fn detect_given_multiline_block_commented_assertion_in_body_is_not_classified() 
 }
 
 #[test]
+fn detect_given_code_after_block_comment_closer_is_kept() {
+    // given: a real assertion after the `*/` on the closing line must not be discarded
+    let detector = TestDetector::new();
+    let source = "it('x', () => {\n  /*\n  setup\n  */ expect(add(1, 2)).toBe(3);\n});\n";
+
+    // when
+    let findings = detector.detect(source, "tests/app.test.js", true, true);
+
+    // then
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "no-assertion"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
 fn pipeline_coverage_given_every_language_parses_and_clean_fixtures_report_nothing() {
     // given
     let detector = TestDetector::new();
