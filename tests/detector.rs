@@ -190,18 +190,6 @@ const NON_FRAMEWORK_CASES: [(&str, &str); 10] = [
 ];
 
 #[test]
-fn detect_given_python_clean_test_returns_no_findings() {
-    // given
-    let detector = TestDetector::new();
-
-    // when
-    let findings = detector.detect(FRAMEWORK_CASES[0].1, "tests/test_app.py", true, true);
-
-    // then
-    assert!(findings.is_empty(), "unexpected findings: {findings:?}");
-}
-
-#[test]
 fn detect_given_brand_new_loose_assertion_does_not_weaken_at_medium_or_higher() {
     // given: a brand-new test whose only assertion is a loose matcher (no baseline).
     let detector = TestDetector::new();

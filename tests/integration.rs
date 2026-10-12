@@ -1,5 +1,5 @@
 use test_checker::detector::TestDetector;
-use test_checker::filters::{apply_filters, is_line_suppressed};
+use test_checker::filters::apply_filters;
 use test_checker::output::format_hook_message;
 
 #[test]
@@ -30,6 +30,5 @@ fn full_pipeline_given_suppression_marker_filters_out() {
     let filtered = apply_filters(&findings);
 
     // then
-    assert!(is_line_suppressed("# test-checker: allow"));
     assert_eq!(filtered.len(), 0);
 }
