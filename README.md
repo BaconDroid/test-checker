@@ -50,10 +50,11 @@ blocks (`<script>`, markdown fences, …).
 
 ## Rules
 
-`skip-added`, `focus-added`, `assertion-removed`, `gutted-test`, `tautological-assertion`,
-`constant-assertion`, `weakened-assertion`, `swallowed-error`, `mock-of-sut`, `over-mocking`,
+`skip-added`, `focus-added`, `assertion-removed`, `test-removed`, `gutted-test`, `no-assertion`,
+`tautological-assertion`, `constant-assertion`, `weakened-assertion`, `swallowed-error`,
+`incomplete-assertion`, `unawaited-assertion`, `broad-exception`, `mock-of-sut`, `over-mocking`,
 `duplicate-test`, `expected-copied-from-actual`, `snapshot-regenerated`, `tolerance-broadened`,
-`conditional-assertion`, `retry-added`, `agent-memo-test`, `commented-out-test`.
+`conditional-assertion`, `retry-added`, `agent-memo-test`, `allow-added`, `commented-out-test`.
 
 Each finding carries a `confidence` of `high`/`medium`/`low`. Line rules classify the added lines of
 the captured test bodies (comments stripped); diff rules compare an edit's old and new content.
@@ -63,8 +64,8 @@ the captured test bodies (comments stripped); diff rules compare an edit's old a
 - **BDD keywords** (`given`, `when`, `then`, `arrange`, `act`, `assert`, …) are allowed.
 - **Directives** (`noqa`, `ts-ignore`, `eslint-disable`, `clippy:`, `allow`, …) are allowed.
 - **Shebang lines** (`#!…`) are allowed.
-- **Opt-out marker** `test-checker: allow` on a line suppresses findings for that finding's line;
-  present anywhere in the file it suppresses the file.
+- **Opt-out marker** `test-checker: allow` suppresses findings for a file. Adding the marker **in the
+  same change** does not suppress it: it is reported as an `allow-added` finding instead.
 
 `agent-memo-test` findings are additionally summarised under a dedicated banner, pointing at the test
 name/assertion message that describes a change instead of the behavior.

@@ -187,9 +187,22 @@ fn check_hook_input_given_deletion_edit_exits_two() {
 }
 
 #[test]
-fn check_hook_input_given_file_suppression_marker_skips() {
-    // given
+fn check_hook_input_given_added_suppression_marker_reports_allow_added() {
+    // given: a Write that introduces the opt-out marker
     let input = r##"{"tool_name":"Write","tool_input":{"file_path":"tests/test_app.py","content":"# test-checker: allow\ndef test_sums():\n    @pytest.mark.skip\n    assert add(1, 2) == 3\n"}}"##;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then: the marker does not suppress the change that added it
+    assert_eq!(result.exit_code, 2);
+    assert!(result.message.contains("allow-added"));
+}
+
+#[test]
+fn check_hook_input_given_preexisting_suppression_marker_skips() {
+    // given: an Edit whose marker already existed (not on an added line)
+    let input = r##"{"tool_name":"Edit","tool_input":{"file_path":"tests/test_app.py","old_string":"# test-checker: allow\ndef test_sums():\n    @pytest.mark.skip\n    assert add(1, 2) == 3\n","new_string":"# test-checker: allow\ndef test_sums():\n    @pytest.mark.skip\n    assert add(2, 2) == 4\n"}}"##;
 
     // when
     let result = check_hook_input(input, "");

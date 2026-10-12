@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::detector::TestDetector;
 use crate::engine::{self, null_default};
-use crate::filters::{SuppressionFilter, apply_filters};
+use crate::filters::{SuppressionFilter, apply_filters, is_line_suppressed};
 use crate::language::{is_test_path, language_for_path};
-use crate::models::Edit;
+use crate::models::{Confidence, Edit, Finding};
 use crate::output::format_hook_message;
 use crate::rules;
 
@@ -123,21 +123,35 @@ fn evaluate(
     }
 
     let suppression = SuppressionFilter;
-    let suppressed = match hook_input.tool_name.as_str() {
-        "Edit" => suppression.is_file_suppressed(&hook_input.tool_input.new_string),
+    let marker_added = match hook_input.tool_name.as_str() {
+        "Edit" => added_line_has_marker(
+            &hook_input.tool_input.old_string,
+            &hook_input.tool_input.new_string,
+        ),
         "MultiEdit" => hook_input
             .tool_input
             .edits
             .iter()
-            .any(|edit| suppression.is_file_suppressed(&edit.new_string)),
+            .any(|edit| added_line_has_marker(&edit.old_string, &edit.new_string)),
         _ => suppression.is_file_suppressed(get_content_to_check(hook_input)),
     };
-    if suppressed {
-        return skip("Suppressed by test-checker: allow");
+    if !marker_added {
+        let suppressed = match hook_input.tool_name.as_str() {
+            "Edit" => suppression.is_file_suppressed(&hook_input.tool_input.new_string),
+            "MultiEdit" => hook_input
+                .tool_input
+                .edits
+                .iter()
+                .any(|edit| suppression.is_file_suppressed(&edit.new_string)),
+            _ => suppression.is_file_suppressed(get_content_to_check(hook_input)),
+        };
+        if suppressed {
+            return skip("Suppressed by test-checker: allow");
+        }
     }
 
     let detector = TestDetector::new();
-    let findings = match hook_input.tool_name.as_str() {
+    let mut findings = match hook_input.tool_name.as_str() {
         "Edit" => {
             let old_string = hook_input.tool_input.old_string.as_str();
             let new_string = hook_input.tool_input.new_string.as_str();
@@ -194,6 +208,16 @@ fn evaluate(
         }
     };
 
+    if marker_added {
+        findings.push(Finding::new(
+            "allow-added",
+            Confidence::Medium,
+            "A test-checker opt-out marker was added in this change; suppressing findings you just introduced is suspicious.",
+            1,
+            file_path,
+            "",
+        ));
+    }
     if findings.is_empty() {
         return success();
     }
@@ -240,6 +264,15 @@ fn get_content_to_check(input: &HookInput) -> &str {
     } else {
         input.tool_input.content.as_str()
     }
+}
+
+/// Whether the suppression marker sits on a line the edit added (agent self-suppression).
+fn added_line_has_marker(old_content: &str, new_content: &str) -> bool {
+    let added = engine::added_lines(old_content, new_content);
+    new_content
+        .lines()
+        .enumerate()
+        .any(|(index, line)| added.contains(&index) && is_line_suppressed(line))
 }
 
 fn skip(reason: &str) -> HookCheckResult {
