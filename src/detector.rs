@@ -308,24 +308,29 @@ fn capture_bodies(
     let mut bodies = Vec::new();
     while let Some(query_match) = matches.get() {
         let mut test_node: Option<tree_sitter::Node> = None;
-        let mut identifier: Option<String> = None;
+        let mut name: Option<String> = None;
+        let mut callee: Option<String> = None;
         for capture in query_match.captures {
             match capture_names.get(capture.index as usize).copied() {
                 Some("test") => test_node = Some(capture.node),
-                Some("test.name" | "test.callee") => {
-                    identifier = capture.node.utf8_text(source).ok().map(str::to_owned);
+                Some("test.name") => name = capture.node.utf8_text(source).ok().map(str::to_owned),
+                Some("test.callee") => {
+                    callee = capture.node.utf8_text(source).ok().map(str::to_owned);
                 }
                 _ => {}
             }
         }
         if let Some(node) = test_node {
-            if is_body_candidate(&runtime.name, identifier.as_deref(), node, source) {
-                let (start_byte, start_row) = expanded_start(&runtime.name, node);
+            // The test-body identity is the macro/label callee when present (bats `@test`, Spock
+            // `def`), otherwise the declared function name.
+            let identifier = callee.as_deref().or(name.as_deref());
+            if is_body_candidate(&runtime.name, identifier, node, source) {
+                let (start_byte, start_row) = expanded_start(&runtime.name, node, source);
                 bodies.push(Body {
                     start_byte,
-                    end_byte: node.end_byte(),
+                    end_byte: expanded_end(&runtime.name, node, source),
                     start_row,
-                    name: identifier,
+                    name: name.or(callee),
                 });
             }
         }
@@ -335,8 +340,8 @@ fn capture_bodies(
 }
 
 /// Extend a test body upward to include the attribute/marker lines that gate it (Rust
-/// `#[test]`/`#[ignore]`, Elixir `@tag :skip`).
-fn expanded_start(language: &str, node: tree_sitter::Node) -> (usize, usize) {
+/// `#[test]`/`#[ignore]`, Elixir `@tag :skip`, Groovy `@Ignore`).
+fn expanded_start(language: &str, node: tree_sitter::Node, source: &[u8]) -> (usize, usize) {
     if language == "python" {
         // `@pytest.mark.skip` style decorators live in a `decorated_definition` parent,
         // outside the `function_definition` span captured by the test query.
@@ -345,6 +350,30 @@ fn expanded_start(language: &str, node: tree_sitter::Node) -> (usize, usize) {
                 return (parent.start_byte(), parent.start_position().row);
             }
         }
+    }
+    if language == "groovy" {
+        // A Spock `@Ignore`/`@PendingFeature` line is a sibling `command` holding a `decorate`;
+        // the captured body is the method `block`, so anchor the walk at its `command` parent.
+        let anchor = node
+            .parent()
+            .filter(|parent| parent.kind() == "command")
+            .unwrap_or(node);
+        let mut start_byte = anchor.start_byte();
+        let mut start_row = anchor.start_position().row;
+        let mut sibling = anchor.prev_sibling();
+        while let Some(current) = sibling {
+            let is_decorator = current.kind() == "command"
+                && current
+                    .utf8_text(source)
+                    .is_ok_and(|text| text.trim_start().starts_with('@'));
+            if !is_decorator {
+                break;
+            }
+            start_byte = current.start_byte();
+            start_row = current.start_position().row;
+            sibling = current.prev_sibling();
+        }
+        return (start_byte, start_row);
     }
     let attribute_kinds: &[&str] = match language {
         "rust" => &["attribute_item"],
@@ -365,6 +394,24 @@ fn expanded_start(language: &str, node: tree_sitter::Node) -> (usize, usize) {
     (start_byte, start_row)
 }
 
+/// Extend a test body downward where the grammar splits the body from its declaration: a bats
+/// `@test "…" { … }` parses as sibling commands closed by a standalone `}` command.
+fn expanded_end(language: &str, node: tree_sitter::Node, source: &[u8]) -> usize {
+    if language == "bash" {
+        let mut sibling = node.next_sibling();
+        while let Some(current) = sibling {
+            if current
+                .utf8_text(source)
+                .is_ok_and(|text| text.trim() == "}")
+            {
+                return current.end_byte();
+            }
+            sibling = current.next_sibling();
+        }
+    }
+    node.end_byte()
+}
+
 fn is_body_candidate(
     language: &str,
     identifier: Option<&str>,
@@ -372,7 +419,7 @@ fn is_body_candidate(
     source: &[u8],
 ) -> bool {
     match language {
-        "python" | "go" => identifier.is_some_and(is_test_function_name),
+        "python" | "go" | "ocaml" => identifier.is_some_and(is_test_function_name),
         "swift" => {
             identifier.is_some_and(|name| name.starts_with("test") || name.starts_with("Test"))
         }
@@ -401,6 +448,15 @@ fn is_body_candidate(
             identifier.is_some_and(is_test_callee)
         }
         "scala" => identifier.is_some_and(|name| name.starts_with("test") || is_test_callee(name)),
+        "c" | "cpp" => identifier.is_some_and(|name| {
+            matches!(
+                name,
+                "TEST" | "TEST_F" | "TEST_P" | "TEST_CASE" | "TEST_CASE_METHOD" | "SCENARIO"
+            )
+        }),
+        "groovy" => identifier == Some("def"),
+        "elm" => identifier.is_some_and(|name| name.starts_with("test")),
+        "bash" => identifier == Some("@test"),
         _ => false,
     }
 }

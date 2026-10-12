@@ -41,6 +41,9 @@ const SKIP_MARKERS: &[&str] = &[
     "[Ignore]",
     "@Disabled",
     "@Ignore",
+    "GTEST_SKIP(",
+    "TEST_IGNORE",
+    "skip <|",
 ];
 
 const FOCUS_MARKERS: &[&str] = &[
@@ -135,6 +138,9 @@ const ASSERTION_MARKERS: &[&str] = &[
 ];
 
 /// Extra markers that count as "this body asserts", for the `no-assertion` check only.
+///
+/// Kept separate from `ASSERTION_MARKERS` so that broadening coverage for macro-style frameworks
+/// (GoogleTest/Catch2/C, alcotest, elm-test, bats-assert) does not feed `conditional-assertion`.
 const ASSERTION_EXISTS_EXTRAS: &[&str] = &[
     "Assert.",
     "XCTAssert",
@@ -143,6 +149,13 @@ const ASSERTION_EXISTS_EXTRAS: &[&str] = &[
     "require.",
     "verify(",
     "check(",
+    "EXPECT_",
+    "ASSERT_",
+    "REQUIRE(",
+    "CHECK(",
+    "TEST_ASSERT",
+    "Alcotest.",
+    "Expect.",
 ];
 
 /// Markers that indicate a body contains nested test definitions (so it is a suite, not a leaf test).

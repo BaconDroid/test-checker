@@ -1,5 +1,10 @@
 #[must_use]
 pub fn language_for_path(file_path: &str) -> Option<&'static str> {
+    // The language pack maps bash to `.sh`/`.bash`; bats test files use `.bats` for the same
+    // grammar, so resolve them explicitly.
+    if file_path.to_ascii_lowercase().ends_with(".bats") {
+        return Some("bash");
+    }
     tree_sitter_language_pack::detect_language(file_path)
 }
 
@@ -30,6 +35,20 @@ pub(crate) fn test_query(name: &str) -> Option<&'static str> {
         ),
         "elixir" => Some("(call target: (identifier) @test.callee) @test"),
         "lua" => Some("(function_call name: (identifier) @test.callee) @test"),
+        "c" => Some(
+            "(_ (expression_statement (call_expression function: (identifier) @test.callee)) . (compound_statement) @test)",
+        ),
+        "cpp" => Some(
+            "(function_definition declarator: (function_declarator declarator: (identifier) @test.name)) @test\n(_ (expression_statement (call_expression function: (identifier) @test.callee)) . (compound_statement) @test)",
+        ),
+        "groovy" => {
+            Some("(command (unit (identifier) @test.callee) (block (string) @test.name) @test)")
+        }
+        "ocaml" => Some("(value_definition (let_binding pattern: (value_name) @test.name)) @test"),
+        "elm" => Some(
+            "(value_declaration (function_declaration_left (lower_case_identifier) @test.name)) @test",
+        ),
+        "bash" => Some("(command (command_name (word) @test.callee) (string) @test.name) @test"),
         _ => None,
     }
 }
@@ -164,6 +183,20 @@ mod tests {
         // then
         assert!(test_query("python").is_some());
         assert!(test_query("rust").is_some());
+    }
+
+    #[test]
+    fn test_query_given_expanded_framework_languages_returns_query() {
+        // then
+        for name in ["c", "cpp", "groovy", "ocaml", "elm", "bash"] {
+            assert!(test_query(name).is_some(), "{name} has no test-body query");
+        }
+    }
+
+    #[test]
+    fn language_for_path_given_bats_extension_resolves_to_bash() {
+        // then
+        assert_eq!(language_for_path("tests/math.bats"), Some("bash"));
     }
 
     #[test]

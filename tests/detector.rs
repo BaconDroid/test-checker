@@ -2,7 +2,7 @@ use test_checker::detector::TestDetector;
 use test_checker::language::language_for_path;
 use test_checker::models::Confidence;
 
-const FRAMEWORK_CASES: [(&str, &str); 15] = [
+const FRAMEWORK_CASES: [(&str, &str); 21] = [
     (
         "tests/test_app.py",
         "def test_sums():\n    assert add(1, 2) == 3\n",
@@ -63,9 +63,33 @@ const FRAMEWORK_CASES: [(&str, &str); 15] = [
         "spec/sums_spec.lua",
         "describe(\"sums\", function()\n  it(\"sums\", function()\n    assert.are.equal(3, add(1, 2))\n  end)\nend)\n",
     ),
+    (
+        "tests/math_test.c",
+        "TEST(Math, Adds) {\n  EXPECT_EQ(add(1, 2), 3);\n}\n",
+    ),
+    (
+        "tests/math_test.cpp",
+        "TEST(Math, Adds) {\n  EXPECT_EQ(add(1, 2), 3);\n}\n",
+    ),
+    (
+        "test/Spec.groovy",
+        "class Spec extends Specification {\n  def \"adds\"() {\n    expect:\n    assert add(1, 2) == 3\n  }\n}\n",
+    ),
+    (
+        "test/test_math.ml",
+        "let test_adds () =\n  Alcotest.(check int) \"adds\" 3 (add 1 2)\n",
+    ),
+    (
+        "tests/MathTest.elm",
+        "module MathTest exposing (..)\n\nimport Expect\n\ntest_adds : Test\ntest_adds =\n    test \"adds\" <|\n        \\_ -> Expect.equal (add 1 2) 3\n",
+    ),
+    (
+        "tests/math.bats",
+        "@test \"adds\" {\n  run add 1 2\n  assert_success\n}\n",
+    ),
 ];
 
-const WEAKEN_CASES: [(&str, &str); 15] = [
+const WEAKEN_CASES: [(&str, &str); 21] = [
     (
         "tests/test_app.py",
         "@pytest.mark.skip(reason=\"later\")\ndef test_sums():\n    assert add(1, 2) == 3\n",
@@ -126,20 +150,38 @@ const WEAKEN_CASES: [(&str, &str); 15] = [
         "spec/sums_spec.lua",
         "describe(\"sums\", function()\n  it(\"sums\", function()\n    pending()\n    assert.are.equal(3, add(1, 2))\n  end)\nend)\n",
     ),
+    (
+        "tests/math_test.c",
+        "TEST(Math, Adds) {\n  GTEST_SKIP();\n  EXPECT_EQ(add(1, 2), 3);\n}\n",
+    ),
+    (
+        "tests/math_test.cpp",
+        "TEST(Math, Adds) {\n  GTEST_SKIP();\n  EXPECT_EQ(add(1, 2), 3);\n}\n",
+    ),
+    (
+        "test/Spec.groovy",
+        "class Spec extends Specification {\n  @Ignore\n  def \"adds\"() {\n    expect:\n    assert add(1, 2) == 3\n  }\n}\n",
+    ),
+    (
+        "test/test_math.ml",
+        "let test_adds () =\n  skip \"later\";\n  Alcotest.(check int) \"adds\" 3 (add 1 2)\n",
+    ),
+    (
+        "tests/MathTest.elm",
+        "module MathTest exposing (..)\n\nimport Expect\n\ntest_adds : Test\ntest_adds =\n    skip <| test \"adds\" <|\n        \\_ -> Expect.equal (add 1 2) 3\n",
+    ),
+    (
+        "tests/math.bats",
+        "@test \"adds\" {\n  skip \"later\"\n  run add 1 2\n  assert_success\n}\n",
+    ),
 ];
 
-const NON_FRAMEWORK_CASES: [(&str, &str); 16] = [
-    ("tests/clean.sh", "echo hello\n"),
-    ("tests/clean.c", "int main(void) { return 0; }\n"),
-    ("tests/clean.cpp", "int main() { return 0; }\n"),
+const NON_FRAMEWORK_CASES: [(&str, &str); 10] = [
     ("tests/clean.css", "body { color: red; }\n"),
     ("tests/clean.cue", "package x\n"),
     ("Dockerfile", "FROM debian\n"),
-    ("tests/clean.elm", "module Main exposing (..)\n"),
-    ("tests/clean.groovy", "def x = 1\n"),
     ("tests/clean.hcl", "resource \"x\" \"y\" {}\n"),
     ("tests/clean.html", "<html><body></body></html>\n"),
-    ("tests/clean.ml", "let x = 1\n"),
     ("tests/clean.proto", "message X {}\n"),
     ("tests/clean.sql", "SELECT 1;\n"),
     ("tests/clean.svelte", "<div></div>\n"),
