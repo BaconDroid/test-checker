@@ -84,6 +84,7 @@ pub fn check_hook_input_with_options(
             evaluate(
                 &hook_input,
                 custom_prompt,
+                Confidence::Medium,
                 include_commented_out_tests,
                 include_body_tests,
             )
@@ -94,17 +95,26 @@ pub fn check_hook_input_with_options(
 #[must_use]
 pub fn check_hook_input_from_reader<R: std::io::Read>(
     reader: R,
-    custom_prompt: &str,
+    options: &crate::engine::Options,
 ) -> HookCheckResult {
     serde_json::from_reader::<R, HookInput>(reader).map_or_else(
         |_| skip("Invalid input format"),
-        |hook_input| evaluate(&hook_input, custom_prompt, true, true),
+        |hook_input| {
+            evaluate(
+                &hook_input,
+                &options.prompt,
+                parse_min_confidence(options.min_confidence.as_deref()),
+                true,
+                true,
+            )
+        },
     )
 }
 
 fn evaluate(
     hook_input: &HookInput,
     custom_prompt: &str,
+    min_confidence: Confidence,
     include_commented_out_tests: bool,
     include_body_tests: bool,
 ) -> HookCheckResult {
@@ -222,12 +232,32 @@ fn evaluate(
         return success();
     }
 
-    let filtered = apply_filters(&findings);
+    let filtered: Vec<Finding> = apply_filters(&findings)
+        .into_iter()
+        .filter(|finding| confidence_rank(finding.confidence) >= confidence_rank(min_confidence))
+        .collect();
     if filtered.is_empty() {
         return success();
     }
 
     HookCheckResult::block(format_hook_message(&filtered, custom_prompt))
+}
+
+/// Minimum confidence from `--min-confidence` (default `medium`).
+fn parse_min_confidence(value: Option<&str>) -> Confidence {
+    match value.map(str::to_ascii_lowercase).as_deref() {
+        Some("low") => Confidence::Low,
+        Some("high") => Confidence::High,
+        _ => Confidence::Medium,
+    }
+}
+
+const fn confidence_rank(confidence: Confidence) -> u8 {
+    match confidence {
+        Confidence::Low => 0,
+        Confidence::Medium => 1,
+        Confidence::High => 2,
+    }
 }
 
 #[must_use]

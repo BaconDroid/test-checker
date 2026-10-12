@@ -96,3 +96,42 @@ fn cli_given_multiedit_weakening_exits_two() -> std::io::Result<()> {
     assert_eq!(output.status.code(), Some(2));
     Ok(())
 }
+
+#[test]
+fn cli_given_medium_finding_and_min_confidence_high_exits_zero() -> std::io::Result<()> {
+    // given: a medium-confidence weakened-assertion
+    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/app.test.js","content":"it('x', () => {\n  expect(a).toBeTruthy();\n});\n"}}"#;
+
+    // when
+    let output = run_checker(input, &["--min-confidence", "high"])?;
+
+    // then
+    assert!(output.status.success());
+    Ok(())
+}
+
+#[test]
+fn cli_given_medium_finding_and_default_confidence_exits_two() -> std::io::Result<()> {
+    // given
+    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/app.test.js","content":"it('x', () => {\n  expect(a).toBeTruthy();\n});\n"}}"#;
+
+    // when
+    let output = run_checker(input, &[])?;
+
+    // then
+    assert_eq!(output.status.code(), Some(2));
+    Ok(())
+}
+
+#[test]
+fn cli_given_min_confidence_equals_low_keeps_medium_finding() -> std::io::Result<()> {
+    // given
+    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/app.test.js","content":"it('x', () => {\n  expect(a).toBeTruthy();\n});\n"}}"#;
+
+    // when
+    let output = run_checker(input, &["--min-confidence=low"])?;
+
+    // then
+    assert_eq!(output.status.code(), Some(2));
+    Ok(())
+}

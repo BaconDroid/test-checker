@@ -25,6 +25,8 @@ no findings).
   ```
 
 - `--prompt <text>` replaces the default message; `{{findings}}` is substituted with the XML.
+  `--min-confidence <low|medium|high>` (default `medium`) drops lower-confidence findings, so the
+  hook only exits 2 for findings at or above that level.
 - **exit**: `2` when findings remain after filtering, `0` otherwise. Never any other code, never a
   panic.
 
