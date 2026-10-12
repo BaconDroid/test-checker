@@ -198,3 +198,60 @@ fn check_hook_input_given_file_suppression_marker_skips() {
     assert_eq!(result.exit_code, 0);
     assert!(result.message.contains("Suppressed by test-checker: allow"));
 }
+
+#[test]
+fn check_hook_input_given_clean_run_returns_the_exact_success_line() {
+    // given
+    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/test_app.py","content":"def test_sums():\n    assert add(1, 2) == 3\n"}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(
+        result.message,
+        "[test-checker] Success: No problematic tests found\n"
+    );
+}
+
+#[test]
+fn check_hook_input_given_empty_input_skips_with_the_exact_reason() {
+    // when
+    let result = check_hook_input("", "");
+
+    // then
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(
+        result.message,
+        "[test-checker] Skipping: No input provided\n"
+    );
+}
+
+#[test]
+fn check_hook_input_given_no_file_path_skips_with_the_exact_reason() {
+    // given
+    let input = r#"{"tool_name":"Write","tool_input":{"content":"x"}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(
+        result.message,
+        "[test-checker] Skipping: No file path provided\n"
+    );
+}
+
+#[test]
+fn check_hook_input_given_unsupported_language_fails_open() {
+    // given
+    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/notes.xyz","content":"anything"}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then
+    assert_eq!(result.exit_code, 0);
+}
