@@ -419,7 +419,7 @@ fn is_body_candidate(
     source: &[u8],
 ) -> bool {
     match language {
-        "python" | "go" | "ocaml" => identifier.is_some_and(is_test_function_name),
+        "python" | "go" | "ocaml" | "elm" => identifier.is_some_and(is_test_function_name),
         "swift" => {
             identifier.is_some_and(|name| name.starts_with("test") || name.starts_with("Test"))
         }
@@ -455,7 +455,6 @@ fn is_body_candidate(
             )
         }),
         "groovy" => identifier == Some("def"),
-        "elm" => identifier.is_some_and(|name| name.starts_with("test")),
         "bash" => identifier == Some("@test"),
         _ => false,
     }
@@ -546,6 +545,10 @@ fn analyze_edited_bodies(
 }
 
 /// The removed (LCS-unmatched old) lines of an edit, trimmed for the diff-aware rules.
+///
+/// `engine::added_lines(from, to)` returns the unmatched line indices of its **second** argument,
+/// so the arguments are deliberately reversed here: `added_lines(new, old)` yields the *old* lines
+/// the edit removed, indexed against `old_content`.
 fn removed_lines<'a>(old_content: &'a str, new_content: &str) -> Vec<&'a str> {
     let removed = engine::added_lines(new_content, old_content);
     old_content
