@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::detector::TestDetector;
-use crate::engine::null_default;
+use crate::engine::{self, null_default};
 use crate::filters::{SuppressionFilter, apply_filters};
 use crate::language::{is_test_path, language_for_path};
 use crate::models::Edit;
@@ -208,7 +208,7 @@ fn evaluate(
 
 #[must_use]
 pub fn check_hook_input_json(input: &str, custom_prompt: &str) -> String {
-    result_json(&check_hook_input(input, custom_prompt))
+    engine::result_json(&check_hook_input(input, custom_prompt))
 }
 
 #[must_use]
@@ -230,7 +230,7 @@ pub fn detect_findings_json(
     );
     match serde_json::to_string(&findings) {
         Ok(json) => json,
-        Err(error) => fallback_json(&error.to_string()),
+        Err(error) => engine::fallback_json(&error.to_string()),
     }
 }
 
@@ -248,19 +248,4 @@ fn skip(reason: &str) -> HookCheckResult {
 
 fn success() -> HookCheckResult {
     HookCheckResult::pass("[test-checker] Success: No problematic tests found\n")
-}
-
-fn result_json(result: &HookCheckResult) -> String {
-    match serde_json::to_string(result) {
-        Ok(json) => json,
-        Err(error) => fallback_json(&error.to_string()),
-    }
-}
-
-fn fallback_json(error: &str) -> String {
-    serde_json::json!({
-        "exitCode": 1,
-        "message": format!("serialization failed: {error}"),
-    })
-    .to_string()
 }
