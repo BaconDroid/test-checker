@@ -239,6 +239,11 @@ fn harness_result(
 ) -> HookCheckResult {
     let mut findings = Vec::new();
     for (line_number, text) in raw_added_lines(hook_input) {
+        // A gate marker inside a comment (e.g. a workflow's `# … || true` note) is not a real
+        // weakening; comment lines are invisible to the line rules by design.
+        if rules::is_comment_line(&text) {
+            continue;
+        }
         let line = AddedLine {
             line_number,
             text: &text,

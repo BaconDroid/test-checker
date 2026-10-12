@@ -319,3 +319,15 @@ fn check_hook_input_given_harness_without_marker_returns_success() {
     // then
     assert_eq!(result.exit_code, 0);
 }
+
+#[test]
+fn check_hook_input_given_harness_comment_with_gate_marker_is_ignored() {
+    // given: a comment in a workflow mentions `|| true`, not a real weakening
+    let input = r##"{"tool_name":"Write","tool_input":{"file_path":".github/workflows/ci.yml","content":"# run tests with: cargo test || true\n"}}"##;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then
+    assert_eq!(result.exit_code, 0);
+}
