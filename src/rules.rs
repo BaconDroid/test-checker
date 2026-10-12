@@ -175,7 +175,15 @@ const ASSERTION_EXISTS_EXTRAS: &[&str] = &[
 ];
 
 /// Markers that indicate a body contains nested test definitions (so it is a suite, not a leaf test).
-const NESTED_TEST_MARKERS: &[&str] = &["it(", "test(", "describe(", "context(", "fit(", "xit("];
+const NESTED_TEST_MARKERS: &[&str] = &[
+    "it(",
+    "test(",
+    "describe(",
+    "suite(",
+    "context(",
+    "fit(",
+    "xit(",
+];
 
 /// Config / CI markers that weaken or bypass a test gate.
 const GATE_WEAKENING_MARKERS: &[&str] = &[

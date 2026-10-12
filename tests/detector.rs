@@ -444,6 +444,22 @@ fn detect_given_code_after_block_comment_closer_is_kept() {
 }
 
 #[test]
+fn detect_given_standalone_suite_skip_reports_skip_added() {
+    // given: a top-level mocha-legacy `suite.skip(...)` is captured and reported
+    let detector = TestDetector::new();
+    let source = "suite.skip('a', () => {\n  expect(add(1, 2)).toBe(3);\n});\n";
+
+    // when
+    let findings = detector.detect(source, "tests/app.test.js", true, true);
+
+    // then
+    assert!(
+        findings.iter().any(|finding| finding.rule == "skip-added"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
 fn pipeline_coverage_given_every_language_parses_and_clean_fixtures_report_nothing() {
     // given
     let detector = TestDetector::new();

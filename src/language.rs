@@ -64,6 +64,7 @@ pub(crate) fn is_test_callee(callee: &str) -> bool {
         callee,
         "it" | "test"
             | "describe"
+            | "suite"
             | "specify"
             | "context"
             | "scenario"
