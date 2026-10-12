@@ -1,3 +1,4 @@
+use crate::engine;
 use crate::models::Finding;
 
 const BDD_KEYWORDS: &[&str] = &[
@@ -41,7 +42,8 @@ pub struct BddFilter;
 impl BddFilter {
     #[must_use]
     pub fn should_skip(&self, finding: &Finding) -> bool {
-        let normalized = strip_one_prefix(finding.text.trim(), &["#", "//", "--", "/*", "*"]);
+        let normalized =
+            engine::strip_one_prefix(finding.text.trim(), &["#", "//", "--", "/*", "*"]);
         BDD_KEYWORDS
             .iter()
             .any(|keyword| normalized.eq_ignore_ascii_case(keyword))
@@ -54,13 +56,14 @@ pub struct DirectiveFilter;
 impl DirectiveFilter {
     #[must_use]
     pub fn should_skip(&self, finding: &Finding) -> bool {
-        let mut normalized = strip_one_prefix(finding.text.trim(), &["#", "//", "/*", "--", "*"]);
+        let mut normalized =
+            engine::strip_one_prefix(finding.text.trim(), &["#", "//", "/*", "--", "*"]);
         if let Some(rest) = normalized.strip_prefix('@') {
             normalized = rest.trim();
         }
         DIRECTIVE_PREFIXES
             .iter()
-            .any(|directive| starts_with_ignore_ascii_case(normalized, directive))
+            .any(|directive| engine::starts_with_ignore_ascii_case(normalized, directive))
     }
 }
 
@@ -118,39 +121,39 @@ pub fn apply_filters(findings: &[Finding]) -> Vec<Finding> {
 #[must_use]
 pub fn is_agent_memo_phrase(text: &str) -> bool {
     let text = text.trim();
-    let starts_like_memo = match first_ascii_lowercase_byte(text) {
-        Some(b'a') => starts_with_ignore_ascii_case(text, "after this"),
-        Some(b'b') => starts_with_ignore_ascii_case(text, "before this"),
+    let starts_like_memo = match engine::first_ascii_lowercase_byte(text) {
+        Some(b'a') => engine::starts_with_ignore_ascii_case(text, "after this"),
+        Some(b'b') => engine::starts_with_ignore_ascii_case(text, "before this"),
         Some(b'c') => {
-            starts_with_word_pair(text, "changed", &["from", "to"])
-                || starts_with_word_pair(text, "change", &["from", "to"])
-                || starts_with_word_pair(text, "converted", &["from", "to"])
-                || starts_with_word_pair(text, "convert", &["from", "to"])
+            engine::starts_with_word_pair(text, "changed", &["from", "to"])
+                || engine::starts_with_word_pair(text, "change", &["from", "to"])
+                || engine::starts_with_word_pair(text, "converted", &["from", "to"])
+                || engine::starts_with_word_pair(text, "convert", &["from", "to"])
         }
-        Some(b'h') => starts_with_ignore_ascii_case(text, "here we"),
-        Some(b'i') => starts_with_word_pair(text, "implementation", &["of", "note"]),
+        Some(b'h') => engine::starts_with_ignore_ascii_case(text, "here we"),
+        Some(b'i') => engine::starts_with_word_pair(text, "implementation", &["of", "note"]),
         Some(b'm') => {
-            starts_with_word_pair(text, "modified", &["from", "to"])
-                || starts_with_word_pair(text, "modify", &["from", "to"])
-                || starts_with_word_pair(text, "moved", &["from", "to"])
-                || starts_with_word_pair(text, "move", &["from", "to"])
-                || starts_with_word_pair(text, "migrated", &["from", "to"])
-                || starts_with_word_pair(text, "migrate", &["from", "to"])
+            engine::starts_with_word_pair(text, "modified", &["from", "to"])
+                || engine::starts_with_word_pair(text, "modify", &["from", "to"])
+                || engine::starts_with_word_pair(text, "moved", &["from", "to"])
+                || engine::starts_with_word_pair(text, "move", &["from", "to"])
+                || engine::starts_with_word_pair(text, "migrated", &["from", "to"])
+                || engine::starts_with_word_pair(text, "migrate", &["from", "to"])
         }
         Some(b'n') => {
-            starts_with_word_pair(text, "now", &["we", "this", "it"])
-                || starts_with_ignore_ascii_case(text, "note:")
+            engine::starts_with_word_pair(text, "now", &["we", "this", "it"])
+                || engine::starts_with_ignore_ascii_case(text, "note:")
         }
-        Some(b'p') => starts_with_ignore_ascii_case(text, "previously"),
+        Some(b'p') => engine::starts_with_ignore_ascii_case(text, "previously"),
         Some(b'r') => {
-            starts_with_word_pair(text, "renamed", &["from", "to"])
-                || starts_with_word_pair(text, "rename", &["from", "to"])
+            engine::starts_with_word_pair(text, "renamed", &["from", "to"])
+                || engine::starts_with_word_pair(text, "rename", &["from", "to"])
         }
         Some(b's') => {
-            starts_with_word_pair(text, "switched", &["from", "to"])
-                || starts_with_word_pair(text, "switch", &["from", "to"])
+            engine::starts_with_word_pair(text, "switched", &["from", "to"])
+                || engine::starts_with_word_pair(text, "switch", &["from", "to"])
         }
-        Some(b't') => starts_with_word_pair(
+        Some(b't') => engine::starts_with_word_pair(
             text,
             "this",
             &[
@@ -167,61 +170,11 @@ pub fn is_agent_memo_phrase(text: &str) -> bool {
             ],
         ),
         Some(b'u') => {
-            starts_with_word_pair(text, "updated", &["from", "to"])
-                || starts_with_word_pair(text, "update", &["from", "to"])
+            engine::starts_with_word_pair(text, "updated", &["from", "to"])
+                || engine::starts_with_word_pair(text, "update", &["from", "to"])
         }
-        Some(b'w') => starts_with_word_pair(text, "was", &["changed"]),
+        Some(b'w') => engine::starts_with_word_pair(text, "was", &["changed"]),
         _ => false,
     };
-    starts_like_memo || has_ascii_arrow(text)
-}
-
-fn strip_one_prefix<'a>(text: &'a str, prefixes: &[&str]) -> &'a str {
-    let mut normalized = text.trim();
-    for prefix in prefixes {
-        if let Some(rest) = normalized.strip_prefix(prefix) {
-            normalized = rest.trim();
-            break;
-        }
-    }
-    normalized
-}
-
-fn first_ascii_lowercase_byte(text: &str) -> Option<u8> {
-    text.as_bytes().first().map(u8::to_ascii_lowercase)
-}
-
-fn starts_with_word_pair(text: &str, first: &str, seconds: &[&str]) -> bool {
-    let Some(rest) = strip_prefix_ignore_ascii_case(text, first) else {
-        return false;
-    };
-    let rest = rest.trim_start();
-    seconds
-        .iter()
-        .any(|second| starts_with_ignore_ascii_case(rest, second))
-}
-
-fn has_ascii_arrow(text: &str) -> bool {
-    let Some((left, right)) = text.split_once("->") else {
-        return false;
-    };
-    let left = left.trim();
-    let right = right.trim();
-    !left.is_empty()
-        && !right.is_empty()
-        && left.bytes().all(|byte| byte.is_ascii_alphabetic())
-        && right
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_alphabetic())
-}
-
-fn strip_prefix_ignore_ascii_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
-    starts_with_ignore_ascii_case(text, prefix).then(|| &text[prefix.len()..])
-}
-
-fn starts_with_ignore_ascii_case(text: &str, prefix: &str) -> bool {
-    text.as_bytes()
-        .get(..prefix.len())
-        .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+    starts_like_memo || engine::has_ascii_arrow(text)
 }
