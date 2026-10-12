@@ -62,3 +62,10 @@ compile that query and capture a body. Only languages with a framework produce b
 drift check, `vectors.json` is the shared hook-contract corpus, and `tests/parity.rs` runs it. CI
 runs `python3 parity/check.py` (the `parity` job). When a shared file changes, change the sibling in
 the same wave.
+
+## Related projects
+See `docs/related-projects.md`. Base/upstream: [`BaconDroid/comment-checker`](https://github.com/BaconDroid/comment-checker)
+(shared engine + scaffolding) and its upstream [`code-yeongyu/go-claude-code-comment-checker`](https://github.com/code-yeongyu/go-claude-code-comment-checker).
+An independent Rust implementation, [`systemfsoftware/comment-checker`](https://github.com/systemfsoftware/comment-checker),
+is tracked there for evaluated ideas (F1 corpus, mutation gate, fragment-unreliability, justification
+laundering, license-header/generated-file justification, setup doctor).
