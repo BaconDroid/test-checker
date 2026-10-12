@@ -88,14 +88,13 @@ impl SuppressionFilter {
 
     #[must_use]
     pub fn is_file_suppressed(&self, content: &str) -> bool {
-        content.lines().any(is_line_suppressed)
+        engine::is_file_suppressed(content, SUPPRESSION_MARKER)
     }
 }
 
 #[must_use]
 pub fn is_line_suppressed(text: &str) -> bool {
-    let lowered = text.to_lowercase();
-    lowered.contains(SUPPRESSION_MARKER)
+    engine::is_line_suppressed(text, SUPPRESSION_MARKER)
 }
 
 #[must_use]
