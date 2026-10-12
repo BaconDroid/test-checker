@@ -135,6 +135,51 @@ const ASSERTION_MARKERS: &[&str] = &[
     "Assert.Equal(",
 ];
 
+/// Extra markers that count as "this body asserts", for the `no-assertion` check only.
+const ASSERTION_EXISTS_EXTRAS: &[&str] = &[
+    "Assert.",
+    "XCTAssert",
+    "t.Error",
+    "t.Fatal",
+    "require.",
+    "verify(",
+    "check(",
+];
+
+/// Markers that indicate a body contains nested test definitions (so it is a suite, not a leaf test).
+const NESTED_TEST_MARKERS: &[&str] = &["it(", "test(", "describe(", "context(", "fit(", "xit("];
+
+/// Jest/Vitest matcher markers that make an `expect(...)` a complete assertion.
+const INCOMPLETE_ASSERTION_MATCHERS: &[&str] = &[
+    ".toBe(",
+    ".toEqual(",
+    ".toStrictEqual(",
+    ".toMatchSnapshot(",
+    ".toMatchInlineSnapshot(",
+    ".toMatchFileSnapshot(",
+    ".toContain(",
+    ".toThrow",
+    ".toHaveLength(",
+    ".toHaveProperty(",
+    ".toHaveBeen",
+    ".toBeTruthy(",
+    ".toBeFalsy(",
+    ".toBeDefined(",
+    ".toBeNull(",
+    ".toBeUndefined(",
+    ".toBeGreaterThan",
+    ".toBeLessThan",
+    ".toBeInstanceOf",
+    ".toMatchObject(",
+    ".toMatch(",
+    ".toReturn",
+    ".toHaveReturned",
+    ".resolves",
+    ".rejects",
+    ".anything(",
+    ".not.to",
+];
+
 /// A rule that fires when an added line contains any of its markers.
 struct MarkerRule {
     id: &'static str,
@@ -290,7 +335,80 @@ pub fn classify_added_line(file_path: &str, added: &[AddedLine<'_>], index: usiz
     if let Some(finding) = classify_agent_memo(file_path, &line, text) {
         findings.push(finding);
     }
+    if let Some(finding) = classify_incomplete_assertion(file_path, &line, text) {
+        findings.push(finding);
+    }
+    if let Some(finding) = classify_unawaited_assertion(file_path, &line, text) {
+        findings.push(finding);
+    }
+    if let Some(finding) = classify_broad_exception(file_path, &line, text) {
+        findings.push(finding);
+    }
     findings
+}
+
+fn classify_incomplete_assertion(
+    file_path: &str,
+    line: &AddedLine<'_>,
+    text: &str,
+) -> Option<Finding> {
+    if !text.contains("expect(") {
+        return None;
+    }
+    if INCOMPLETE_ASSERTION_MATCHERS
+        .iter()
+        .any(|matcher| text.contains(matcher))
+    {
+        return None;
+    }
+    Some(finish(
+        "incomplete-assertion",
+        Confidence::High,
+        "An expect(...) has no matcher, so the assertion never runs.",
+        line,
+        file_path,
+    ))
+}
+
+fn classify_unawaited_assertion(
+    file_path: &str,
+    line: &AddedLine<'_>,
+    text: &str,
+) -> Option<Finding> {
+    if !(text.contains(".resolves.") || text.contains(".rejects.")) {
+        return None;
+    }
+    let trimmed = text.trim_start();
+    if trimmed.starts_with("await ")
+        || trimmed.starts_with("return ")
+        || trimmed.contains("return await")
+    {
+        return None;
+    }
+    Some(finish(
+        "unawaited-assertion",
+        Confidence::High,
+        "A promise assertion is not awaited or returned, so it never blocks.",
+        line,
+        file_path,
+    ))
+}
+
+fn classify_broad_exception(file_path: &str, line: &AddedLine<'_>, text: &str) -> Option<Finding> {
+    let broad = (text.contains("raises(Exception") && !text.contains("match="))
+        || text.contains("raises(BaseException")
+        || text.contains("assertRaises(Exception")
+        || text.contains("assertThrows(Exception.class");
+    let should_panic = text.contains("#[should_panic") && !text.contains("expected");
+    (broad || should_panic).then(|| {
+        finish(
+            "broad-exception",
+            Confidence::Medium,
+            "The expected exception is too broad; the test can pass for the wrong reason.",
+            line,
+            file_path,
+        )
+    })
 }
 
 fn classify_assertion(file_path: &str, line: &AddedLine<'_>, text: &str) -> Option<Finding> {
@@ -452,6 +570,22 @@ pub fn classify_test_body(
             "over-mocking",
             Confidence::Medium,
             "Mock setup outnumbers the assertions; the test may be asserting on a mock.",
+            body_start,
+            file_path,
+            meaningful.first().copied().unwrap_or(""),
+        ));
+    }
+    let has_assertion = meaningful.iter().any(|line| {
+        has_marker(line, ASSERTION_MARKERS) || has_marker(line, ASSERTION_EXISTS_EXTRAS)
+    });
+    let has_nested_test = meaningful
+        .iter()
+        .any(|line| has_marker(line, NESTED_TEST_MARKERS));
+    if !has_assertion && !has_nested_test {
+        findings.push(Finding::new(
+            "no-assertion",
+            Confidence::Medium,
+            "The test has no assertion and may never fail.",
             body_start,
             file_path,
             meaningful.first().copied().unwrap_or(""),
@@ -801,7 +935,7 @@ fn strip_comment_markers(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        AddedLine, assertion_operands, classify_added_line, diff_findings,
+        AddedLine, assertion_operands, classify_added_line, classify_test_body, diff_findings,
         looks_like_commented_out_test,
     };
 
@@ -1050,6 +1184,154 @@ mod tests {
             !findings
                 .iter()
                 .any(|finding| finding.rule == "agent-memo-test")
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_bare_expect_reports_incomplete_assertion() {
+        // given
+        let added = lines(&["    expect(value);"]);
+
+        // when
+        let findings = classify_added_line("tests/app.test.js", &added, 0);
+
+        // then
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "incomplete-assertion")
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_complete_expect_reports_nothing() {
+        // given
+        let added = lines(&["    expect(value).toBe(3);"]);
+
+        // when
+        let findings = classify_added_line("tests/app.test.js", &added, 0);
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "incomplete-assertion")
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_unawaited_resolves_reports_unawaited_assertion() {
+        // given
+        let added = lines(&["    expect(promise).resolves.toBe(1);"]);
+
+        // when
+        let findings = classify_added_line("tests/app.test.js", &added, 0);
+
+        // then
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "unawaited-assertion")
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_awaited_resolves_reports_nothing() {
+        // given
+        let added = lines(&["    await expect(promise).resolves.toBe(1);"]);
+
+        // when
+        let findings = classify_added_line("tests/app.test.js", &added, 0);
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "unawaited-assertion")
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_broad_exception_reports_broad_exception() {
+        // given
+        let added = lines(&["    with pytest.raises(Exception):"]);
+
+        // when
+        let findings = classify_added_line("tests/test_app.py", &added, 0);
+
+        // then
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "broad-exception")
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_specific_exception_reports_nothing() {
+        // given
+        let added = lines(&["    with pytest.raises(ValueError):"]);
+
+        // when
+        let findings = classify_added_line("tests/test_app.py", &added, 0);
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "broad-exception")
+        );
+    }
+
+    #[test]
+    fn classify_test_body_given_assertionless_body_reports_no_assertion() {
+        // given
+        let body = lines(&["def test_a():", "    do_work()"]);
+
+        // when
+        let findings = classify_test_body("tests/test_app.py", 1, &body);
+
+        // then
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "no-assertion")
+        );
+    }
+
+    #[test]
+    fn classify_test_body_given_body_with_assertion_reports_no_assertion_nothing() {
+        // given
+        let body = lines(&["def test_a():", "    assert do_work() == 1"]);
+
+        // when
+        let findings = classify_test_body("tests/test_app.py", 1, &body);
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "no-assertion")
+        );
+    }
+
+    #[test]
+    fn classify_test_body_given_nested_suite_reports_no_assertion_nothing() {
+        // given
+        let body = lines(&[
+            "describe('x', () => {",
+            "  it('y', () => { expect(1).toBe(1); });",
+            "});",
+        ]);
+
+        // when
+        let findings = classify_test_body("tests/app.test.js", 1, &body);
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "no-assertion")
         );
     }
 }

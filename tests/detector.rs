@@ -369,3 +369,60 @@ fn pipeline_coverage_given_non_framework_languages_capture_no_test_bodies() {
     // then
     assert!(failures.is_empty(), "coverage failures: {failures:#?}");
 }
+
+#[test]
+fn detect_edit_given_deleted_test_reports_test_removed() {
+    // given
+    let detector = TestDetector::new();
+    let old = "def test_a():\n    assert one() == 1\ndef test_b():\n    assert two() == 2\n";
+    let new = "def test_a():\n    assert one() == 1\n";
+
+    // when
+    let findings = detector.detect_edit(old, new, "tests/test_app.py", true, true);
+
+    // then
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "test-removed"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_edit_given_renamed_test_does_not_report_test_removed() {
+    // given: same body, different name
+    let detector = TestDetector::new();
+    let old = "def test_a():\n    assert one() == 1\n";
+    let new = "def test_b():\n    assert one() == 1\n";
+
+    // when
+    let findings = detector.detect_edit(old, new, "tests/test_app.py", true, true);
+
+    // then
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "test-removed"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_edit_given_edited_test_does_not_report_test_removed() {
+    // given: same name, changed body
+    let detector = TestDetector::new();
+    let old = "def test_a():\n    assert one() == 1\n";
+    let new = "def test_a():\n    assert one() == 2\n";
+
+    // when
+    let findings = detector.detect_edit(old, new, "tests/test_app.py", true, true);
+
+    // then
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "test-removed"),
+        "findings: {findings:?}"
+    );
+}

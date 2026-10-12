@@ -19,11 +19,12 @@ struct Runtime {
 static RUNTIMES: LazyLock<Mutex<HashMap<String, Arc<Runtime>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Body {
     start_byte: usize,
     end_byte: usize,
     start_row: usize,
+    name: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -126,10 +127,63 @@ impl TestDetector {
                     &bodies,
                     &added,
                 ));
+                if !old_string.is_empty() {
+                    if let Some(old_tree) = parse_with_runtime(&runtime, old_string.as_bytes()) {
+                        let old_bodies =
+                            capture_bodies(&runtime, query, &old_tree, old_string.as_bytes());
+                        findings.extend(removed_test_findings(
+                            &runtime.name,
+                            file_path,
+                            old_string,
+                            &old_bodies,
+                            new_string,
+                            &bodies,
+                        ));
+                    }
+                }
             }
         }
         dedupe(findings)
     }
+}
+
+/// A test present before the edit but absent after it (tolerating rename by body signature).
+fn removed_test_findings(
+    language: &str,
+    file_path: &str,
+    old_content: &str,
+    old_bodies: &[Body],
+    new_content: &str,
+    new_bodies: &[Body],
+) -> Vec<Finding> {
+    let new_names: HashSet<&str> = new_bodies
+        .iter()
+        .filter_map(|body| body.name.as_deref())
+        .collect();
+    let new_signatures: HashSet<String> = new_bodies
+        .iter()
+        .map(|body| body_signature(&body_added_lines(new_content, body, language)))
+        .collect();
+    let mut findings = Vec::new();
+    for old_body in old_bodies {
+        let signature = body_signature(&body_added_lines(old_content, old_body, language));
+        let name_matches = old_body
+            .name
+            .as_deref()
+            .is_some_and(|name| new_names.contains(name));
+        let signature_matches = !signature.is_empty() && new_signatures.contains(&signature);
+        if !name_matches && !signature_matches {
+            findings.push(Finding::new(
+                "test-removed",
+                Confidence::High,
+                "A test present before this edit is gone; deleting a test is a strong tampering signal.",
+                1,
+                file_path,
+                old_body.name.as_deref().unwrap_or(""),
+            ));
+        }
+    }
+    findings
 }
 
 fn runtime_by_name(name: &str) -> Option<Arc<Runtime>> {
@@ -270,6 +324,7 @@ fn capture_bodies(
                     start_byte,
                     end_byte: node.end_byte(),
                     start_row,
+                    name: identifier,
                 });
             }
         }
