@@ -3,14 +3,17 @@ use crate::models::Finding;
 
 const SUPPRESSION_MARKER: &str = "test-checker: allow";
 
+/// Comment prefixes stripped before BDD/directive matching. The five are pairwise non-prefixing,
+/// so a single shared order serves both filters.
+const COMMENT_PREFIXES: &[&str] = &["#", "//", "/*", "--", "*"];
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BddFilter;
 
 impl BddFilter {
     #[must_use]
     pub fn should_skip(&self, finding: &Finding) -> bool {
-        let normalized =
-            engine::strip_one_prefix(finding.text.trim(), &["#", "//", "--", "/*", "*"]);
+        let normalized = engine::strip_one_prefix(finding.text.trim(), COMMENT_PREFIXES);
         engine::BDD_KEYWORDS
             .iter()
             .any(|keyword| normalized.eq_ignore_ascii_case(keyword))
@@ -23,8 +26,7 @@ pub struct DirectiveFilter;
 impl DirectiveFilter {
     #[must_use]
     pub fn should_skip(&self, finding: &Finding) -> bool {
-        let mut normalized =
-            engine::strip_one_prefix(finding.text.trim(), &["#", "//", "/*", "--", "*"]);
+        let mut normalized = engine::strip_one_prefix(finding.text.trim(), COMMENT_PREFIXES);
         if let Some(rest) = normalized.strip_prefix('@') {
             normalized = rest.trim();
         }

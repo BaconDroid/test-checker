@@ -8,8 +8,8 @@ use crate::models::{Confidence, Edit, Finding};
 use crate::output::format_hook_message;
 use crate::rules::{self, AddedLine};
 
-pub const EXIT_PASS: i32 = 0;
-pub const EXIT_BLOCK: i32 = 2;
+const EXIT_PASS: i32 = 0;
+const EXIT_BLOCK: i32 = 2;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]

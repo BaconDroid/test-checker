@@ -131,7 +131,7 @@ impl TestDetector {
             findings.extend(rules::diff_findings(old_string, new_string, file_path));
             if let Some(query) = &runtime.test_query {
                 let bodies = capture_bodies(&runtime, query, &tree, source);
-                let added = added_lines(old_string, new_string);
+                let added = engine::added_lines(old_string, new_string);
                 findings.extend(analyze_edited_bodies(
                     &runtime.name,
                     file_path,
@@ -665,10 +665,6 @@ fn body_signature(lines: &[AddedLine<'_>]) -> String {
 
 /// New (added) line indices in `new_content`, computed with an LCS over trimmed lines so a line
 /// whose text happens to appear elsewhere in the old content is not dropped.
-fn added_lines(old_content: &str, new_content: &str) -> HashSet<usize> {
-    engine::added_lines(old_content, new_content)
-}
-
 fn line_comment_token(language: &str) -> Option<&'static str> {
     match language {
         "python" | "ruby" | "bash" | "dockerfile" | "elixir" | "hcl" | "toml" | "yaml" | "cue"

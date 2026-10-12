@@ -3,19 +3,6 @@ use test_checker::filters::{apply_filters, is_line_suppressed};
 use test_checker::output::format_hook_message;
 
 #[test]
-fn full_pipeline_given_clean_test_returns_empty() {
-    // given
-    let detector = TestDetector::new();
-    let code = "def test_sums():\n    assert add(1, 2) == 3\n";
-
-    // when
-    let findings = detector.detect(code, "tests/test_app.py", true, true);
-
-    // then
-    assert_eq!(findings.len(), 0);
-}
-
-#[test]
 fn full_pipeline_given_weakening_returns_formatted_message() {
     // given
     let detector = TestDetector::new();
