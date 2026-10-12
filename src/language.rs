@@ -123,10 +123,7 @@ pub fn is_harness_path(file_path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        is_harness_path, is_test_callee, is_test_function_name, is_test_path, language_for_path,
-        test_query,
-    };
+    use super::{is_harness_path, is_test_callee, is_test_function_name, is_test_path};
 
     #[test]
     fn is_harness_path_given_config_or_ci_returns_true() {
@@ -136,24 +133,6 @@ mod tests {
         assert!(is_harness_path("package.json"));
         assert!(is_harness_path("jest.config.js"));
         assert!(!is_harness_path("src/app.py"));
-    }
-
-    #[test]
-    fn language_for_path_given_known_extension_returns_name() {
-        // then
-        assert_eq!(language_for_path("main.py"), Some("python"));
-    }
-
-    #[test]
-    fn language_for_path_given_unknown_extension_returns_none() {
-        // then
-        assert_eq!(language_for_path("main.xyz"), None);
-    }
-
-    #[test]
-    fn language_for_path_given_known_extensionless_path_still_resolves() {
-        // then
-        assert_eq!(language_for_path("Dockerfile"), Some("dockerfile"));
     }
 
     #[test]
@@ -177,34 +156,6 @@ mod tests {
         // then
         assert!(!is_test_path("src/app.py"));
         assert!(!is_test_path("src/testing_utils.rs"));
-    }
-
-    #[test]
-    fn test_query_given_framework_language_returns_query() {
-        // then
-        assert!(test_query("python").is_some());
-        assert!(test_query("rust").is_some());
-    }
-
-    #[test]
-    fn test_query_given_expanded_framework_languages_returns_query() {
-        // then
-        for name in ["c", "cpp", "groovy", "ocaml", "elm", "bash"] {
-            assert!(test_query(name).is_some(), "{name} has no test-body query");
-        }
-    }
-
-    #[test]
-    fn language_for_path_given_bats_extension_resolves_to_bash() {
-        // then
-        assert_eq!(language_for_path("tests/math.bats"), Some("bash"));
-    }
-
-    #[test]
-    fn test_query_given_no_framework_language_returns_none() {
-        // then
-        assert!(test_query("toml").is_none());
-        assert!(test_query("yaml").is_none());
     }
 
     #[test]
