@@ -35,7 +35,7 @@ const SKIP_MARKERS: &[&str] = &[
     "markTestSkipped(",
     "XCTSkip(",
     "@tag :skip",
-    "cancel(",
+    "cancel(\"",
     "#[ignore]",
     "#[ignore =",
     "[Ignore]",
@@ -102,7 +102,6 @@ const RETRY_MARKERS: &[&str] = &[
     "@retry",
     "@flaky",
     "@pytest.mark.flaky",
-    "rerun",
     "retries=",
     "retry(",
     "flaky(",
@@ -181,6 +180,8 @@ const GATE_WEAKENING_MARKERS: &[&str] = &[
 /// Jest/Vitest matcher markers that make an `expect(...)` a complete assertion.
 const INCOMPLETE_ASSERTION_MATCHERS: &[&str] = &[
     ".toBe(",
+    ".toBeCloseTo(",
+    ".toBeTypeOf(",
     ".toEqual(",
     ".toStrictEqual(",
     ".toMatchSnapshot(",
@@ -641,7 +642,7 @@ fn has_ternary(text: &str) -> bool {
             continue;
         }
         match character {
-            '"' | '\'' => {
+            '"' | '\'' | '`' => {
                 in_string = true;
                 quote = character;
             }
@@ -855,7 +856,7 @@ fn classify_swallowed_error(
     let swallows = if text.contains("except") {
         let tail = text.split("except").nth(1).unwrap_or("");
         has_word(tail, "pass") || next == Some("pass")
-    } else if text.contains("catch") {
+    } else if has_word(text, "catch") {
         let brace_empty = text.contains("{}") || text.contains("{ }");
         brace_empty || next == Some("}")
     } else {
@@ -880,10 +881,7 @@ fn classify_conditional_assertion(
 ) -> Option<Finding> {
     let next = added.get(index + 1).map(|line| line.text.trim());
     let assertion_here = has_marker(text, ASSERTION_MARKERS);
-    let conditional_here = text.starts_with("if ")
-        || text.starts_with("if(")
-        || text.starts_with("if (")
-        || has_ternary(text);
+    let conditional_here = text.starts_with("if ") || text.starts_with("if(") || has_ternary(text);
     let triggers = conditional_here
         && (assertion_here || next.is_some_and(|line| has_marker(line, ASSERTION_MARKERS)));
     triggers.then(|| {
@@ -902,7 +900,7 @@ fn classify_mock_of_sut(file_path: &str, line: &AddedLine<'_>, text: &str) -> Op
     if stem.is_empty() || !has_marker(text, MOCK_MARKERS) {
         return None;
     }
-    text.contains(&stem).then(|| {
+    has_word(text, &stem).then(|| {
         finish(
             "mock-of-sut",
             Confidence::Medium,
@@ -948,16 +946,16 @@ pub fn classify_test_body(
         .map(|line| line.text.trim())
         .filter(|line| !line.is_empty())
         .collect();
+    let anchor = AddedLine {
+        line_number: body_start,
+        text: meaningful.first().copied().unwrap_or(""),
+    };
     if meaningful.is_empty() {
-        let line = AddedLine {
-            line_number: body_start,
-            text: "",
-        };
         findings.push(finish(
             "gutted-test",
             Confidence::High,
             "The test body is empty.",
-            &line,
+            &anchor,
             file_path,
         ));
         return findings;
@@ -972,13 +970,12 @@ pub fn classify_test_body(
         .filter(|line| has_marker(line, ASSERTION_MARKERS))
         .count();
     if mock_count >= 2 && mock_count > assertion_count {
-        findings.push(Finding::new(
+        findings.push(finish(
             "over-mocking",
             Confidence::Medium,
             "Mock setup outnumbers the assertions; the test may be asserting on a mock.",
-            body_start,
+            &anchor,
             file_path,
-            meaningful.first().copied().unwrap_or(""),
         ));
     }
     let has_assertion = meaningful.iter().any(|line| {
@@ -988,16 +985,25 @@ pub fn classify_test_body(
         .iter()
         .any(|line| has_marker(line, NESTED_TEST_MARKERS));
     if !has_assertion && !has_nested_test {
-        findings.push(Finding::new(
+        findings.push(finish(
             "no-assertion",
             Confidence::Medium,
             "The test has no assertion and may never fail.",
-            body_start,
+            &anchor,
             file_path,
-            meaningful.first().copied().unwrap_or(""),
         ));
     }
     findings
+}
+
+/// Whether a raw line carries an assertion marker on a code line: a commented-out assertion
+/// (`# assert x == y`) must not count towards `assertion-removed`/`gutted-test`.
+fn is_assertion_code_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let is_comment = ["#", "//", "--", "/*", "*"]
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix));
+    !is_comment && has_marker(line.trim(), ASSERTION_MARKERS)
 }
 
 /// Diff-only findings: newly introduced weakening between an edit's old and new content.
@@ -1009,11 +1015,11 @@ pub fn diff_findings(old_content: &str, new_content: &str, file_path: &str) -> V
 
     let old_assertions = old_lines
         .iter()
-        .filter(|line| has_marker(line.trim(), ASSERTION_MARKERS))
+        .filter(|line| is_assertion_code_line(line))
         .count();
     let new_assertions = new_lines
         .iter()
-        .filter(|line| has_marker(line.trim(), ASSERTION_MARKERS))
+        .filter(|line| is_assertion_code_line(line))
         .count();
     if new_assertions < old_assertions {
         if new_assertions == 0 {
@@ -1114,11 +1120,10 @@ fn quoted_strings(text: &str) -> Vec<String> {
 }
 
 fn test_name_literal(text: &str) -> Option<String> {
-    let marker = ["it(", "test(", "describe(", "specify(", "context("]
+    let index = ["it(", "test(", "describe(", "specify(", "context("]
         .into_iter()
-        .find(|marker| text.contains(*marker))?;
-    let after = &text[text.find(marker)?..];
-    quoted_strings(after).into_iter().next()
+        .find_map(|marker| text.find(marker))?;
+    quoted_strings(&text[index..]).into_iter().next()
 }
 
 fn is_constant_bool_assertion(text: &str) -> bool {
@@ -1251,7 +1256,7 @@ fn split_top_level(inner: &str) -> Vec<String> {
             continue;
         }
         match character {
-            '"' | '\'' => {
+            '"' | '\'' | '`' => {
                 in_string = true;
                 quote = character;
                 current.push(character);
@@ -2066,6 +2071,150 @@ mod tests {
         assert_eq!(
             snapshot.map(|finding| finding.confidence),
             Some(Confidence::Low)
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_tobecloseto_is_a_complete_assertion() {
+        // given: a complete numeric assertion must not read as incomplete
+        let added = lines(&["expect(x).toBeCloseTo(y, 2);"]);
+
+        // when
+        let findings = classify_added_line("tests/app.test.js", &added, 0);
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "incomplete-assertion"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_ternary_inside_template_literal_is_not_conditional() {
+        // given: the `? :` sits inside a template literal, not a runtime guard
+        let added = lines(&["expect(render(`A ${flag ? 'yes' : 'no'}`)).toBe('A yes');"]);
+
+        // when
+        let findings = classify_added_line("tests/app.test.js", &added, 0);
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "conditional-assertion"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_catchhandlers_identifier_is_not_swallowed_error() {
+        // given: an identifier containing "catch" is not a catch clause
+        let added = lines(&["const catchHandlers = {};"]);
+
+        // when
+        let findings = classify_added_line("tests/app.test.js", &added, 0);
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "swallowed-error"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_substring_stem_is_not_mock_of_sut() {
+        // given: stem "lib" must not match the substring "library"
+        let added = lines(&["mock.patch(\"library.Loader\")"]);
+
+        // when
+        let findings = classify_added_line("tests/test_lib.py", &added, 0);
+
+        // then
+        assert!(
+            !findings.iter().any(|finding| finding.rule == "mock-of-sut"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_sut_mock_still_reports_mock_of_sut() {
+        // given: the real system under test, referenced as a whole token
+        let added = lines(&["mock.patch(\"app.Client\")"]);
+
+        // when
+        let findings = classify_added_line("tests/test_app.py", &added, 0);
+
+        // then
+        assert!(
+            findings.iter().any(|finding| finding.rule == "mock-of-sut"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn diff_findings_given_removed_assert_comment_reports_nothing() {
+        // given: the removed line is a commented-out assertion, not a real one
+        let old = "def test_a():\n    assert one() == 1\n    # assert two() == 2\n";
+        let new = "def test_a():\n    assert one() == 1\n";
+
+        // when
+        let findings = diff_findings(old, new, "tests/test_app.py");
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "assertion-removed" || finding.rule == "gutted-test"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_method_cancel_is_not_skip_added() {
+        // given: a method call ending in `.cancel()`, not the ScalaTest skip idiom
+        let added = lines(&["request.cancel();"]);
+
+        // when
+        let findings = classify_added_line("tests/app.test.js", &added, 0);
+
+        // then
+        assert!(
+            !findings.iter().any(|finding| finding.rule == "skip-added"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_scala_cancel_still_reports_skip_added() {
+        // given: the idiomatic ScalaTest cancellation
+        let added = lines(&["cancel(\"later\")"]);
+
+        // when
+        let findings = classify_added_line("src/test/scala/AppSpec.scala", &added, 0);
+
+        // then
+        assert!(
+            findings.iter().any(|finding| finding.rule == "skip-added"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_rerunning_identifier_is_not_retry_added() {
+        // given: an identifier containing "rerun" is not a retry marker
+        let added = lines(&["rerunning_service();"]);
+
+        // when
+        let findings = classify_added_line("tests/app.test.js", &added, 0);
+
+        // then
+        assert!(
+            !findings.iter().any(|finding| finding.rule == "retry-added"),
+            "{findings:?}"
         );
     }
 }

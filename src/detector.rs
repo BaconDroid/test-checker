@@ -100,12 +100,18 @@ impl TestDetector {
         let Some(tree) = parse_with_runtime(&runtime, source) else {
             return Vec::new();
         };
+        // Parse the old fragment once: it feeds both comment capture and old-body capture.
+        let old_tree = if old_string.is_empty() {
+            None
+        } else {
+            parse_with_runtime(&runtime, old_string.as_bytes())
+        };
 
         let mut findings = Vec::new();
         if include_commented_out_tests {
             let mut old_comments = Vec::new();
-            if let Some(old_tree) = parse_with_runtime(&runtime, old_string.as_bytes()) {
-                collect_comments(&runtime, &old_tree, old_string, 0, &mut old_comments);
+            if let Some(old_tree) = &old_tree {
+                collect_comments(&runtime, old_tree, old_string, 0, &mut old_comments);
             }
             let old_texts: HashSet<String> = old_comments
                 .iter()
@@ -128,19 +134,17 @@ impl TestDetector {
                     &bodies,
                     &added,
                 ));
-                if !old_string.is_empty() {
-                    if let Some(old_tree) = parse_with_runtime(&runtime, old_string.as_bytes()) {
-                        let old_bodies =
-                            capture_bodies(&runtime, query, &old_tree, old_string.as_bytes());
-                        findings.extend(removed_test_findings(
-                            &runtime.name,
-                            file_path,
-                            old_string,
-                            &old_bodies,
-                            new_string,
-                            &bodies,
-                        ));
-                    }
+                if let Some(old_tree) = &old_tree {
+                    let old_bodies =
+                        capture_bodies(&runtime, query, old_tree, old_string.as_bytes());
+                    findings.extend(removed_test_findings(
+                        &runtime.name,
+                        file_path,
+                        old_string,
+                        &old_bodies,
+                        new_string,
+                        &bodies,
+                    ));
                 }
             }
         }
@@ -666,7 +670,7 @@ fn strip_line_comment<'a>(line: &'a str, language: &str) -> &'a str {
             }
             continue;
         }
-        if character == '"' || character == '\'' {
+        if character == '"' || character == '\'' || character == '`' {
             in_string = true;
             quote = character;
             continue;
