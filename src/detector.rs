@@ -601,7 +601,12 @@ fn body_added_lines<'a>(content: &'a str, body: &Body, language: &str) -> Vec<Ad
         .enumerate()
         .map(|(index, line)| AddedLine {
             line_number: body.start_row + 1 + index,
-            text: strip_line_comment(line, language),
+            // Comment lines (line- and block-style) are invisible to the line rules.
+            text: if rules::is_comment_line(line) {
+                ""
+            } else {
+                strip_line_comment(line, language)
+            },
         })
         .collect()
 }
