@@ -110,7 +110,7 @@ impl TestDetector {
             }
             let old_texts: HashSet<String> = old_comments
                 .iter()
-                .map(|(_, text)| normalized_comment(text))
+                .map(|(_, text)| text.trim().to_lowercase())
                 .collect();
             let mut new_comments = Vec::new();
             collect_comments(&runtime, &tree, new_string, 0, &mut new_comments);
@@ -221,7 +221,7 @@ fn commented_out_findings(
         .iter()
         .filter(|(_, text)| {
             rules::looks_like_commented_out_test(text)
-                && !old_texts.contains(&normalized_comment(text))
+                && !old_texts.contains(&text.trim().to_lowercase())
         })
         .map(|(line, text)| {
             Finding::new(
@@ -234,10 +234,6 @@ fn commented_out_findings(
             )
         })
         .collect()
-}
-
-fn normalized_comment(text: &str) -> String {
-    text.trim().to_lowercase()
 }
 
 /// Nested test bodies (a `describe` containing an `it`) can classify the same line twice.
@@ -391,7 +387,7 @@ fn analyze_new_bodies(
     let mut findings = Vec::new();
     let mut seen: HashMap<String, usize> = HashMap::new();
     for body in bodies {
-        let lines = body_added_lines(content, body, None, language);
+        let lines = body_added_lines(content, body, language);
         findings.extend(classify_lines(file_path, &lines));
         findings.extend(rules::classify_test_body(
             file_path,
@@ -419,14 +415,18 @@ fn analyze_edited_bodies(
     let mut findings = Vec::new();
     let mut seen: HashMap<String, usize> = HashMap::new();
     for body in bodies {
-        let added_lines = body_added_lines(content, body, Some(added), language);
-        if added_lines.is_empty() {
+        let full = body_added_lines(content, body, language);
+        let touched: Vec<AddedLine<'_>> = full
+            .iter()
+            .copied()
+            .filter(|line| added.contains(&(line.line_number - 1)))
+            .collect();
+        if touched.is_empty() {
             continue;
         }
-        findings.extend(classify_lines(file_path, &added_lines));
+        findings.extend(classify_lines(file_path, &touched));
         // `duplicate-test` compares the whole body, so adding the same line to two different
         // tests is not mistaken for one test duplicating another.
-        let full = body_added_lines(content, body, None, language);
         push_duplicate(
             &mut findings,
             &mut seen,
@@ -463,18 +463,12 @@ fn push_duplicate(
     }
 }
 
-fn body_added_lines<'a>(
-    content: &'a str,
-    body: &Body,
-    added: Option<&HashSet<usize>>,
-    language: &str,
-) -> Vec<AddedLine<'a>> {
+fn body_added_lines<'a>(content: &'a str, body: &Body, language: &str) -> Vec<AddedLine<'a>> {
     let Some(text) = content.get(body.start_byte..body.end_byte) else {
         return Vec::new();
     };
     text.lines()
         .enumerate()
-        .filter(|(index, _)| added.is_none_or(|set| set.contains(&(body.start_row + index))))
         .map(|(index, line)| AddedLine {
             line_number: body.start_row + 1 + index,
             text: strip_line_comment(line, language),
