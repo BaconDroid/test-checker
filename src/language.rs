@@ -78,11 +78,45 @@ pub fn is_test_path(file_path: &str) -> bool {
         || file.contains("_spec.")
 }
 
+/// Harness/config paths that carry a test gate but are not test files themselves.
+#[must_use]
+pub fn is_harness_path(file_path: &str) -> bool {
+    let normalized = file_path.replace('\\', "/").to_lowercase();
+    let file = normalized.rsplit('/').next().unwrap_or("");
+    normalized.contains(".github/workflows/")
+        || normalized.contains(".gitlab-ci")
+        || matches!(
+            file,
+            "pytest.ini"
+                | "tox.ini"
+                | "setup.cfg"
+                | "pyproject.toml"
+                | "package.json"
+                | "makefile"
+                | "codecov.yml"
+        )
+        || file.starts_with("jest.config")
+        || file.starts_with("vitest.config")
+        || file.starts_with("karma.conf")
+        || file.starts_with(".nycrc")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        is_test_callee, is_test_function_name, is_test_path, language_for_path, test_query,
+        is_harness_path, is_test_callee, is_test_function_name, is_test_path, language_for_path,
+        test_query,
     };
+
+    #[test]
+    fn is_harness_path_given_config_or_ci_returns_true() {
+        // then
+        assert!(is_harness_path("pytest.ini"));
+        assert!(is_harness_path(".github/workflows/ci.yml"));
+        assert!(is_harness_path("package.json"));
+        assert!(is_harness_path("jest.config.js"));
+        assert!(!is_harness_path("src/app.py"));
+    }
 
     #[test]
     fn language_for_path_given_known_extension_returns_name() {

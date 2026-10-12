@@ -268,3 +268,28 @@ fn check_hook_input_given_unsupported_language_fails_open() {
     // then
     assert_eq!(result.exit_code, 0);
 }
+
+#[test]
+fn check_hook_input_given_harness_gate_weakened_exits_two() {
+    // given
+    let input = r#"{"tool_name":"Edit","tool_input":{"file_path":".github/workflows/ci.yml","old_string":"      - run: cargo test\n","new_string":"      - run: cargo test || true\n"}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then
+    assert_eq!(result.exit_code, 2);
+    assert!(result.message.contains("gate-weakened"));
+}
+
+#[test]
+fn check_hook_input_given_harness_without_marker_returns_success() {
+    // given
+    let input = r#"{"tool_name":"Edit","tool_input":{"file_path":".github/workflows/ci.yml","old_string":"      - run: cargo fmt\n","new_string":"      - run: cargo clippy\n"}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then
+    assert_eq!(result.exit_code, 0);
+}

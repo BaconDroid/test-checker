@@ -3,10 +3,10 @@ use serde::{Deserialize, Serialize};
 use crate::detector::TestDetector;
 use crate::engine::{self, null_default};
 use crate::filters::{SuppressionFilter, apply_filters, is_line_suppressed};
-use crate::language::{is_test_path, language_for_path};
+use crate::language::{is_harness_path, is_test_path, language_for_path};
 use crate::models::{Confidence, Edit, Finding};
 use crate::output::format_hook_message;
-use crate::rules;
+use crate::rules::{self, AddedLine};
 
 pub const EXIT_PASS: i32 = 0;
 pub const EXIT_BLOCK: i32 = 2;
@@ -122,42 +122,25 @@ fn evaluate(
     if file_path.is_empty() {
         return skip("No file path provided");
     }
-    if language_for_path(file_path).is_none() {
-        return skip("Non-code file");
-    }
     let is_test = hook_input
         .is_test_file
         .unwrap_or_else(|| is_test_path(file_path));
     if !is_test {
+        if is_harness_path(file_path) {
+            return harness_result(hook_input, file_path, custom_prompt, min_confidence);
+        }
+        if language_for_path(file_path).is_none() {
+            return skip("Non-code file");
+        }
         return skip("Non-test file");
     }
+    if language_for_path(file_path).is_none() {
+        return skip("Non-code file");
+    }
 
-    let suppression = SuppressionFilter;
-    let marker_added = match hook_input.tool_name.as_str() {
-        "Edit" => added_line_has_marker(
-            &hook_input.tool_input.old_string,
-            &hook_input.tool_input.new_string,
-        ),
-        "MultiEdit" => hook_input
-            .tool_input
-            .edits
-            .iter()
-            .any(|edit| added_line_has_marker(&edit.old_string, &edit.new_string)),
-        _ => suppression.is_file_suppressed(get_content_to_check(hook_input)),
-    };
-    if !marker_added {
-        let suppressed = match hook_input.tool_name.as_str() {
-            "Edit" => suppression.is_file_suppressed(&hook_input.tool_input.new_string),
-            "MultiEdit" => hook_input
-                .tool_input
-                .edits
-                .iter()
-                .any(|edit| suppression.is_file_suppressed(&edit.new_string)),
-            _ => suppression.is_file_suppressed(get_content_to_check(hook_input)),
-        };
-        if suppressed {
-            return skip("Suppressed by test-checker: allow");
-        }
+    let marker_added = marker_added_in_change(hook_input);
+    if !marker_added && file_suppressed(hook_input) {
+        return skip("Suppressed by test-checker: allow");
     }
 
     let detector = TestDetector::new();
@@ -243,6 +226,73 @@ fn evaluate(
     HookCheckResult::block(format_hook_message(&filtered, custom_prompt))
 }
 
+/// Score the added lines of a harness/config file (no test-file gate, no tree-sitter needed).
+fn harness_result(
+    hook_input: &HookInput,
+    file_path: &str,
+    custom_prompt: &str,
+    min_confidence: Confidence,
+) -> HookCheckResult {
+    let mut findings = Vec::new();
+    for (line_number, text) in raw_added_lines(hook_input) {
+        let line = AddedLine {
+            line_number,
+            text: &text,
+        };
+        if let Some(finding) = rules::classify_harness_line(file_path, &line) {
+            findings.push(finding);
+        }
+    }
+    if findings.is_empty() {
+        return success();
+    }
+    let filtered: Vec<Finding> = apply_filters(&findings)
+        .into_iter()
+        .filter(|finding| confidence_rank(finding.confidence) >= confidence_rank(min_confidence))
+        .collect();
+    if filtered.is_empty() {
+        return success();
+    }
+    HookCheckResult::block(format_hook_message(&filtered, custom_prompt))
+}
+
+/// Added lines (1-based line number, raw text) for the tool input.
+fn raw_added_lines(hook_input: &HookInput) -> Vec<(usize, String)> {
+    match hook_input.tool_name.as_str() {
+        "Edit" => {
+            let added = engine::added_lines(
+                &hook_input.tool_input.old_string,
+                &hook_input.tool_input.new_string,
+            );
+            hook_input
+                .tool_input
+                .new_string
+                .lines()
+                .enumerate()
+                .filter(|(index, _)| added.contains(index))
+                .map(|(index, line)| (index + 1, line.to_string()))
+                .collect()
+        }
+        "MultiEdit" => {
+            let mut lines = Vec::new();
+            for edit in &hook_input.tool_input.edits {
+                let added = engine::added_lines(&edit.old_string, &edit.new_string);
+                for (index, line) in edit.new_string.lines().enumerate() {
+                    if added.contains(&index) {
+                        lines.push((index + 1, line.to_string()));
+                    }
+                }
+            }
+            lines
+        }
+        _ => get_content_to_check(hook_input)
+            .lines()
+            .enumerate()
+            .map(|(index, line)| (index + 1, line.to_string()))
+            .collect(),
+    }
+}
+
 /// Minimum confidence from `--min-confidence` (default `medium`).
 fn parse_min_confidence(value: Option<&str>) -> Confidence {
     match value.map(str::to_ascii_lowercase).as_deref() {
@@ -293,6 +343,36 @@ fn get_content_to_check(input: &HookInput) -> &str {
         input.tool_input.new_string.as_str()
     } else {
         input.tool_input.content.as_str()
+    }
+}
+
+/// Whether the suppression marker sits on a line the change added (agent self-suppression).
+fn marker_added_in_change(hook_input: &HookInput) -> bool {
+    match hook_input.tool_name.as_str() {
+        "Edit" => added_line_has_marker(
+            &hook_input.tool_input.old_string,
+            &hook_input.tool_input.new_string,
+        ),
+        "MultiEdit" => hook_input
+            .tool_input
+            .edits
+            .iter()
+            .any(|edit| added_line_has_marker(&edit.old_string, &edit.new_string)),
+        _ => SuppressionFilter.is_file_suppressed(get_content_to_check(hook_input)),
+    }
+}
+
+/// Whether the suppression marker is present anywhere in the analyzed text.
+fn file_suppressed(hook_input: &HookInput) -> bool {
+    let suppression = SuppressionFilter;
+    match hook_input.tool_name.as_str() {
+        "Edit" => suppression.is_file_suppressed(&hook_input.tool_input.new_string),
+        "MultiEdit" => hook_input
+            .tool_input
+            .edits
+            .iter()
+            .any(|edit| suppression.is_file_suppressed(&edit.new_string)),
+        _ => suppression.is_file_suppressed(get_content_to_check(hook_input)),
     }
 }
 
