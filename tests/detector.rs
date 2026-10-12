@@ -528,3 +528,41 @@ fn detect_edit_given_edited_test_does_not_report_test_removed() {
         "findings: {findings:?}"
     );
 }
+
+#[test]
+fn detect_given_case_only_literal_difference_does_not_report_duplicate() {
+    // given: two tests whose bodies differ only by a literal's case (a real distinction)
+    let detector = TestDetector::new();
+    let source = "it('upper', () => {\n  expect(x).toBe('A');\n});\nit('lower', () => {\n  expect(x).toBe('a');\n});\n";
+
+    // when
+    let findings = detector.detect(source, "tests/app.test.js", true, true);
+
+    // then
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "duplicate-test"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_edit_given_commented_out_baseline_does_not_weaken_at_medium_or_higher() {
+    // given: the only removed line was a commented-out assertion, which is not a real baseline
+    let detector = TestDetector::new();
+    let old = "it('x', () => {\n  // expect(a).toEqual(3);\n});\n";
+    let new = "it('x', () => {\n  expect(a).toBeTruthy();\n});\n";
+
+    // when
+    let findings = detector.detect_edit(old, new, "tests/app.test.js", true, true);
+
+    // then
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "weakened-assertion"
+                && finding.confidence != Confidence::Low),
+        "findings: {findings:?}"
+    );
+}

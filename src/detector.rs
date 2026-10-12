@@ -45,6 +45,9 @@ impl TestDetector {
         include_commented_out_tests: bool,
         include_body_tests: bool,
     ) -> Vec<Finding> {
+        if !(include_commented_out_tests || include_body_tests) {
+            return Vec::new();
+        }
         let Some(name) = language_for_path(file_path) else {
             return Vec::new();
         };
@@ -90,6 +93,9 @@ impl TestDetector {
         include_commented_out_tests: bool,
         include_body_tests: bool,
     ) -> Vec<Finding> {
+        if !(include_commented_out_tests || include_body_tests) {
+            return Vec::new();
+        }
         let Some(name) = language_for_path(file_path) else {
             return Vec::new();
         };
@@ -306,7 +312,6 @@ fn capture_bodies(
 ) -> Vec<Body> {
     let capture_names = query.capture_names();
     let mut cursor = QueryCursor::new();
-    cursor.set_byte_range(0..source.len());
     let mut matches = cursor.matches(query, tree.root_node(), source);
     matches.advance();
     let mut bodies = Vec::new();
@@ -558,7 +563,7 @@ fn removed_lines<'a>(old_content: &'a str, new_content: &str) -> Vec<&'a str> {
     old_content
         .lines()
         .enumerate()
-        .filter(|(index, _)| removed.contains(index))
+        .filter(|(index, line)| removed.contains(index) && !rules::is_comment_line(line))
         .map(|(_, line)| line.trim())
         .collect()
 }
@@ -622,13 +627,13 @@ fn classify_diff_lines(
 }
 
 fn body_signature(lines: &[AddedLine<'_>]) -> String {
-    // Skip the declaration line so two tests that differ only by name are still duplicates.
+    // Skip the declaration line so two tests that differ only by name are still duplicates; case is
+    // preserved so tests that differ only by a literal's case (a real distinction) are not.
     lines
         .iter()
         .skip(1)
         .map(|line| line.text.trim())
         .filter(|line| !line.is_empty())
-        .map(str::to_lowercase)
         .collect::<Vec<_>>()
         .join("\n")
 }

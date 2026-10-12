@@ -9,13 +9,14 @@ pub struct AddedLine<'a> {
 }
 
 const SKIP_MARKERS: &[&str] = &[
-    ".skip(",
     ".skip)",
     ".skip;",
     ".skip ",
     "test.skip",
     "it.skip",
     "describe.skip",
+    "context.skip",
+    "specify.skip",
     "xit(",
     "xtest(",
     "xdescribe(",
@@ -30,7 +31,6 @@ const SKIP_MARKERS: &[&str] = &[
     "t.SkipNow(",
     "testing.Short()",
     "skip \"",
-    "skip(",
     "pending()",
     "markTestSkipped(",
     "XCTSkip(",
@@ -45,9 +45,10 @@ const SKIP_MARKERS: &[&str] = &[
     "skip <|",
 ];
 
-/// Skip markers that are only a skip as a bare statement: `<expr>.cancel("…")` (an axios
-/// cancellation, say) is not a skipped test, but `ScalaTest`'s `cancel("…")` always is.
-const SKIP_STATEMENT_MARKERS: &[&str] = &["cancel(\""];
+/// Skip markers that are only a skip as a bare statement: `<expr>.skip("…")` (an IO skip, say)
+/// or `<expr>.cancel("…")` (an axios cancellation) is not a skipped test, but `RSpec`'s
+/// `skip("…")` and `ScalaTest`'s `cancel("…")` always are.
+const SKIP_STATEMENT_MARKERS: &[&str] = &["cancel(\"", "skip("];
 
 /// The `skip-added` message, shared by the marker table and the statement-position marker.
 const SKIP_ADDED_MESSAGE: &str = "A test/assertion was disabled with a skip/ignore marker.";
@@ -166,6 +167,10 @@ const ASSERTION_EXISTS_EXTRAS: &[&str] = &[
     "TEST_ASSERT",
     "Alcotest.",
     "Expect.",
+    "pytest.raises(",
+    "assertRaises(",
+    ".toThrow",
+    "#[should_panic",
 ];
 
 /// Markers that indicate a body contains nested test definitions (so it is a suite, not a leaf test).
@@ -631,35 +636,6 @@ fn has_word(text: &str, word: &str) -> bool {
         .any(|token| token == word)
 }
 
-fn has_ternary(text: &str) -> bool {
-    let mut in_string = false;
-    let mut quote = '\0';
-    let mut escaped = false;
-    let mut seen_question = false;
-    for character in text.chars() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == quote {
-                in_string = false;
-            }
-            continue;
-        }
-        match character {
-            '"' | '\'' | '`' => {
-                in_string = true;
-                quote = character;
-            }
-            '?' => seen_question = true,
-            ':' if seen_question => return true,
-            _ => {}
-        }
-    }
-    false
-}
-
 fn finish(
     rule: &str,
     confidence: Confidence,
@@ -777,9 +753,9 @@ fn classify_incomplete_assertion(
     line: &AddedLine<'_>,
     text: &str,
 ) -> Option<Finding> {
-    if !text.contains("expect(") {
-        return None;
-    }
+    // The `expect(...)` call must close on this line; a prettier-wrapped
+    // `expect(\n  …\n).toBe(3)` is complete, just split across lines.
+    inner_args(text, "expect(")?;
     if INCOMPLETE_ASSERTION_MATCHERS
         .iter()
         .any(|matcher| text.contains(matcher))
@@ -800,7 +776,10 @@ fn classify_unawaited_assertion(
     line: &AddedLine<'_>,
     text: &str,
 ) -> Option<Finding> {
-    if !(text.contains(".resolves.") || text.contains(".rejects.")) {
+    // The promise matcher only counts on an `expect(...)` line; `.resolves.` in a string
+    // (a test name, a doc) is not an unawaited assertion.
+    let promise_matcher = text.contains(".resolves.") || text.contains(".rejects.");
+    if !promise_matcher || !text.contains("expect(") {
         return None;
     }
     let trimmed = text.trim_start();
@@ -899,7 +878,7 @@ fn classify_conditional_assertion(
 ) -> Option<Finding> {
     let next = added.get(index + 1).map(|line| line.text.trim());
     let assertion_here = has_marker(text, ASSERTION_MARKERS);
-    let conditional_here = text.starts_with("if ") || text.starts_with("if(") || has_ternary(text);
+    let conditional_here = text.starts_with("if ") || text.starts_with("if(");
     let triggers = conditional_here
         && (assertion_here || next.is_some_and(|line| has_marker(line, ASSERTION_MARKERS)));
     triggers.then(|| {
@@ -1014,14 +993,18 @@ pub fn classify_test_body(
     findings
 }
 
+/// Whether a raw line looks like a comment line (a commented-out assertion is not real code).
+pub(crate) fn is_comment_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    ["#", "//", "--", "/*", "*"]
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
+}
+
 /// Whether a raw line carries an assertion marker on a code line: a commented-out assertion
 /// (`# assert x == y`) must not count towards `assertion-removed`/`gutted-test`.
 fn is_assertion_code_line(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    let is_comment = ["#", "//", "--", "/*", "*"]
-        .iter()
-        .any(|prefix| trimmed.starts_with(prefix));
-    !is_comment && has_marker(line.trim(), ASSERTION_MARKERS)
+    !is_comment_line(line) && has_marker(line.trim(), ASSERTION_MARKERS)
 }
 
 /// Diff-only findings: newly introduced weakening between an edit's old and new content.
@@ -1347,7 +1330,7 @@ pub fn looks_like_commented_out_test(comment_body: &str) -> bool {
     if includes_assertion_call {
         return true;
     }
-    text.contains("assert ") && (text.contains("==") || text.contains("!=") || text.contains('('))
+    text.contains("assert ") && (text.contains("==") || text.contains("!="))
 }
 
 fn strip_comment_markers(text: &str) -> &str {
@@ -2127,9 +2110,24 @@ mod tests {
     }
 
     #[test]
-    fn classify_added_line_given_catchhandlers_identifier_is_not_swallowed_error() {
-        // given: an identifier containing "catch" is not a catch clause
-        let added = lines(&["const catchHandlers = {};"]);
+    fn classify_added_line_given_rerunning_identifier_is_not_retry_added() {
+        // given: an identifier containing "rerun" is not a retry marker
+        let added = lines(&["rerunning_service();"]);
+
+        // when
+        let findings = classify_added_line("tests/app.test.js", &added, 0);
+
+        // then
+        assert!(
+            !findings.iter().any(|finding| finding.rule == "retry-added"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_ternary_operand_is_not_conditional() {
+        // given: a ternary used as an `expect` operand, not a guard around the assertion
+        let added = lines(&["expect(user.isAdmin ? a : b).toBeTruthy();"]);
 
         // when
         let findings = classify_added_line("tests/app.test.js", &added, 0);
@@ -2138,9 +2136,100 @@ mod tests {
         assert!(
             !findings
                 .iter()
-                .any(|finding| finding.rule == "swallowed-error"),
+                .any(|finding| finding.rule == "conditional-assertion"),
             "{findings:?}"
         );
+    }
+
+    #[test]
+    fn classify_added_line_given_regex_optional_is_not_conditional() {
+        // given: a regex `?:` is not a ternary
+        let added = lines(&["expect(url).toMatch(/https?:\\/\\//);"]);
+
+        // when
+        let findings = classify_added_line("tests/app.test.js", &added, 0);
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "conditional-assertion"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_unclosed_expect_is_not_incomplete() {
+        // given: the first line of a prettier-wrapped `expect(\n …\n).toBe(3)`
+        let added = lines(&["expect("]);
+
+        // when
+        let findings = classify_added_line("tests/app.test.js", &added, 0);
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "incomplete-assertion"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_resolves_in_string_is_not_unawaited() {
+        // given: `.resolves.` inside a string literal is not an unawaited promise assertion
+        let added = lines(&["it('documents .resolves. usage', () => {});"]);
+
+        // when
+        let findings = classify_added_line("tests/app.test.js", &added, 0);
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "unawaited-assertion"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn classify_test_body_given_pytest_raises_reports_no_assertion_nothing() {
+        // given: a raises-style test whose expectation IS the assertion
+        let body = lines(&["with pytest.raises(ValueError):", "    run()"]);
+
+        // when
+        let findings = classify_test_body("tests/test_app.py", 1, &body);
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "no-assertion"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_inputstream_skip_is_not_skip_added() {
+        // given: a benign IO `skip(n)` call, not a framework test skip
+        let added = lines(&["inputStream.skip(10);"]);
+
+        // when
+        let findings = classify_added_line("src/test/java/AppTest.java", &added, 0);
+
+        // then
+        assert!(
+            !findings.iter().any(|finding| finding.rule == "skip-added"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn looks_like_commented_out_test_given_prose_is_false() {
+        // then
+        assert!(!looks_like_commented_out_test(
+            "# assert that setup ran twice (see issue #12)"
+        ));
     }
 
     #[test]
@@ -2232,21 +2321,6 @@ mod tests {
         // then
         assert!(
             findings.iter().any(|finding| finding.rule == "skip-added"),
-            "{findings:?}"
-        );
-    }
-
-    #[test]
-    fn classify_added_line_given_rerunning_identifier_is_not_retry_added() {
-        // given: an identifier containing "rerun" is not a retry marker
-        let added = lines(&["rerunning_service();"]);
-
-        // when
-        let findings = classify_added_line("tests/app.test.js", &added, 0);
-
-        // then
-        assert!(
-            !findings.iter().any(|finding| finding.rule == "retry-added"),
             "{findings:?}"
         );
     }
