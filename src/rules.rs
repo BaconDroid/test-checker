@@ -93,6 +93,11 @@ const SNAPSHOT_MATCHERS: &[&str] = &[
 /// Sleep/timeout calls whose duration only makes a test slower to fail: a longer duration is looser.
 const SLEEP_MARKERS: &[&str] = &["time.sleep(", "cy.wait(", "await sleep(", "Thread.Sleep("];
 
+/// Strength at or below this is the loose (truthiness/existence) end of the table.
+const LOOSE_MAX: u8 = 10;
+/// Strength at or above this is an exact/deep equality (the strong end).
+const EXACT_MIN: u8 = 30;
+
 const RETRY_MARKERS: &[&str] = &[
     "@retry",
     "@flaky",
@@ -244,11 +249,10 @@ pub struct DiffContext<'a> {
 enum MatcherKind {
     Js,
     Python,
-    Snapshot,
 }
 
 /// One matcher occurrence: the assertion subject, its strictness, and the matcher family.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct MatcherForm {
     subject: String,
     strength: u8,
@@ -257,8 +261,8 @@ struct MatcherForm {
 
 impl MatcherForm {
     /// A truthiness/definedness/existence assertion, the loose end of the table.
-    fn is_loose(&self) -> bool {
-        self.kind != MatcherKind::Snapshot && self.strength <= 10
+    const fn is_loose(&self) -> bool {
+        self.strength <= LOOSE_MAX
     }
 }
 
@@ -280,7 +284,7 @@ impl TolerancePolarity {
 }
 
 /// A numeric tolerance occurrence: the subject, the value, and its polarity.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct ToleranceForm {
     subject: String,
     value: f64,
@@ -303,15 +307,21 @@ fn js_matcher_form(text: &str) -> Option<MatcherForm> {
     })
 }
 
+/// The first top-level argument of an already-opened call, trimmed and non-empty.
+fn first_arg(inner: &str) -> Option<String> {
+    let parts = split_top_level(inner);
+    let subject = parts.first()?.trim();
+    (!subject.is_empty()).then(|| subject.to_string())
+}
+
 /// Extract the Python assert-call or `assert` statement subject and strictness.
 fn py_matcher_form(text: &str) -> Option<MatcherForm> {
     for (marker, strength) in PY_ASSERT_CALLS {
         if let Some(inner) = inner_args(text, marker)
-            && let Some(subject) = split_top_level(inner).first().map(|part| part.trim())
-            && !subject.is_empty()
+            && let Some(subject) = first_arg(inner)
         {
             return Some(MatcherForm {
-                subject: subject.to_string(),
+                subject,
                 strength: *strength,
                 kind: MatcherKind::Python,
             });
@@ -327,7 +337,7 @@ fn py_assert_statement_form(text: &str) -> Option<MatcherForm> {
         if !subject.is_empty() && !subject.contains('=') {
             return Some(MatcherForm {
                 subject: subject.to_string(),
-                strength: 30,
+                strength: EXACT_MIN,
                 kind: MatcherKind::Python,
             });
         }
@@ -337,7 +347,7 @@ fn py_assert_statement_form(text: &str) -> Option<MatcherForm> {
         if right.trim() == "None" && !subject.is_empty() {
             return Some(MatcherForm {
                 subject: subject.to_string(),
-                strength: 10,
+                strength: LOOSE_MAX,
                 kind: MatcherKind::Python,
             });
         }
@@ -349,41 +359,20 @@ fn matcher_form(text: &str) -> Option<MatcherForm> {
     py_matcher_form(text).or_else(|| js_matcher_form(text))
 }
 
-/// Extract a snapshot/approval matcher with the subject it supersedes.
-fn snapshot_form(text: &str) -> Option<MatcherForm> {
-    if !SNAPSHOT_MATCHERS.iter().any(|marker| text.contains(marker)) {
-        return None;
-    }
-    if let Some(subject) = inner_args(text, "expect(")
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-    {
-        return Some(MatcherForm {
-            subject: subject.to_string(),
-            strength: 5,
-            kind: MatcherKind::Snapshot,
-        });
-    }
-    for marker in [
-        "assertSnapshot(",
-        "assert_snapshot(",
-        "assert_debug_snapshot(",
-    ] {
-        if let Some(inner) = inner_args(text, marker)
-            && let Some(subject) = split_top_level(inner).first().map(|part| part.trim())
-            && !subject.is_empty()
-        {
-            return Some(MatcherForm {
-                subject: subject.to_string(),
-                strength: 5,
-                kind: MatcherKind::Snapshot,
-            });
-        }
-    }
-    None
+/// Extract the subject a snapshot/approval assertion supersedes.
+fn snapshot_subject(text: &str) -> Option<String> {
+    let marker = *SNAPSHOT_MATCHERS
+        .iter()
+        .find(|marker| text.contains(**marker))?;
+    let subject = if marker.starts_with(".toMatch") {
+        inner_args(text, "expect(")?.trim().to_string()
+    } else {
+        first_arg(inner_args(text, marker)?)?
+    };
+    (!subject.is_empty()).then_some(subject)
 }
 
-/// Extract a numeric tolerance occurrence (places/delta/precision/sleep duration).
+/// Extract a numeric tolerance occurrence (places/delta/rtol/precision/approx/sleep duration).
 fn tolerance_form(text: &str) -> Option<ToleranceForm> {
     for marker in [
         "assertAlmostEqual(",
@@ -391,36 +380,48 @@ fn tolerance_form(text: &str) -> Option<ToleranceForm> {
         "assert_allclose(",
     ] {
         if let Some(inner) = inner_args(text, marker) {
-            let parts = split_top_level(inner);
-            let subject = parts.first().map(|part| part.trim())?;
-            if subject.is_empty() {
-                return None;
-            }
-            if let Some(places) = parse_after(text, "places=") {
+            let subject = first_arg(inner)?;
+            if let Some(value) = parse_after(text, "places=") {
                 return Some(ToleranceForm {
-                    subject: subject.to_string(),
-                    value: places,
+                    subject,
+                    value,
                     polarity: TolerancePolarity::Precision,
                 });
             }
-            if let Some(delta) = parse_after(text, "delta=") {
+            if let Some(value) = parse_after(text, "delta=") {
                 return Some(ToleranceForm {
-                    subject: subject.to_string(),
-                    value: delta,
+                    subject,
+                    value,
+                    polarity: TolerancePolarity::Duration,
+                });
+            }
+            if let Some(value) = parse_after(text, "rtol=").or_else(|| parse_after(text, "atol=")) {
+                return Some(ToleranceForm {
+                    subject,
+                    value,
                     polarity: TolerancePolarity::Duration,
                 });
             }
         }
     }
+    if let Some(inner) = inner_args(text, "pytest.approx(") {
+        let subject = py_matcher_form(text)?.subject;
+        let value = parse_after(inner, "rel=").or_else(|| parse_after(inner, "abs="))?;
+        return Some(ToleranceForm {
+            subject,
+            value,
+            polarity: TolerancePolarity::Duration,
+        });
+    }
     if let Some(inner) = inner_args(text, "toBeCloseTo(") {
-        let subject = inner_args(text, "expect(")?.trim();
-        let precision = split_top_level(inner)
+        let subject = inner_args(text, "expect(")?.trim().to_string();
+        let value = split_top_level(inner)
             .get(1)
             .and_then(|part| parse_first_number(part))?;
         if !subject.is_empty() {
             return Some(ToleranceForm {
-                subject: subject.to_string(),
-                value: precision,
+                subject,
+                value,
                 polarity: TolerancePolarity::Precision,
             });
         }
@@ -447,12 +448,19 @@ fn parse_after(text: &str, key: &str) -> Option<f64> {
 fn parse_first_number(text: &str) -> Option<f64> {
     let mut digits = String::new();
     let mut started = false;
-    for character in text.chars() {
+    let mut chars = text.chars().peekable();
+    while let Some(character) = chars.next() {
         if character.is_ascii_digit() {
             digits.push(character);
             started = true;
         } else if character == '.' && started {
             digits.push(character);
+        } else if matches!(character, 'e' | 'E') && started {
+            digits.push(character);
+            if let Some(sign @ ('+' | '-')) = chars.peek().copied() {
+                digits.push(sign);
+                let _ = chars.next();
+            }
         } else if started {
             break;
         }
@@ -470,14 +478,14 @@ fn classify_weakening(
     diff: &DiffContext<'_>,
 ) -> Vec<Finding> {
     let weakened = matcher_form(text);
-    let snapshot = snapshot_form(text);
+    let snapshot = snapshot_subject(text);
     let tolerance = tolerance_form(text);
     if diff.removed.is_empty() {
         return presence_weakening(
             file_path,
             line,
             weakened.as_ref(),
-            snapshot.as_ref(),
+            snapshot.as_deref(),
             tolerance.as_ref(),
         );
     }
@@ -491,7 +499,7 @@ fn classify_weakening(
             diff.removed,
         )
     {
-        let confidence = if old_strength >= 30 && new_form.strength <= 10 {
+        let confidence = if old_strength >= EXACT_MIN && new_form.strength <= LOOSE_MAX {
             Confidence::High
         } else {
             Confidence::Medium
@@ -504,13 +512,10 @@ fn classify_weakening(
             file_path,
         ));
     }
-    if let Some(new_snapshot) = &snapshot {
+    if let Some(snapshot_subject) = snapshot.as_deref() {
         let superseded = diff.removed.iter().any(|removed| {
-            matcher_form(removed).is_some_and(|old| {
-                old.kind != MatcherKind::Snapshot
-                    && old.subject == new_snapshot.subject
-                    && old.strength >= 30
-            })
+            matcher_form(removed)
+                .is_some_and(|old| old.subject == snapshot_subject && old.strength >= EXACT_MIN)
         });
         if superseded {
             findings.push(finish(
@@ -558,7 +563,7 @@ fn presence_weakening(
     file_path: &str,
     line: &AddedLine<'_>,
     weakened: Option<&MatcherForm>,
-    snapshot: Option<&MatcherForm>,
+    snapshot: Option<&str>,
     tolerance: Option<&ToleranceForm>,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
@@ -1971,6 +1976,42 @@ mod tests {
         // then
         assert!(
             !findings
+                .iter()
+                .any(|finding| finding.rule == "tolerance-broadened")
+        );
+    }
+
+    #[test]
+    fn classify_diff_line_given_widened_pytest_approx_reports_tolerance_broadened() {
+        // given: a larger relative tolerance is looser
+        let added = lines(&["assert value == pytest.approx(3.0, rel=1e-1)"]);
+        let removed = ["assert value == pytest.approx(3.0, rel=1e-6)"];
+        let diff = DiffContext { removed: &removed };
+
+        // when
+        let findings = classify_diff_line("tests/test_app.py", &added, 0, &diff);
+
+        // then
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "tolerance-broadened")
+        );
+    }
+
+    #[test]
+    fn classify_diff_line_given_widened_approx_in_assert_equal_reports_tolerance_broadened() {
+        // given: the unittest carrier (`assertEqual`) must resolve the same subject
+        let added = lines(&["self.assertEqual(value, pytest.approx(3.0, rel=1e-1))"]);
+        let removed = ["self.assertEqual(value, pytest.approx(3.0, rel=1e-6))"];
+        let diff = DiffContext { removed: &removed };
+
+        // when
+        let findings = classify_diff_line("tests/test_app.py", &added, 0, &diff);
+
+        // then
+        assert!(
+            findings
                 .iter()
                 .any(|finding| finding.rule == "tolerance-broadened")
         );
