@@ -1,39 +1,6 @@
 use crate::engine;
 use crate::models::Finding;
 
-const BDD_KEYWORDS: &[&str] = &[
-    "given",
-    "when",
-    "then",
-    "arrange",
-    "act",
-    "assert",
-    "when & then",
-    "when&then",
-];
-
-const DIRECTIVE_PREFIXES: &[&str] = &[
-    "type:",
-    "noqa",
-    "pyright:",
-    "ruff:",
-    "mypy:",
-    "pylint:",
-    "flake8:",
-    "pyre:",
-    "pytype:",
-    "eslint-disable",
-    "eslint-ignore",
-    "prettier-ignore",
-    "ts-ignore",
-    "ts-expect-error",
-    "clippy:",
-    "allow",
-    "deny",
-    "warn",
-    "forbid",
-];
-
 const SUPPRESSION_MARKER: &str = "test-checker: allow";
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -44,7 +11,7 @@ impl BddFilter {
     pub fn should_skip(&self, finding: &Finding) -> bool {
         let normalized =
             engine::strip_one_prefix(finding.text.trim(), &["#", "//", "--", "/*", "*"]);
-        BDD_KEYWORDS
+        engine::BDD_KEYWORDS
             .iter()
             .any(|keyword| normalized.eq_ignore_ascii_case(keyword))
     }
@@ -61,7 +28,7 @@ impl DirectiveFilter {
         if let Some(rest) = normalized.strip_prefix('@') {
             normalized = rest.trim();
         }
-        DIRECTIVE_PREFIXES
+        engine::DIRECTIVE_PREFIXES
             .iter()
             .any(|directive| engine::starts_with_ignore_ascii_case(normalized, directive))
     }

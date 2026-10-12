@@ -4,9 +4,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use tree_sitter::{Query, QueryCursor, StreamingIterator};
 
 use crate::engine;
-use crate::language::{
-    comment_query, is_test_callee, is_test_function_name, language_for_path, test_query,
-};
+use crate::language::{is_test_callee, is_test_function_name, language_for_path, test_query};
 use crate::models::{Confidence, Finding};
 use crate::rules::{self, AddedLine};
 
@@ -143,7 +141,7 @@ fn runtime_by_name(name: &str) -> Option<Arc<Runtime>> {
     }
 
     let language = tree_sitter_language_pack::get_language(name).ok()?;
-    let comment = Query::new(&language, comment_query(name)).ok()?;
+    let comment = Query::new(&language, engine::comment_query(name)).ok()?;
     let body = test_query(name).and_then(|source| Query::new(&language, source).ok());
     let injection = tree_sitter_language_pack::get_injections_query(name)
         .and_then(|source| Query::new(&language, source).ok());
