@@ -54,42 +54,41 @@ const FOCUS_MARKERS: &[&str] = &[
     "iit(",
 ];
 
-const WEAKENED_MARKERS: &[&str] = &[
-    ".toBeTruthy()",
-    ".toBeFalsy()",
-    ".toBeDefined()",
-    ".toBeUndefined()",
-    ".not.toBeNull()",
-    "assertIsNotNone(",
-    "assertIsInstance(",
-    ".anything()",
+/// JS/Vitest matcher strictness (higher is stricter). A decrease on the same `expect()` subject
+/// is a weakening; see `docs/diff-aware-and-query-expansion.md` A3.
+const JS_MATCHERS: &[(&str, u8)] = &[
+    (".toStrictEqual(", 40),
+    (".toEqual(", 30),
+    (".toBe(", 20),
+    (".toBeTruthy(", 10),
+    (".toBeFalsy(", 10),
+    (".toBeDefined(", 10),
+    (".toBeUndefined(", 10),
+    (".toBeNull(", 10),
+    (".anything(", 10),
 ];
 
-const SNAPSHOT_MARKERS: &[&str] = &[
-    "toMatchSnapshot",
-    "toMatchInlineSnapshot",
-    "toMatchFileSnapshot",
-    "assertSnapshot",
-    "assert_snapshot",
-    "assert_debug_snapshot",
-    "--update-snapshots",
-    "--updateSnapshot",
-    "verifyAll(",
-    "approvals.verify",
+/// Python assert-call strictness (higher is stricter).
+const PY_ASSERT_CALLS: &[(&str, u8)] = &[
+    ("assertEqual(", 30),
+    ("assertEquals(", 30),
+    ("assertIsNotNone(", 10),
+    ("assertTrue(", 10),
+    ("assertIsInstance(", 10),
 ];
 
-const TOLERANCE_MARKERS: &[&str] = &[
-    "assertAlmostEqual",
-    "assertAlmostEquals",
-    "toBeCloseTo(",
-    "assert_allclose",
-    "pytest.approx",
-    "delta=",
-    "time.sleep(",
-    "Thread.Sleep",
-    "cy.wait(",
-    "await sleep(",
+/// Snapshot/approval matchers: weaker than an inline equality on the same subject.
+const SNAPSHOT_MATCHERS: &[&str] = &[
+    ".toMatchSnapshot(",
+    ".toMatchInlineSnapshot(",
+    ".toMatchFileSnapshot(",
+    "assertSnapshot(",
+    "assert_snapshot(",
+    "assert_debug_snapshot(",
 ];
+
+/// Sleep/timeout calls whose duration only makes a test slower to fail: a longer duration is looser.
+const SLEEP_MARKERS: &[&str] = &["time.sleep(", "cy.wait(", "await sleep(", "Thread.Sleep("];
 
 const RETRY_MARKERS: &[&str] = &[
     "@retry",
@@ -214,30 +213,371 @@ const MARKER_RULES: &[MarkerRule] = &[
         markers: FOCUS_MARKERS,
     },
     MarkerRule {
-        id: "weakened-assertion",
-        confidence: Confidence::Medium,
-        message: "The assertion was loosened to a weaker matcher.",
-        markers: WEAKENED_MARKERS,
-    },
-    MarkerRule {
-        id: "snapshot-regenerated",
-        confidence: Confidence::Medium,
-        message: "A snapshot/approval assertion may have been regenerated without review.",
-        markers: SNAPSHOT_MARKERS,
-    },
-    MarkerRule {
-        id: "tolerance-broadened",
-        confidence: Confidence::Medium,
-        message: "A tolerance/timeout/sleep may have been widened to hide flakiness.",
-        markers: TOLERANCE_MARKERS,
-    },
-    MarkerRule {
         id: "retry-added",
         confidence: Confidence::Medium,
         message: "A retry/flaky marker was added to make an unstable test pass.",
         markers: RETRY_MARKERS,
     },
 ];
+
+/// The removed (LCS-unmatched old) lines of an `Edit`. Empty for a `Write`, where the presence
+/// rules fall back to Low confidence.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DiffContext<'a> {
+    pub removed: &'a [&'a str],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MatcherKind {
+    Js,
+    Python,
+    Snapshot,
+}
+
+/// One matcher occurrence: the assertion subject, its strictness, and the matcher family.
+#[derive(Clone, Debug)]
+struct MatcherForm {
+    subject: String,
+    strength: u8,
+    kind: MatcherKind,
+}
+
+impl MatcherForm {
+    /// A truthiness/definedness/existence assertion, the loose end of the table.
+    fn is_loose(&self) -> bool {
+        self.kind != MatcherKind::Snapshot && self.strength <= 10
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TolerancePolarity {
+    /// More decimal places (or a larger `toBeCloseTo` precision) is stricter.
+    Precision,
+    /// A longer sleep/timeout or a larger `delta` is looser.
+    Duration,
+}
+
+impl TolerancePolarity {
+    fn loosened(self, old: f64, new: f64) -> bool {
+        match self {
+            Self::Precision => new < old,
+            Self::Duration => new > old,
+        }
+    }
+}
+
+/// A numeric tolerance occurrence: the subject, the value, and its polarity.
+#[derive(Clone, Debug)]
+struct ToleranceForm {
+    subject: String,
+    value: f64,
+    polarity: TolerancePolarity,
+}
+
+/// Extract the JS/TS matcher subject and strictness from a line.
+fn js_matcher_form(text: &str) -> Option<MatcherForm> {
+    let subject = inner_args(text, "expect(")?.trim();
+    if subject.is_empty() {
+        return None;
+    }
+    let (_, strength) = JS_MATCHERS
+        .iter()
+        .find(|(marker, _)| text.contains(*marker))?;
+    Some(MatcherForm {
+        subject: subject.to_string(),
+        strength: *strength,
+        kind: MatcherKind::Js,
+    })
+}
+
+/// Extract the Python assert-call or `assert` statement subject and strictness.
+fn py_matcher_form(text: &str) -> Option<MatcherForm> {
+    for (marker, strength) in PY_ASSERT_CALLS {
+        if let Some(inner) = inner_args(text, marker)
+            && let Some(subject) = split_top_level(inner).first().map(|part| part.trim())
+            && !subject.is_empty()
+        {
+            return Some(MatcherForm {
+                subject: subject.to_string(),
+                strength: *strength,
+                kind: MatcherKind::Python,
+            });
+        }
+    }
+    py_assert_statement_form(text)
+}
+
+fn py_assert_statement_form(text: &str) -> Option<MatcherForm> {
+    let rest = text.strip_prefix("assert ")?;
+    if let Some((left, _)) = rest.split_once(" == ") {
+        let subject = left.trim();
+        if !subject.is_empty() && !subject.contains('=') {
+            return Some(MatcherForm {
+                subject: subject.to_string(),
+                strength: 30,
+                kind: MatcherKind::Python,
+            });
+        }
+    }
+    if let Some((left, right)) = rest.split_once(" is not ") {
+        let subject = left.trim();
+        if right.trim() == "None" && !subject.is_empty() {
+            return Some(MatcherForm {
+                subject: subject.to_string(),
+                strength: 10,
+                kind: MatcherKind::Python,
+            });
+        }
+    }
+    None
+}
+
+fn matcher_form(text: &str) -> Option<MatcherForm> {
+    py_matcher_form(text).or_else(|| js_matcher_form(text))
+}
+
+/// Extract a snapshot/approval matcher with the subject it supersedes.
+fn snapshot_form(text: &str) -> Option<MatcherForm> {
+    if !SNAPSHOT_MATCHERS.iter().any(|marker| text.contains(marker)) {
+        return None;
+    }
+    if let Some(subject) = inner_args(text, "expect(")
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        return Some(MatcherForm {
+            subject: subject.to_string(),
+            strength: 5,
+            kind: MatcherKind::Snapshot,
+        });
+    }
+    for marker in [
+        "assertSnapshot(",
+        "assert_snapshot(",
+        "assert_debug_snapshot(",
+    ] {
+        if let Some(inner) = inner_args(text, marker)
+            && let Some(subject) = split_top_level(inner).first().map(|part| part.trim())
+            && !subject.is_empty()
+        {
+            return Some(MatcherForm {
+                subject: subject.to_string(),
+                strength: 5,
+                kind: MatcherKind::Snapshot,
+            });
+        }
+    }
+    None
+}
+
+/// Extract a numeric tolerance occurrence (places/delta/precision/sleep duration).
+fn tolerance_form(text: &str) -> Option<ToleranceForm> {
+    for marker in [
+        "assertAlmostEqual(",
+        "assertAlmostEquals(",
+        "assert_allclose(",
+    ] {
+        if let Some(inner) = inner_args(text, marker) {
+            let parts = split_top_level(inner);
+            let subject = parts.first().map(|part| part.trim())?;
+            if subject.is_empty() {
+                return None;
+            }
+            if let Some(places) = parse_after(text, "places=") {
+                return Some(ToleranceForm {
+                    subject: subject.to_string(),
+                    value: places,
+                    polarity: TolerancePolarity::Precision,
+                });
+            }
+            if let Some(delta) = parse_after(text, "delta=") {
+                return Some(ToleranceForm {
+                    subject: subject.to_string(),
+                    value: delta,
+                    polarity: TolerancePolarity::Duration,
+                });
+            }
+        }
+    }
+    if let Some(inner) = inner_args(text, "toBeCloseTo(") {
+        let subject = inner_args(text, "expect(")?.trim();
+        let precision = split_top_level(inner)
+            .get(1)
+            .and_then(|part| parse_first_number(part))?;
+        if !subject.is_empty() {
+            return Some(ToleranceForm {
+                subject: subject.to_string(),
+                value: precision,
+                polarity: TolerancePolarity::Precision,
+            });
+        }
+    }
+    for marker in SLEEP_MARKERS {
+        if let Some(inner) = inner_args(text, marker)
+            && let Some(value) = parse_first_number(inner)
+        {
+            return Some(ToleranceForm {
+                subject: marker.trim_end_matches('(').to_string(),
+                value,
+                polarity: TolerancePolarity::Duration,
+            });
+        }
+    }
+    None
+}
+
+fn parse_after(text: &str, key: &str) -> Option<f64> {
+    let index = text.find(key)? + key.len();
+    parse_first_number(&text[index..])
+}
+
+fn parse_first_number(text: &str) -> Option<f64> {
+    let mut digits = String::new();
+    let mut started = false;
+    for character in text.chars() {
+        if character.is_ascii_digit() {
+            digits.push(character);
+            started = true;
+        } else if character == '.' && started {
+            digits.push(character);
+        } else if started {
+            break;
+        }
+    }
+    digits.trim_end_matches('.').parse().ok()
+}
+
+/// The diff-aware presence rules: `weakened-assertion`, `snapshot-regenerated`,
+/// `tolerance-broadened`. With no baseline (`Write`) they report at Low confidence; on an `Edit`
+/// they fire only when a stricter form for the same subject was removed.
+fn classify_weakening(
+    file_path: &str,
+    line: &AddedLine<'_>,
+    text: &str,
+    diff: &DiffContext<'_>,
+) -> Vec<Finding> {
+    let weakened = matcher_form(text);
+    let snapshot = snapshot_form(text);
+    let tolerance = tolerance_form(text);
+    if diff.removed.is_empty() {
+        return presence_weakening(
+            file_path,
+            line,
+            weakened.as_ref(),
+            snapshot.as_ref(),
+            tolerance.as_ref(),
+        );
+    }
+
+    let mut findings = Vec::new();
+    if let Some(new_form) = &weakened
+        && let Some(old_strength) = weaker_match(
+            &new_form.subject,
+            new_form.kind,
+            new_form.strength,
+            diff.removed,
+        )
+    {
+        let confidence = if old_strength >= 30 && new_form.strength <= 10 {
+            Confidence::High
+        } else {
+            Confidence::Medium
+        };
+        findings.push(finish(
+            "weakened-assertion",
+            confidence,
+            "The assertion was loosened to a weaker matcher.",
+            line,
+            file_path,
+        ));
+    }
+    if let Some(new_snapshot) = &snapshot {
+        let superseded = diff.removed.iter().any(|removed| {
+            matcher_form(removed).is_some_and(|old| {
+                old.kind != MatcherKind::Snapshot
+                    && old.subject == new_snapshot.subject
+                    && old.strength >= 30
+            })
+        });
+        if superseded {
+            findings.push(finish(
+                "snapshot-regenerated",
+                Confidence::High,
+                "A snapshot/approval assertion may have been regenerated without review.",
+                line,
+                file_path,
+            ));
+        }
+    }
+    if let Some(new_tolerance) = &tolerance {
+        let widened = diff.removed.iter().any(|removed| {
+            tolerance_form(removed).is_some_and(|old| {
+                old.subject == new_tolerance.subject
+                    && old.polarity == new_tolerance.polarity
+                    && new_tolerance
+                        .polarity
+                        .loosened(old.value, new_tolerance.value)
+            })
+        });
+        if widened {
+            findings.push(finish(
+                "tolerance-broadened",
+                Confidence::Medium,
+                "A tolerance/timeout/sleep may have been widened to hide flakiness.",
+                line,
+                file_path,
+            ));
+        }
+    }
+    findings
+}
+
+fn weaker_match(subject: &str, kind: MatcherKind, strength: u8, removed: &[&str]) -> Option<u8> {
+    removed.iter().find_map(|removed| {
+        matcher_form(removed).and_then(|old| {
+            (old.kind == kind && old.subject == subject && old.strength > strength)
+                .then_some(old.strength)
+        })
+    })
+}
+
+fn presence_weakening(
+    file_path: &str,
+    line: &AddedLine<'_>,
+    weakened: Option<&MatcherForm>,
+    snapshot: Option<&MatcherForm>,
+    tolerance: Option<&ToleranceForm>,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    if weakened.is_some_and(MatcherForm::is_loose) {
+        findings.push(finish(
+            "weakened-assertion",
+            Confidence::Low,
+            "The assertion uses a loose matcher with no baseline to compare against (Write).",
+            line,
+            file_path,
+        ));
+    }
+    if snapshot.is_some() {
+        findings.push(finish(
+            "snapshot-regenerated",
+            Confidence::Low,
+            "A snapshot/approval assertion may have been regenerated without review (Write).",
+            line,
+            file_path,
+        ));
+    }
+    if tolerance.is_some() {
+        findings.push(finish(
+            "tolerance-broadened",
+            Confidence::Low,
+            "A tolerance/timeout/sleep may have been widened to hide flakiness (Write).",
+            line,
+            file_path,
+        ));
+    }
+    findings
+}
 
 const fn is_identifier_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
@@ -326,9 +666,30 @@ pub fn classify_harness_line(file_path: &str, line: &AddedLine<'_>) -> Option<Fi
     })
 }
 
-/// Classify one added line against the line-oriented rules.
+/// Classify one added line against the line-oriented rules (presence-only, no diff baseline).
 #[must_use]
 pub fn classify_added_line(file_path: &str, added: &[AddedLine<'_>], index: usize) -> Vec<Finding> {
+    classify_line(file_path, added, index, &DiffContext::default())
+}
+
+/// Classify one added line with the removed lines of an edit, so the presence-style rules become
+/// diff-aware (fire only when a stricter form for the same subject was replaced).
+#[must_use]
+pub fn classify_diff_line(
+    file_path: &str,
+    added: &[AddedLine<'_>],
+    index: usize,
+    diff: &DiffContext<'_>,
+) -> Vec<Finding> {
+    classify_line(file_path, added, index, diff)
+}
+
+fn classify_line(
+    file_path: &str,
+    added: &[AddedLine<'_>],
+    index: usize,
+    diff: &DiffContext<'_>,
+) -> Vec<Finding> {
     let Some(line) = added.get(index).copied() else {
         return Vec::new();
     };
@@ -346,6 +707,7 @@ pub fn classify_added_line(file_path: &str, added: &[AddedLine<'_>], index: usiz
             ));
         }
     }
+    findings.extend(classify_weakening(file_path, &line, text, diff));
     if let Some(finding) = classify_assertion(file_path, &line, text) {
         findings.push(finding);
     }
@@ -961,8 +1323,9 @@ fn strip_comment_markers(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        AddedLine, assertion_operands, classify_added_line, classify_harness_line,
-        classify_test_body, diff_findings, looks_like_commented_out_test,
+        AddedLine, Confidence, DiffContext, assertion_operands, classify_added_line,
+        classify_diff_line, classify_harness_line, classify_test_body, diff_findings,
+        looks_like_commented_out_test,
     };
 
     fn lines<'a>(texts: &'a [&'a str]) -> Vec<AddedLine<'a>> {
@@ -1386,5 +1749,269 @@ mod tests {
 
         // then
         assert!(finding.is_none());
+    }
+
+    /// (path, removed line, added line) strict→loose pairs that must fire `weakened-assertion`.
+    const WEAKENING_PAIRS: &[(&str, &str, &str)] = &[
+        (
+            "tests/app.test.js",
+            "expect(add(1, 2)).toStrictEqual(3)",
+            "expect(add(1, 2)).toEqual(3)",
+        ),
+        (
+            "tests/app.test.js",
+            "expect(add(1, 2)).toEqual(3)",
+            "expect(add(1, 2)).toBe(3)",
+        ),
+        (
+            "tests/app.test.js",
+            "expect(add(1, 2)).toEqual(3)",
+            "expect(add(1, 2)).toBeDefined()",
+        ),
+        (
+            "tests/app.test.js",
+            "expect(result).toBe(expected)",
+            "expect(result).toBeTruthy()",
+        ),
+        (
+            "tests/test_app.py",
+            "self.assertEqual(add(1, 2), 3)",
+            "self.assertIsNotNone(add(1, 2))",
+        ),
+        (
+            "tests/test_app.py",
+            "assert add(1, 2) == 3",
+            "assert add(1, 2) is not None",
+        ),
+        (
+            "tests/test_app.py",
+            "self.assertEqual(value, 3)",
+            "self.assertTrue(value)",
+        ),
+    ];
+
+    #[test]
+    fn classify_diff_line_given_strict_to_loose_pair_reports_weakened_assertion() {
+        // given
+        let mut failures = Vec::new();
+
+        // when
+        for &(path, old, new) in WEAKENING_PAIRS {
+            let added_texts = [new];
+            let added = lines(&added_texts);
+            let removed = [old];
+            let diff = DiffContext { removed: &removed };
+            let findings = classify_diff_line(path, &added, 0, &diff);
+            if !findings
+                .iter()
+                .any(|finding| finding.rule == "weakened-assertion")
+            {
+                failures.push(format!("{path}: `{old}` -> `{new}` produced {findings:?}"));
+            }
+        }
+
+        // then
+        assert!(
+            failures.is_empty(),
+            "weakening pairs not detected: {failures:#?}"
+        );
+    }
+
+    #[test]
+    fn classify_diff_line_given_high_confidence_pair_reports_high() {
+        // given
+        let added = lines(&["expect(add(1, 2)).toBeDefined()"]);
+        let removed = ["expect(add(1, 2)).toEqual(3)"];
+        let diff = DiffContext { removed: &removed };
+
+        // when
+        let findings = classify_diff_line("tests/app.test.js", &added, 0, &diff);
+
+        // then
+        let weakened = findings
+            .iter()
+            .find(|finding| finding.rule == "weakened-assertion");
+        assert_eq!(
+            weakened.map(|finding| finding.confidence),
+            Some(Confidence::High)
+        );
+    }
+
+    #[test]
+    fn classify_diff_line_given_unrelated_subject_reports_nothing() {
+        // given
+        let added = lines(&["expect(other).toBeDefined()"]);
+        let removed = ["expect(add(1, 2)).toEqual(3)"];
+        let diff = DiffContext { removed: &removed };
+
+        // when
+        let findings = classify_diff_line("tests/app.test.js", &added, 0, &diff);
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "weakened-assertion")
+        );
+    }
+
+    #[test]
+    fn classify_diff_line_given_strict_to_strict_reports_nothing() {
+        // given
+        let added = lines(&["expect(x).toStrictEqual(3)"]);
+        let removed = ["expect(x).toEqual(3)"];
+        let diff = DiffContext { removed: &removed };
+
+        // when
+        let findings = classify_diff_line("tests/app.test.js", &added, 0, &diff);
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "weakened-assertion")
+        );
+    }
+
+    #[test]
+    fn classify_diff_line_given_already_loose_before_reports_nothing() {
+        // given
+        let added = lines(&["expect(x).toBeDefined()"]);
+        let removed = ["expect(x).toBeTruthy()"];
+        let diff = DiffContext { removed: &removed };
+
+        // when
+        let findings = classify_diff_line("tests/app.test.js", &added, 0, &diff);
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "weakened-assertion")
+        );
+    }
+
+    #[test]
+    fn classify_diff_line_given_equality_replaced_by_snapshot_reports_snapshot_regenerated() {
+        // given
+        let added = lines(&["expect(render()).toMatchSnapshot()"]);
+        let removed = ["expect(render()).toEqual({ a: 1 })"];
+        let diff = DiffContext { removed: &removed };
+
+        // when
+        let findings = classify_diff_line("tests/app.test.js", &added, 0, &diff);
+
+        // then
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "snapshot-regenerated")
+        );
+    }
+
+    #[test]
+    fn classify_diff_line_given_narrowed_precision_reports_tolerance_broadened() {
+        // given
+        let added = lines(&["self.assertAlmostEqual(add(1, 2), 3, places=1)"]);
+        let removed = ["self.assertAlmostEqual(add(1, 2), 3, places=5)"];
+        let diff = DiffContext { removed: &removed };
+
+        // when
+        let findings = classify_diff_line("tests/test_app.py", &added, 0, &diff);
+
+        // then
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "tolerance-broadened")
+        );
+    }
+
+    #[test]
+    fn classify_diff_line_given_longer_sleep_reports_tolerance_broadened() {
+        // given
+        let added = lines(&["time.sleep(5)"]);
+        let removed = ["time.sleep(1)"];
+        let diff = DiffContext { removed: &removed };
+
+        // when
+        let findings = classify_diff_line("tests/test_app.py", &added, 0, &diff);
+
+        // then
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "tolerance-broadened")
+        );
+    }
+
+    #[test]
+    fn classify_diff_line_given_widened_precision_reports_nothing() {
+        // given
+        let added = lines(&["self.assertAlmostEqual(add(1, 2), 3, places=7)"]);
+        let removed = ["self.assertAlmostEqual(add(1, 2), 3, places=2)"];
+        let diff = DiffContext { removed: &removed };
+
+        // when
+        let findings = classify_diff_line("tests/test_app.py", &added, 0, &diff);
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "tolerance-broadened")
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_loose_matcher_on_write_reports_low_confidence() {
+        // given
+        let added = lines(&["expect(x).toBeDefined()"]);
+
+        // when
+        let findings = classify_added_line("tests/app.test.js", &added, 0);
+
+        // then
+        let weakened = findings
+            .iter()
+            .find(|finding| finding.rule == "weakened-assertion");
+        assert_eq!(
+            weakened.map(|finding| finding.confidence),
+            Some(Confidence::Low)
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_strict_matcher_on_write_reports_nothing() {
+        // given
+        let added = lines(&["expect(x).toEqual(3)"]);
+
+        // when
+        let findings = classify_added_line("tests/app.test.js", &added, 0);
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "weakened-assertion")
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_snapshot_on_write_reports_low_confidence() {
+        // given
+        let added = lines(&["expect(x).toMatchSnapshot()"]);
+
+        // when
+        let findings = classify_added_line("tests/app.test.js", &added, 0);
+
+        // then
+        let snapshot = findings
+            .iter()
+            .find(|finding| finding.rule == "snapshot-regenerated");
+        assert_eq!(
+            snapshot.map(|finding| finding.confidence),
+            Some(Confidence::Low)
+        );
     }
 }

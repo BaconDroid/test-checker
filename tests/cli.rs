@@ -98,9 +98,9 @@ fn cli_given_multiedit_weakening_exits_two() -> std::io::Result<()> {
 }
 
 #[test]
-fn cli_given_medium_finding_and_min_confidence_high_exits_zero() -> std::io::Result<()> {
-    // given: a medium-confidence weakened-assertion
-    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/app.test.js","content":"it('x', () => {\n  expect(a).toBeTruthy();\n});\n"}}"#;
+fn cli_given_medium_diff_finding_and_min_confidence_high_exits_zero() -> std::io::Result<()> {
+    // given: an edit that loosens a matcher (diff-detected, medium confidence)
+    let input = r#"{"tool_name":"Edit","tool_input":{"file_path":"tests/app.test.js","old_string":"it('x', () => {\n  expect(a).toEqual(b);\n});\n","new_string":"it('x', () => {\n  expect(a).toBe(b);\n});\n"}}"#;
 
     // when
     let output = run_checker(input, &["--min-confidence", "high"])?;
@@ -111,9 +111,9 @@ fn cli_given_medium_finding_and_min_confidence_high_exits_zero() -> std::io::Res
 }
 
 #[test]
-fn cli_given_medium_finding_and_default_confidence_exits_two() -> std::io::Result<()> {
-    // given
-    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/app.test.js","content":"it('x', () => {\n  expect(a).toBeTruthy();\n});\n"}}"#;
+fn cli_given_medium_diff_finding_and_default_confidence_exits_two() -> std::io::Result<()> {
+    // given: an edit that loosens a matcher (diff-detected, medium confidence)
+    let input = r#"{"tool_name":"Edit","tool_input":{"file_path":"tests/app.test.js","old_string":"it('x', () => {\n  expect(a).toEqual(b);\n});\n","new_string":"it('x', () => {\n  expect(a).toBe(b);\n});\n"}}"#;
 
     // when
     let output = run_checker(input, &[])?;
@@ -125,8 +125,8 @@ fn cli_given_medium_finding_and_default_confidence_exits_two() -> std::io::Resul
 
 #[test]
 fn cli_given_min_confidence_equals_low_keeps_medium_finding() -> std::io::Result<()> {
-    // given
-    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/app.test.js","content":"it('x', () => {\n  expect(a).toBeTruthy();\n});\n"}}"#;
+    // given: an edit that loosens a matcher (diff-detected, medium confidence)
+    let input = r#"{"tool_name":"Edit","tool_input":{"file_path":"tests/app.test.js","old_string":"it('x', () => {\n  expect(a).toEqual(b);\n});\n","new_string":"it('x', () => {\n  expect(a).toBe(b);\n});\n"}}"#;
 
     // when
     let output = run_checker(input, &["--min-confidence=low"])?;

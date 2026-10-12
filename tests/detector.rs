@@ -1,5 +1,6 @@
 use test_checker::detector::TestDetector;
 use test_checker::language::language_for_path;
+use test_checker::models::Confidence;
 
 const FRAMEWORK_CASES: [(&str, &str); 15] = [
     (
@@ -156,6 +157,65 @@ fn detect_given_python_clean_test_returns_no_findings() {
 
     // then
     assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+}
+
+#[test]
+fn detect_given_brand_new_loose_assertion_does_not_weaken_at_medium_or_higher() {
+    // given: a brand-new test whose only assertion is a loose matcher (no baseline).
+    let detector = TestDetector::new();
+    let source = "it('sums', () => {\n  expect(add(1, 2)).toBeDefined();\n});\n";
+
+    // when
+    let findings = detector.detect(source, "tests/app.test.js", true, true);
+
+    // then: presence-only, so it must not reach the default medium gate.
+    assert!(
+        !findings.iter().any(|finding| {
+            finding.rule == "weakened-assertion" && finding.confidence != Confidence::Low
+        }),
+        "brand-new loose test reported at medium or higher: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_edit_given_loosened_matcher_reports_weakened_assertion() {
+    // given: an exact matcher replaced by a loose one for the same subject.
+    let detector = TestDetector::new();
+    let old = "it('sums', () => {\n  expect(add(1, 2)).toEqual(3);\n});\n";
+    let new = "it('sums', () => {\n  expect(add(1, 2)).toBeDefined();\n});\n";
+
+    // when
+    let findings = detector.detect_edit(old, new, "tests/app.test.js", true, true);
+
+    // then
+    assert!(
+        findings.iter().any(|finding| {
+            finding.rule == "weakened-assertion" && finding.confidence == Confidence::High
+        }),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_edit_given_brand_new_loose_test_does_not_weaken_at_medium_or_higher() {
+    // given: an edit that appends a brand-new loose test with no removed counterpart.
+    let detector = TestDetector::new();
+    let old = "it('a', () => {\n  expect(one()).toEqual(1);\n});\n";
+    let new = concat!(
+        "it('a', () => {\n  expect(one()).toEqual(1);\n});\n",
+        "it('b', () => {\n  expect(two()).toBeDefined();\n});\n"
+    );
+
+    // when
+    let findings = detector.detect_edit(old, new, "tests/app.test.js", true, true);
+
+    // then
+    assert!(
+        !findings.iter().any(|finding| {
+            finding.rule == "weakened-assertion" && finding.confidence != Confidence::Low
+        }),
+        "brand-new loose test in an edit reported at medium or higher: {findings:?}"
+    );
 }
 
 #[test]

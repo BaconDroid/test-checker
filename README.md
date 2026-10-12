@@ -68,6 +68,16 @@ blocks (`<script>`, markdown fences, …).
 Each finding carries a `confidence` of `high`/`medium`/`low`. Line rules classify the added lines of
 the captured test bodies (comments stripped); diff rules compare an edit's old and new content.
 
+Three rules — `weakened-assertion`, `snapshot-regenerated`, `tolerance-broadened` — are **diff-aware**.
+They compare a declarative matcher-strength table (JS/TS `toStrictEqual` > `toEqual` > `toBe` >
+truthiness/definedness; Python `assertEqual`/`==` > `assertIsNotNone`/`assertTrue`/`is not None`;
+snapshot equality → `toMatchSnapshot`; numeric `places`/precision/`delta`/sleep) and fire only when a
+stricter form for the **same assertion subject** was replaced by a looser one. If the subject cannot
+be aligned, no finding is produced (precision over recall). On an `Edit` the finding is `medium`
+(`high` for unambiguous pairs such as `toEqual` → `toBeDefined`); on a `Write` there is no baseline, so
+the same patterns report at `low` confidence — below the default `--min-confidence medium` gate, so a
+brand-new test is not blocked for using a loose matcher.
+
 ## Allow-list / suppression
 
 - **BDD keywords** (`given`, `when`, `then`, `arrange`, `act`, `assert`, …) are allowed.
