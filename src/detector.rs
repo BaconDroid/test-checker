@@ -6,7 +6,7 @@ use tree_sitter::{Query, QueryCursor, StreamingIterator};
 use crate::engine;
 use crate::language::{is_test_callee, is_test_function_name, language_for_path, test_query};
 use crate::models::{Confidence, Finding};
-use crate::rules::{self, AddedLine};
+use crate::rules::{self, AddedLine, DiffContext};
 
 struct Runtime {
     name: String,
@@ -123,6 +123,7 @@ impl TestDetector {
                 findings.extend(analyze_edited_bodies(
                     &runtime.name,
                     file_path,
+                    old_string,
                     new_string,
                     &bodies,
                     &added,
@@ -455,12 +456,15 @@ fn analyze_new_bodies(
 fn analyze_edited_bodies(
     language: &str,
     file_path: &str,
+    old_content: &str,
     content: &str,
     bodies: &[Body],
     added: &HashSet<usize>,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
     let mut seen: HashMap<String, usize> = HashMap::new();
+    let removed = removed_lines(old_content, content);
+    let diff = DiffContext { removed: &removed };
     for body in bodies {
         let full = body_added_lines(content, body, language);
         let touched: Vec<AddedLine<'_>> = full
@@ -471,7 +475,7 @@ fn analyze_edited_bodies(
         if touched.is_empty() {
             continue;
         }
-        findings.extend(classify_lines(file_path, &touched));
+        findings.extend(classify_diff_lines(file_path, &touched, &diff));
         // `duplicate-test` compares the whole body, so adding the same line to two different
         // tests is not mistaken for one test duplicating another.
         push_duplicate(
@@ -483,6 +487,17 @@ fn analyze_edited_bodies(
         );
     }
     findings
+}
+
+/// The removed (LCS-unmatched old) lines of an edit, trimmed for the diff-aware rules.
+fn removed_lines<'a>(old_content: &'a str, new_content: &str) -> Vec<&'a str> {
+    let removed = engine::added_lines(new_content, old_content);
+    old_content
+        .lines()
+        .enumerate()
+        .filter(|(index, _)| removed.contains(index))
+        .map(|(_, line)| line.trim())
+        .collect()
 }
 
 fn push_duplicate(
@@ -527,6 +542,18 @@ fn classify_lines(file_path: &str, lines: &[AddedLine<'_>]) -> Vec<Finding> {
     let mut findings = Vec::new();
     for index in 0..lines.len() {
         findings.extend(rules::classify_added_line(file_path, lines, index));
+    }
+    findings
+}
+
+fn classify_diff_lines(
+    file_path: &str,
+    lines: &[AddedLine<'_>],
+    diff: &DiffContext<'_>,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for index in 0..lines.len() {
+        findings.extend(rules::classify_diff_line(file_path, lines, index, diff));
     }
     findings
 }

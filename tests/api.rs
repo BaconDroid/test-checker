@@ -17,6 +17,32 @@ fn check_hook_input_given_clean_write_returns_pass() {
 }
 
 #[test]
+fn check_hook_input_given_brand_new_loose_assertion_write_returns_pass() {
+    // given: a new test whose only assertion is a loose matcher; on Write there is no baseline,
+    // so the presence-only rule reports Low and must not reach the default medium gate.
+    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/app.test.js","content":"it('sums', () => {\n  expect(add(1, 2)).toBeDefined();\n});\n"}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn check_hook_input_given_diff_aware_weakening_edit_exits_two() {
+    // given: an edit that replaces an exact matcher with a loose one for the same subject.
+    let input = r#"{"tool_name":"Edit","tool_input":{"file_path":"tests/app.test.js","old_string":"it('sums', () => {\n  expect(add(1, 2)).toEqual(3);\n});\n","new_string":"it('sums', () => {\n  expect(add(1, 2)).toBeDefined();\n});\n"}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then
+    assert_eq!(result.exit_code, 2);
+    assert!(result.message.contains("weakened-assertion"));
+}
+
+#[test]
 fn check_hook_input_given_weakening_write_exits_two() {
     // given
     let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/test_app.py","content":"def test_sums():\n    @pytest.mark.skip\n    assert add(1, 2) == 3\n"}}"#;
