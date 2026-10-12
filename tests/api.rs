@@ -4,19 +4,6 @@ use test_checker::api::{
 };
 
 #[test]
-fn check_hook_input_given_clean_write_returns_pass() {
-    // given
-    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/test_app.py","content":"def test_sums():\n    assert add(1, 2) == 3\n"}}"#;
-
-    // when
-    let result = check_hook_input(input, "");
-
-    // then
-    assert_eq!(result.exit_code, 0);
-    assert!(result.message.contains("Success"));
-}
-
-#[test]
 fn check_hook_input_given_brand_new_loose_assertion_write_returns_pass() {
     // given: a new test whose only assertion is a loose matcher; on Write there is no baseline,
     // so the presence-only rule reports Low and must not reach the default medium gate.
@@ -293,6 +280,11 @@ fn check_hook_input_given_unsupported_language_fails_open() {
 
     // then
     assert_eq!(result.exit_code, 0);
+    assert!(
+        result.message.contains("Non-code file"),
+        "{}",
+        result.message
+    );
 }
 
 #[test]

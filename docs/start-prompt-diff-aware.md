@@ -1,5 +1,8 @@
 # Start prompt — execute `docs/diff-aware-and-query-expansion.md`
 
+> **Status: completed.** The plan this prompt launches landed on `main` (#34, #35) plus
+> review-driven hardening (#36–#44). Retained for history; do not paste it to redo landed work.
+
 Paste this into a fresh session.
 
 ```

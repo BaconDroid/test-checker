@@ -1,5 +1,9 @@
 # Prompt plan — diff-aware presence rules + test-body query expansion
 
+> **Status: completed.** Workstreams A and B landed on `main` (#34, #35), followed by
+> review-driven hardening/simplification (#36–#44). Shipped state: **25 rules** and **21 framework
+> languages**. This document is retained as the historical plan; do not re-run it as pending work.
+
 Handoff prompt for a fresh session working in `BaconDroid/test-checker`. It covers the two requested
 workstreams (A, B) and a prioritized backlog distilled from the external review in
 `test-checker-review.md`. Read `AGENTS.md` and `docs/rebuild-prompt.md` first.

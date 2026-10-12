@@ -19,8 +19,9 @@ owns the rule catalog: one classifier per rule over the added lines / diff. `src
 the extension→grammar map, the per-language test-body query, and the test-path globs.
 `src/filters.rs` owns the BDD/directive/shebang allow-lists, the `test-checker: allow` suppression
 marker, and the agent-memo phrase catalog. `src/output.rs` renders the grouped `<findings>` XML and
-the dedicated agent-memo banner. `tests/contract.rs` is the single owner of the shared hook wire
-contract (message prefix, exit-code mapping, XML shape, fail-open skip reasons).
+the dedicated agent-memo banner. `tests/parity.rs` (with `parity/vectors.json`) plus the
+exact-message/exit-code assertions in `tests/api.rs` are the owners of the shared hook wire contract
+(message prefix, exit-code mapping, XML shape, fail-open skip reasons).
 
 ## Dependency convention
 Direct dependencies are exactly `serde` (data model + serialization), `serde_json` (wire I/O only),
