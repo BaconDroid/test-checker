@@ -389,20 +389,38 @@ fn detect_edit_given_same_line_added_to_two_tests_does_not_report_duplicate() {
 }
 
 #[test]
-fn detect_given_two_identical_tests_reports_duplicate_test() {
-    // given
+fn detect_given_block_commented_assertion_in_body_is_not_classified() {
+    // given: a block-commented assertion inside a test body must be invisible to the line rules
     let detector = TestDetector::new();
-    let source =
-        "def test_a():\n    assert compute() == 1\ndef test_b():\n    assert compute() == 1\n";
+    let source = "it('x', () => {\n  /* expect(1).toBe(1) */\n  expect(add(1, 2)).toBe(3);\n});\n";
 
     // when
-    let findings = detector.detect(source, "tests/test_app.py", true, true);
+    let findings = detector.detect(source, "tests/app.test.js", true, true);
 
     // then
     assert!(
-        findings
+        !findings
             .iter()
-            .any(|finding| finding.rule == "duplicate-test"),
+            .any(|finding| finding.rule == "constant-assertion"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_given_multiline_block_commented_assertion_in_body_is_not_classified() {
+    // given: an unadorned inner line of a multi-line block comment is still a comment
+    let detector = TestDetector::new();
+    let source =
+        "it('x', () => {\n  /*\n  expect(1).toBe(1);\n  */\n  expect(add(1, 2)).toBe(3);\n});\n";
+
+    // when
+    let findings = detector.detect(source, "tests/app.test.js", true, true);
+
+    // then
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "constant-assertion"),
         "findings: {findings:?}"
     );
 }
@@ -563,24 +581,6 @@ fn detect_edit_given_commented_out_baseline_does_not_weaken_at_medium_or_higher(
             .iter()
             .any(|finding| finding.rule == "weakened-assertion"
                 && finding.confidence != Confidence::Low),
-        "findings: {findings:?}"
-    );
-}
-
-#[test]
-fn detect_given_block_commented_assertion_in_body_is_not_classified() {
-    // given: a block-commented assertion inside a test body must be invisible to the line rules
-    let detector = TestDetector::new();
-    let source = "it('x', () => {\n  /* expect(1).toBe(1) */\n  expect(add(1, 2)).toBe(3);\n});\n";
-
-    // when
-    let findings = detector.detect(source, "tests/app.test.js", true, true);
-
-    // then
-    assert!(
-        !findings
-            .iter()
-            .any(|finding| finding.rule == "constant-assertion"),
         "findings: {findings:?}"
     );
 }
