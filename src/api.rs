@@ -211,18 +211,22 @@ fn evaluate(
             "",
         ));
     }
-    if findings.is_empty() {
-        return success();
-    }
+    gate_and_format(&findings, custom_prompt, min_confidence)
+}
 
-    let filtered: Vec<Finding> = apply_filters(&findings)
+/// Apply the filters and the confidence gate, then render: the shared tail of every check path.
+fn gate_and_format(
+    findings: &[Finding],
+    custom_prompt: &str,
+    min_confidence: Confidence,
+) -> HookCheckResult {
+    let filtered: Vec<Finding> = apply_filters(findings)
         .into_iter()
         .filter(|finding| confidence_rank(finding.confidence) >= confidence_rank(min_confidence))
         .collect();
     if filtered.is_empty() {
         return success();
     }
-
     HookCheckResult::block(format_hook_message(&filtered, custom_prompt))
 }
 
@@ -243,17 +247,7 @@ fn harness_result(
             findings.push(finding);
         }
     }
-    if findings.is_empty() {
-        return success();
-    }
-    let filtered: Vec<Finding> = apply_filters(&findings)
-        .into_iter()
-        .filter(|finding| confidence_rank(finding.confidence) >= confidence_rank(min_confidence))
-        .collect();
-    if filtered.is_empty() {
-        return success();
-    }
-    HookCheckResult::block(format_hook_message(&filtered, custom_prompt))
+    gate_and_format(&findings, custom_prompt, min_confidence)
 }
 
 /// Added lines (1-based line number, raw text) for the tool input.
