@@ -158,12 +158,6 @@ fn runtime_by_name(name: &str) -> Option<Arc<Runtime>> {
     Some(runtime)
 }
 
-/// Whether the language has a compiling test-body query (i.e. can yield body-based findings).
-#[must_use]
-pub fn supports_test_bodies(name: &str) -> bool {
-    runtime_by_name(name).is_some_and(|runtime| runtime.test_query.is_some())
-}
-
 fn parse_with_runtime(runtime: &Runtime, source: &[u8]) -> Option<tree_sitter::Tree> {
     engine::parse_cached(&runtime.name, &runtime.language, source)
 }

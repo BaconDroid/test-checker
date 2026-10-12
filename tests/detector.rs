@@ -1,4 +1,4 @@
-use test_checker::detector::{TestDetector, supports_test_bodies};
+use test_checker::detector::TestDetector;
 use test_checker::language::language_for_path;
 
 const FRAMEWORK_CASES: [(&str, &str); 15] = [
@@ -337,18 +337,10 @@ fn pipeline_coverage_given_framework_languages_the_test_body_query_compiles_and_
     for index in 0..FRAMEWORK_CASES.len() {
         let path = FRAMEWORK_CASES[index].0;
         let weakening = WEAKEN_CASES[index].1;
-        let Some(name) = language_for_path(path) else {
-            failures.push(format!("{path}: grammar did not resolve"));
-            continue;
-        };
-        if !supports_test_bodies(name) {
-            failures.push(format!("{path} ({name}): test-body query did not compile"));
-            continue;
-        }
         let findings = detector.detect(weakening, path, true, true);
         if !findings.iter().any(|finding| finding.rule == "skip-added") {
             failures.push(format!(
-                "{path} ({name}): captured body did not yield skip-added: {findings:?}"
+                "{path}: captured body did not yield skip-added: {findings:?}"
             ));
         }
     }
@@ -358,13 +350,22 @@ fn pipeline_coverage_given_framework_languages_the_test_body_query_compiles_and_
 }
 
 #[test]
-fn pipeline_coverage_given_non_framework_languages_have_no_test_body_query() {
-    // then
-    for (path, _) in NON_FRAMEWORK_CASES {
-        let name = language_for_path(path).unwrap_or_default();
-        assert!(
-            !supports_test_bodies(name),
-            "{path} ({name}) unexpectedly has a test-body query"
-        );
+fn pipeline_coverage_given_non_framework_languages_capture_no_test_bodies() {
+    // given
+    let detector = TestDetector::new();
+    let mut failures = Vec::new();
+
+    // when: a skip marker in a language with no test framework must not be captured
+    for (path, source) in NON_FRAMEWORK_CASES {
+        let weakened = format!("{source}@pytest.mark.skip\n");
+        let findings = detector.detect(&weakened, path, true, true);
+        if !findings.is_empty() {
+            failures.push(format!(
+                "{path}: non-framework fixture produced {findings:?}"
+            ));
+        }
     }
+
+    // then
+    assert!(failures.is_empty(), "coverage failures: {failures:#?}");
 }
