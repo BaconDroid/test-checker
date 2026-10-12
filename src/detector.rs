@@ -597,18 +597,39 @@ fn body_added_lines<'a>(content: &'a str, body: &Body, language: &str) -> Vec<Ad
     let Some(text) = content.get(body.start_byte..body.end_byte) else {
         return Vec::new();
     };
+    let mut in_block_comment = false;
     text.lines()
         .enumerate()
-        .map(|(index, line)| AddedLine {
-            line_number: body.start_row + 1 + index,
-            // Comment lines (line- and block-style) are invisible to the line rules.
-            text: if rules::is_comment_line(line) {
-                ""
-            } else {
-                strip_line_comment(line, language)
-            },
+        .map(|(index, line)| {
+            let blanked = is_body_comment(line, &mut in_block_comment);
+            AddedLine {
+                line_number: body.start_row + 1 + index,
+                text: if blanked {
+                    ""
+                } else {
+                    strip_line_comment(line, language)
+                },
+            }
         })
         .collect()
+}
+
+/// Whether a body line is a comment (line- or block-style); tracks `/* … */` state across lines so
+/// the unadorned inner lines of a multi-line block comment (commented-out code) are also blanked.
+fn is_body_comment(line: &str, in_block_comment: &mut bool) -> bool {
+    if *in_block_comment {
+        if line.contains("*/") {
+            *in_block_comment = false;
+        }
+        return true;
+    }
+    if line.trim_start().starts_with("/*") {
+        if !line.contains("*/") {
+            *in_block_comment = true;
+        }
+        return true;
+    }
+    rules::is_comment_line(line)
 }
 
 fn classify_lines(file_path: &str, lines: &[AddedLine<'_>]) -> Vec<Finding> {
