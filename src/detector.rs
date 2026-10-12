@@ -601,35 +601,34 @@ fn body_added_lines<'a>(content: &'a str, body: &Body, language: &str) -> Vec<Ad
     text.lines()
         .enumerate()
         .map(|(index, line)| {
-            let blanked = is_body_comment(line, &mut in_block_comment);
+            let code = strip_block_comment(line, &mut in_block_comment).unwrap_or("");
             AddedLine {
                 line_number: body.start_row + 1 + index,
-                text: if blanked {
-                    ""
-                } else {
-                    strip_line_comment(line, language)
-                },
+                text: strip_line_comment(code, language),
             }
         })
         .collect()
 }
 
-/// Whether a body line is a comment (line- or block-style); tracks `/* … */` state across lines so
-/// the unadorned inner lines of a multi-line block comment (commented-out code) are also blanked.
-fn is_body_comment(line: &str, in_block_comment: &mut bool) -> bool {
+/// The code portion of a body line, tracking `/* … */` state across lines: a line wholly inside a
+/// block comment yields `None`, while code after a `*/` on the closing line is kept.
+fn strip_block_comment<'a>(line: &'a str, in_block_comment: &mut bool) -> Option<&'a str> {
     if *in_block_comment {
-        if line.contains("*/") {
-            *in_block_comment = false;
-        }
-        return true;
-    }
-    if line.trim_start().starts_with("/*") {
-        if !line.contains("*/") {
+        let (_, rest) = line.split_once("*/")?;
+        *in_block_comment = false;
+        Some(rest)
+    } else if let Some(rest) = line.trim_start().strip_prefix("/*") {
+        if let Some((_, after)) = rest.split_once("*/") {
+            Some(after)
+        } else {
             *in_block_comment = true;
+            None
         }
-        return true;
+    } else if rules::is_comment_line(line) {
+        None
+    } else {
+        Some(line)
     }
-    rules::is_comment_line(line)
 }
 
 fn classify_lines(file_path: &str, lines: &[AddedLine<'_>]) -> Vec<Finding> {
