@@ -667,9 +667,10 @@ fn body_signature(lines: &[AddedLine<'_>]) -> String {
 /// whose text happens to appear elsewhere in the old content is not dropped.
 fn line_comment_token(language: &str) -> Option<&'static str> {
     match language {
-        "python" | "ruby" | "bash" | "dockerfile" | "elixir" | "hcl" | "toml" | "yaml" | "cue"
-        | "perl" => Some("#"),
-        "lua" | "sql" | "elm" | "haskell" => Some("--"),
+        "python" | "ruby" | "bash" | "dockerfile" | "elixir" | "hcl" | "toml" | "yaml" | "cue" => {
+            Some("#")
+        }
+        "lua" | "sql" | "elm" => Some("--"),
         "javascript" | "typescript" | "tsx" | "java" | "go" | "rust" | "c" | "cpp" | "csharp"
         | "kotlin" | "scala" | "swift" | "groovy" | "php" | "proto" | "css" | "svelte" => {
             Some("//")

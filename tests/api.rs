@@ -200,6 +200,19 @@ fn check_hook_input_given_deletion_edit_exits_two() {
 }
 
 #[test]
+fn check_hook_input_given_multiedit_deletion_edit_exits_two() {
+    // given: a MultiEdit whose only edit deletes an assertion
+    let input = r#"{"tool_name":"MultiEdit","tool_input":{"file_path":"tests/test_app.py","edits":[{"old_string":"def test_sums():\n    assert add(1, 2) == 3\n","new_string":""}]}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then
+    assert_eq!(result.exit_code, 2);
+    assert!(result.message.contains("gutted-test"));
+}
+
+#[test]
 fn check_hook_input_given_added_suppression_marker_reports_allow_added() {
     // given: a Write that introduces the opt-out marker
     let input = r##"{"tool_name":"Write","tool_input":{"file_path":"tests/test_app.py","content":"# test-checker: allow\ndef test_sums():\n    @pytest.mark.skip\n    assert add(1, 2) == 3\n"}}"##;

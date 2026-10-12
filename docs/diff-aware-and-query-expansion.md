@@ -20,12 +20,12 @@ workstreams (A, B) and a prioritized backlog distilled from the external review 
 - Domain layer: `src/rules.rs` (18-rule catalog), `src/detector.rs` (capture + edit diff), `src/api.rs`,
   `src/language.rs` (`test_query`, `is_test_callee`, `is_test_function_name`, `is_test_path`),
   `src/models.rs`, `src/output.rs`, `src/filters.rs`.
-- **15 framework languages** today (`python`, `javascript`, `typescript`, `tsx`, `go`, `rust`, `ruby`,
+- **15 framework languages** at plan time (`python`, `javascript`, `typescript`, `tsx`, `go`, `rust`, `ruby`,
   `java`, `csharp`, `php`, `kotlin`, `swift`, `scala`, `elixir`, `lua`); the other 16 parse but yield no
   body findings; `commented-out-test` works in all 31.
 - Three rules are **presence-only**: `weakened-assertion`, `snapshot-regenerated`,
   `tolerance-broadened` (fire on any added line containing a marker).
-- Reconciliation with the external review: the live catalog is the **18 rules** (matching the README);
+- Reconciliation with the external review: the catalog at plan time is the **18 rules** (matching the README);
   `unknown-test`/`empty-test`/`assertion-roulette`/`redundant-assertion` no longer exist. The review's
   file-wide `test-checker: allow` bypass **is** real (see Backlog R3). Everything below that cites the
   review is marked **[rev]**.
