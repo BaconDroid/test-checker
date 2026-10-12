@@ -35,7 +35,6 @@ const SKIP_MARKERS: &[&str] = &[
     "markTestSkipped(",
     "XCTSkip(",
     "@tag :skip",
-    "cancel(\"",
     "#[ignore]",
     "#[ignore =",
     "[Ignore]",
@@ -45,6 +44,13 @@ const SKIP_MARKERS: &[&str] = &[
     "TEST_IGNORE",
     "skip <|",
 ];
+
+/// Skip markers that are only a skip as a bare statement: `<expr>.cancel("…")` (an axios
+/// cancellation, say) is not a skipped test, but `ScalaTest`'s `cancel("…")` always is.
+const SKIP_STATEMENT_MARKERS: &[&str] = &["cancel(\""];
+
+/// The `skip-added` message, shared by the marker table and the statement-position marker.
+const SKIP_ADDED_MESSAGE: &str = "A test/assertion was disabled with a skip/ignore marker.";
 
 const FOCUS_MARKERS: &[&str] = &[
     "test.only",
@@ -222,7 +228,7 @@ const MARKER_RULES: &[MarkerRule] = &[
     MarkerRule {
         id: "skip-added",
         confidence: Confidence::High,
-        message: "A test/assertion was disabled with a skip/ignore marker.",
+        message: SKIP_ADDED_MESSAGE,
         markers: SKIP_MARKERS,
     },
     MarkerRule {
@@ -725,6 +731,18 @@ fn classify_line(
                 file_path,
             ));
         }
+    }
+    if SKIP_STATEMENT_MARKERS
+        .iter()
+        .any(|marker| text.starts_with(marker))
+    {
+        findings.push(finish(
+            "skip-added",
+            Confidence::High,
+            SKIP_ADDED_MESSAGE,
+            &line,
+            file_path,
+        ));
     }
     findings.extend(classify_weakening(file_path, &line, text, diff));
     if let Some(finding) = classify_assertion(file_path, &line, text) {
@@ -2177,6 +2195,21 @@ mod tests {
     fn classify_added_line_given_method_cancel_is_not_skip_added() {
         // given: a method call ending in `.cancel()`, not the ScalaTest skip idiom
         let added = lines(&["request.cancel();"]);
+
+        // when
+        let findings = classify_added_line("tests/app.test.js", &added, 0);
+
+        // then
+        assert!(
+            !findings.iter().any(|finding| finding.rule == "skip-added"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_receiver_cancel_with_message_is_not_skip_added() {
+        // given: a double-quoted receiver cancellation (axios/AbortController), not a bare cancel
+        let added = lines(&["source.cancel(\"Operation canceled\");"]);
 
         // when
         let findings = classify_added_line("tests/app.test.js", &added, 0);
