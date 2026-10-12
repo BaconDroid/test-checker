@@ -149,6 +149,18 @@ const ASSERTION_EXISTS_EXTRAS: &[&str] = &[
 /// Markers that indicate a body contains nested test definitions (so it is a suite, not a leaf test).
 const NESTED_TEST_MARKERS: &[&str] = &["it(", "test(", "describe(", "context(", "fit(", "xit("];
 
+/// Config / CI markers that weaken or bypass a test gate.
+const GATE_WEAKENING_MARKERS: &[&str] = &[
+    "|| true",
+    "|| exit 0",
+    "continue-on-error: true",
+    "continue-on-error:true",
+    "allow_failure: true",
+    "allow_failure:true",
+    "--passWithNoTests",
+    "set +e",
+];
+
 /// Jest/Vitest matcher markers that make an `expect(...)` a complete assertion.
 const INCOMPLETE_ASSERTION_MATCHERS: &[&str] = &[
     ".toBe(",
@@ -298,6 +310,20 @@ fn finish(
         file_path,
         line.text,
     )
+}
+
+/// Classify one added line of a harness/config file (outside the test-file gate).
+#[must_use]
+pub fn classify_harness_line(file_path: &str, line: &AddedLine<'_>) -> Option<Finding> {
+    has_marker(line.text, GATE_WEAKENING_MARKERS).then(|| {
+        finish(
+            "gate-weakened",
+            Confidence::Medium,
+            "A test gate can be bypassed here (a failure is ignored or tests may be absent).",
+            line,
+            file_path,
+        )
+    })
 }
 
 /// Classify one added line against the line-oriented rules.
@@ -935,8 +961,8 @@ fn strip_comment_markers(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        AddedLine, assertion_operands, classify_added_line, classify_test_body, diff_findings,
-        looks_like_commented_out_test,
+        AddedLine, assertion_operands, classify_added_line, classify_harness_line,
+        classify_test_body, diff_findings, looks_like_commented_out_test,
     };
 
     fn lines<'a>(texts: &'a [&'a str]) -> Vec<AddedLine<'a>> {
@@ -1333,5 +1359,32 @@ mod tests {
                 .iter()
                 .any(|finding| finding.rule == "no-assertion")
         );
+    }
+
+    #[test]
+    fn classify_harness_line_given_failure_ignored_reports_gate_weakened() {
+        // given
+        let added = lines(&["      - run: cargo test || true"]);
+
+        // when
+        let finding = classify_harness_line(".github/workflows/ci.yml", &added[0]);
+
+        // then
+        assert_eq!(
+            finding.map(|finding| finding.rule),
+            Some("gate-weakened".to_owned())
+        );
+    }
+
+    #[test]
+    fn classify_harness_line_given_plain_command_reports_nothing() {
+        // given
+        let added = lines(&["      - run: cargo test"]);
+
+        // when
+        let finding = classify_harness_line(".github/workflows/ci.yml", &added[0]);
+
+        // then
+        assert!(finding.is_none());
     }
 }

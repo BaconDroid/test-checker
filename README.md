@@ -39,6 +39,12 @@ A file is checked only when its language resolves **and** it is a test file: the
 `is_test_file` wins when present, otherwise test-path globs apply (`tests/`, `__tests__/`, `spec/`,
 `test_*`, `*_test.*`, `*.test.*`, `*.spec.*`).
 
+Harness/config files (`pytest.ini`, `tox.ini`, `setup.cfg`, `pyproject.toml`, `package.json`,
+`jest.config.*`, `vitest.config.*`, `karma.conf.*`, `.nycrc*`, `Makefile`, `.github/workflows/**`,
+`.gitlab-ci*`, `codecov.yml`) are gated separately: an added line that ignores a failure
+(`|| true`, `continue-on-error: true`, `allow_failure: true`, `--passWithNoTests`, `set +e`) is
+reported as `gate-weakened`.
+
 ## Languages
 
 Every language compiled by `tree-sitter-language-pack` (31, listed in `.cargo/config.toml`'s
@@ -56,7 +62,8 @@ blocks (`<script>`, markdown fences, …).
 `tautological-assertion`, `constant-assertion`, `weakened-assertion`, `swallowed-error`,
 `incomplete-assertion`, `unawaited-assertion`, `broad-exception`, `mock-of-sut`, `over-mocking`,
 `duplicate-test`, `expected-copied-from-actual`, `snapshot-regenerated`, `tolerance-broadened`,
-`conditional-assertion`, `retry-added`, `agent-memo-test`, `allow-added`, `commented-out-test`.
+`conditional-assertion`, `retry-added`, `agent-memo-test`, `allow-added`, `gate-weakened`,
+`commented-out-test`.
 
 Each finding carries a `confidence` of `high`/`medium`/`low`. Line rules classify the added lines of
 the captured test bodies (comments stripped); diff rules compare an edit's old and new content.
