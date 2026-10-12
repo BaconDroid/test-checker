@@ -175,6 +175,10 @@ fn evaluate(
             let mut findings = Vec::new();
             for edit in &hook_input.tool_input.edits {
                 if edit.new_string.is_empty() {
+                    // A deletion edit has no new content to parse, but it can still remove assertions.
+                    if include_body_tests && !edit.old_string.is_empty() {
+                        findings.extend(rules::diff_findings(&edit.old_string, "", file_path));
+                    }
                     continue;
                 }
                 findings.extend(detector.detect_edit(
