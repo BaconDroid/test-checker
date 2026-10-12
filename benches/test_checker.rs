@@ -14,6 +14,8 @@ const SAMPLES: usize = 5;
 const PYTHON_CLEAN: &str = "def test_adds():\n    assert add(1, 2) == 3\n";
 const PYTHON_WEAKENED: &str =
     "def test_adds():\n    value = add(1, 2)\n    @pytest.mark.skip\n    assert value == value\n";
+const CPP_CLEAN: &str = "TEST(Math, Adds) {\n  EXPECT_EQ(add(1, 2), 3);\n}\n";
+const BASH_CLEAN: &str = "@test \"adds\" {\n  run add 1 2\n  assert_success\n}\n";
 
 fn measure(name: &str, run: &mut impl FnMut()) {
     for _ in 0..WARMUP_ITERATIONS {
@@ -55,6 +57,22 @@ fn main() {
         black_box(detector.detect(
             black_box(PYTHON_CLEAN),
             black_box("config.toml"),
+            true,
+            true,
+        ));
+    });
+    measure("detect_cpp_clean", &mut || {
+        black_box(detector.detect(
+            black_box(CPP_CLEAN),
+            black_box("tests/math_test.cpp"),
+            true,
+            true,
+        ));
+    });
+    measure("detect_bash_clean", &mut || {
+        black_box(detector.detect(
+            black_box(BASH_CLEAN),
+            black_box("tests/math.bats"),
             true,
             true,
         ));

@@ -50,9 +50,10 @@ reported as `gate-weakened`.
 Every language compiled by `tree-sitter-language-pack` (31, listed in `.cargo/config.toml`'s
 `TSLP_LANGUAGES`)
 is parsed. A language yields body-based findings only when it has a real test framework and a
-compiling test-body query: python, javascript, typescript, tsx, go, rust, ruby, java, csharp, php,
-kotlin, swift, scala, elixir, lua. Other languages (`dockerfile`, `hcl`, `proto`, `toml`, `yaml`,
-`css`, `html`, `cue`, …) parse cleanly and report nothing body-based. The `commented-out-test`
+compiling test-body query (21): python, javascript, typescript, tsx, go, rust, ruby, java, csharp,
+php, kotlin, swift, scala, elixir, lua, c, cpp, groovy, ocaml, elm, bash. Other languages
+(`dockerfile`, `hcl`, `proto`, `toml`, `yaml`, `css`, `html`, `cue`, …) parse cleanly and report
+nothing body-based. The `commented-out-test`
 signal runs over comment captures for every language, including comments inside injected/embedded
 blocks (`<script>`, markdown fences, …).
 
