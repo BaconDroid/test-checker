@@ -566,3 +566,21 @@ fn detect_edit_given_commented_out_baseline_does_not_weaken_at_medium_or_higher(
         "findings: {findings:?}"
     );
 }
+
+#[test]
+fn detect_given_block_commented_assertion_in_body_is_not_classified() {
+    // given: a block-commented assertion inside a test body must be invisible to the line rules
+    let detector = TestDetector::new();
+    let source = "it('x', () => {\n  /* expect(1).toBe(1) */\n  expect(add(1, 2)).toBe(3);\n});\n";
+
+    // when
+    let findings = detector.detect(source, "tests/app.test.js", true, true);
+
+    // then
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "constant-assertion"),
+        "findings: {findings:?}"
+    );
+}

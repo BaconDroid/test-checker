@@ -17,6 +17,7 @@ const SKIP_MARKERS: &[&str] = &[
     "describe.skip",
     "context.skip",
     "specify.skip",
+    "suite.skip",
     "xit(",
     "xtest(",
     "xdescribe(",
@@ -996,6 +997,10 @@ pub fn classify_test_body(
 /// Whether a raw line looks like a comment line (a commented-out assertion is not real code).
 pub(crate) fn is_comment_line(line: &str) -> bool {
     let trimmed = line.trim_start();
+    // `#[…]` is a Rust attribute (e.g. `#[ignore]`), not a comment.
+    if trimmed.starts_with("#[") {
+        return false;
+    }
     ["#", "//", "--", "/*", "*"]
         .iter()
         .any(|prefix| trimmed.starts_with(prefix))
@@ -2321,6 +2326,23 @@ mod tests {
         // then
         assert!(
             findings.iter().any(|finding| finding.rule == "skip-added"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_catchhandlers_identifier_is_not_swallowed_error() {
+        // given: an identifier containing "catch" is not a catch clause
+        let added = lines(&["const catchHandlers = {};"]);
+
+        // when
+        let findings = classify_added_line("tests/app.test.js", &added, 0);
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "swallowed-error"),
             "{findings:?}"
         );
     }
