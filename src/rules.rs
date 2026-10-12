@@ -135,6 +135,53 @@ const ASSERTION_MARKERS: &[&str] = &[
     "Assert.Equal(",
 ];
 
+/// A rule that fires when an added line contains any of its markers.
+struct MarkerRule {
+    id: &'static str,
+    confidence: Confidence,
+    message: &'static str,
+    markers: &'static [&'static str],
+}
+
+const MARKER_RULES: &[MarkerRule] = &[
+    MarkerRule {
+        id: "skip-added",
+        confidence: Confidence::High,
+        message: "A test/assertion was disabled with a skip/ignore marker.",
+        markers: SKIP_MARKERS,
+    },
+    MarkerRule {
+        id: "focus-added",
+        confidence: Confidence::High,
+        message: "A focused test restricts the suite to a subset of tests.",
+        markers: FOCUS_MARKERS,
+    },
+    MarkerRule {
+        id: "weakened-assertion",
+        confidence: Confidence::Medium,
+        message: "The assertion was loosened to a weaker matcher.",
+        markers: WEAKENED_MARKERS,
+    },
+    MarkerRule {
+        id: "snapshot-regenerated",
+        confidence: Confidence::Medium,
+        message: "A snapshot/approval assertion may have been regenerated without review.",
+        markers: SNAPSHOT_MARKERS,
+    },
+    MarkerRule {
+        id: "tolerance-broadened",
+        confidence: Confidence::Medium,
+        message: "A tolerance/timeout/sleep may have been widened to hide flakiness.",
+        markers: TOLERANCE_MARKERS,
+    },
+    MarkerRule {
+        id: "retry-added",
+        confidence: Confidence::Medium,
+        message: "A retry/flaky marker was added to make an unstable test pass.",
+        markers: RETRY_MARKERS,
+    },
+];
+
 const fn is_identifier_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
@@ -217,62 +264,19 @@ pub fn classify_added_line(file_path: &str, added: &[AddedLine<'_>], index: usiz
     let text = line.text.trim();
     let mut findings = Vec::new();
 
-    if has_marker(text, SKIP_MARKERS) {
-        findings.push(finish(
-            "skip-added",
-            Confidence::High,
-            "A test/assertion was disabled with a skip/ignore marker.",
-            &line,
-            file_path,
-        ));
-    }
-    if has_marker(text, FOCUS_MARKERS) {
-        findings.push(finish(
-            "focus-added",
-            Confidence::High,
-            "A focused test restricts the suite to a subset of tests.",
-            &line,
-            file_path,
-        ));
+    for rule in MARKER_RULES {
+        if has_marker(text, rule.markers) {
+            findings.push(finish(
+                rule.id,
+                rule.confidence,
+                rule.message,
+                &line,
+                file_path,
+            ));
+        }
     }
     if let Some(finding) = classify_assertion(file_path, &line, text) {
         findings.push(finding);
-    }
-    if has_marker(text, WEAKENED_MARKERS) {
-        findings.push(finish(
-            "weakened-assertion",
-            Confidence::Medium,
-            "The assertion was loosened to a weaker matcher.",
-            &line,
-            file_path,
-        ));
-    }
-    if has_marker(text, SNAPSHOT_MARKERS) {
-        findings.push(finish(
-            "snapshot-regenerated",
-            Confidence::Medium,
-            "A snapshot/approval assertion may have been regenerated without review.",
-            &line,
-            file_path,
-        ));
-    }
-    if has_marker(text, TOLERANCE_MARKERS) {
-        findings.push(finish(
-            "tolerance-broadened",
-            Confidence::Medium,
-            "A tolerance/timeout/sleep may have been widened to hide flakiness.",
-            &line,
-            file_path,
-        ));
-    }
-    if has_marker(text, RETRY_MARKERS) {
-        findings.push(finish(
-            "retry-added",
-            Confidence::Medium,
-            "A retry/flaky marker was added to make an unstable test pass.",
-            &line,
-            file_path,
-        ));
     }
     if let Some(finding) = classify_swallowed_error(file_path, added, index, text) {
         findings.push(finding);
@@ -290,7 +294,11 @@ pub fn classify_added_line(file_path: &str, added: &[AddedLine<'_>], index: usiz
 }
 
 fn classify_assertion(file_path: &str, line: &AddedLine<'_>, text: &str) -> Option<Finding> {
-    if is_constant_assertion(text) {
+    let operands = assertion_operands(text);
+    let literal_pair = operands
+        .as_ref()
+        .is_some_and(|(left, right)| is_literal(left) && is_literal(right));
+    if literal_pair || is_constant_bool_assertion(text) {
         return Some(finish(
             "constant-assertion",
             Confidence::High,
@@ -299,7 +307,7 @@ fn classify_assertion(file_path: &str, line: &AddedLine<'_>, text: &str) -> Opti
             file_path,
         ));
     }
-    if let Some((left, right)) = assertion_operands(text) {
+    if let Some((left, right)) = operands {
         if left == right && !is_literal(&left) {
             return Some(finish(
                 "tautological-assertion",
@@ -320,22 +328,12 @@ fn classify_swallowed_error(
     text: &str,
 ) -> Option<Finding> {
     let next = added.get(index + 1).map(|line| line.text.trim());
-    let window = added
-        .get(index..=index + 2)
-        .map(|slice| {
-            slice
-                .iter()
-                .map(|line| line.text.trim())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
     let swallows = if text.contains("except") {
         let tail = text.split("except").nth(1).unwrap_or("");
         has_word(tail, "pass") || next == Some("pass")
     } else if text.contains("catch") {
         let brace_empty = text.contains("{}") || text.contains("{ }");
-        let brace_closed_next = next == Some("}") || window.get(1).is_some_and(|line| *line == "}");
-        brace_empty || brace_closed_next
+        brace_empty || next == Some("}")
     } else {
         false
     };
@@ -478,20 +476,21 @@ pub fn diff_findings(old_content: &str, new_content: &str, file_path: &str) -> V
         .filter(|line| has_marker(line.trim(), ASSERTION_MARKERS))
         .count();
     if new_assertions < old_assertions {
-        let removed = old_assertions - new_assertions;
-        findings.push(Finding::new(
-            "assertion-removed",
-            Confidence::High,
-            format!("{removed} existing assertion(s) were removed without a replacement."),
-            1,
-            file_path,
-            "",
-        ));
         if new_assertions == 0 {
             findings.push(Finding::new(
                 "gutted-test",
                 Confidence::High,
                 "The test was stripped of all assertions (or emptied) by this edit.",
+                1,
+                file_path,
+                "",
+            ));
+        } else {
+            let removed = old_assertions - new_assertions;
+            findings.push(Finding::new(
+                "assertion-removed",
+                Confidence::High,
+                format!("{removed} existing assertion(s) were removed without a replacement."),
                 1,
                 file_path,
                 "",
@@ -582,15 +581,11 @@ fn test_name_literal(text: &str) -> Option<String> {
     quoted_strings(after).into_iter().next()
 }
 
-fn is_constant_assertion(text: &str) -> bool {
+fn is_constant_bool_assertion(text: &str) -> bool {
     let compact: String = text.split_whitespace().collect();
-    if compact.contains("assertTrue(true)")
+    compact.contains("assertTrue(true)")
         || compact.contains("assertFalse(false)")
         || compact.contains("assert(true)")
-    {
-        return true;
-    }
-    assertion_operands(text).is_some_and(|(left, right)| is_literal(&left) && is_literal(&right))
 }
 
 fn is_literal(value: &str) -> bool {
@@ -623,10 +618,9 @@ pub fn assertion_operands(line: &str) -> Option<(String, String)> {
         return split_two(inner);
     }
     if let Some(inner) = inner_args(stripped, "assert!(") {
-        if inner.contains("==") {
-            return split_two(&inner.replace("==", ","));
-        }
-        return None;
+        return inner
+            .split_once("==")
+            .map(|(left, right)| (left.trim().to_string(), right.trim().to_string()));
     }
     if let Some(inner) = inner_args(stripped, "assertEqual(") {
         return split_two(inner);

@@ -183,7 +183,7 @@ fn check_hook_input_given_deletion_edit_exits_two() {
 
     // then
     assert_eq!(result.exit_code, 2);
-    assert!(result.message.contains("assertion-removed"));
+    assert!(result.message.contains("gutted-test"));
 }
 
 #[test]

@@ -29,7 +29,7 @@ pub struct Finding {
     pub rule: String,
     pub confidence: Confidence,
     pub message: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(skip)]
     pub text: String,
 }
 
