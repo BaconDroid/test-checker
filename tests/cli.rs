@@ -135,3 +135,19 @@ fn cli_given_min_confidence_equals_low_keeps_medium_finding() -> std::io::Result
     assert_eq!(output.status.code(), Some(2));
     Ok(())
 }
+
+#[test]
+fn cli_given_version_prints_name_and_version() -> std::io::Result<()> {
+    // given / when
+    let output = run_checker("", &["--version"])?;
+
+    // then
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(env!("CARGO_PKG_NAME")), "stdout: {stdout}");
+    assert!(
+        stdout.contains(env!("CARGO_PKG_VERSION")),
+        "stdout: {stdout}"
+    );
+    Ok(())
+}
