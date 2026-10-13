@@ -118,6 +118,20 @@ brand-new test is not blocked for using a loose matcher.
 `agent-memo-test` findings are additionally summarised under a dedicated banner, pointing at the test
 name/assertion message that describes a change instead of the behavior.
 
+## Scope and non-goals
+
+`test-checker` targets **test weakening** (a change that disables, hollows out, or loosens a test
+while still passing) and **bad or surplus tests** (no assertion, tautological/constant assertions,
+swallowed errors, over-mocking, duplicates). It is deliberately **not**:
+
+- **production code written to pass the tests** (a test-mode branch, a constant `__eq__`, stack
+  introspection, cross-file hardcoding). Detecting that needs cross-file heuristics or a judge, not
+  a per-write hook; a separate `prod-checker` would own it.
+- **rules over Bash commands** (`git log -S`, `curl *.patch`, `-u` snapshot regeneration): a
+  different matcher, a different binary.
+- **`tests-not-run`**: not observable from a `Write`/`Edit`.
+- **classic test smells** (Assertion Roulette, Magic Number, Eager, Long): noisy on generated tests.
+
 ## Library
 
 ```rust
