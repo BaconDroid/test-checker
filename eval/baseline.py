@@ -75,9 +75,12 @@ def main() -> int:
     samples.sort()
     p50 = statistics.median(samples)
     p95 = samples[int(len(samples) * 0.95)]
-    verdict = "ok" if p95 < BUDGET_P95_MS else "OVER BUDGET"
-    print(f"\nper-invocation (startup included): p50 {p50:.2f} ms, p95 {p95:.2f} ms "
-          f"[{verdict}, budget p95 < {BUDGET_P95_MS} ms]")
+    if "debug" in binary.parts:
+        note = "debug profile: the budget applies to release"
+    else:
+        verdict = "ok" if p95 < BUDGET_P95_MS else "OVER BUDGET"
+        note = f"{verdict}, budget p95 < {BUDGET_P95_MS} ms"
+    print(f"\nper-invocation (startup included): p50 {p50:.2f} ms, p95 {p95:.2f} ms [{note}]")
 
     if failures:
         print(f"\nbaseline: {failures} contract failure(s)", file=sys.stderr)
