@@ -61,6 +61,9 @@ command text, so weakening it (a bare command, `|| exit 0`, …) fails the build
 Clean runs print `[test-checker] Success: No problematic tests found`; skipped runs print
 `[test-checker] Skipping: <reason>`.
 
+`--strip` is accepted for forward compatibility but is **inert**: an inert notice is printed and the
+file is never rewritten.
+
 ## Test gate
 
 A file is checked only when its language resolves **and** it is a test file: the payload's explicit
