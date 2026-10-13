@@ -132,6 +132,9 @@ swallowed errors, over-mocking, duplicates). It is deliberately **not**:
 - **`tests-not-run`**: not observable from a `Write`/`Edit`.
 - **classic test smells** (Assertion Roulette, Magic Number, Eager, Long): noisy on generated tests.
 
+The shared vocabulary (verdict, reason, evidence, unreliable, floor, and the difference between
+fail-open and a silent pass) is in [`CONCEPTS.md`](CONCEPTS.md).
+
 ## Library
 
 ```rust
