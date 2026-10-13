@@ -1,0 +1,35 @@
+[
+  { "path": "tests/a_test.py", "content": "def test_a():\n    @pytest.mark.skip\n    assert x == 1\n", "expected": "skip-added" },
+  { "path": "tests/t_test.py", "content": "import unittest\nclass T(unittest.TestCase):\n    @unittest.skip(\"flaky\")\n    def test_a(self):\n        self.assertEqual(1, 1)\n", "expected": "skip-added" },
+
+  { "path": "tests/a.test.js", "content": "test.only('x', () => { expect(1).toBe(1); });\n", "expected": "focus-added" },
+  { "path": "tests/a.test.js", "content": "describe.only('suite', () => {\n  test('x', () => { expect(1).toBe(1); });\n});\n", "expected": "focus-added" },
+
+  { "path": "tests/t_test.py", "content": "def test_a():\n    with pytest.raises(Exception):\n        f()\n", "expected": "broad-exception" },
+  { "path": "tests/t.rs", "content": "#[test]\n#[should_panic]\nfn t() {\n    panic!(\"boom\");\n}\n", "expected": "broad-exception" },
+
+  { "path": "tests/t_test.py", "content": "def test_a():\n    try:\n        f()\n    except Exception:\n        pass\n    assert True\n", "expected": "swallowed-error" },
+  { "path": "tests/a.test.js", "content": "test('x', () => {\n  try { f(); } catch (e) {}\n  expect(1).toBe(1);\n});\n", "expected": "swallowed-error" },
+
+  { "path": "tests/a.test.js", "content": "test('x', () => {\n  expect(1);\n});\n", "expected": "incomplete-assertion" },
+  { "path": "tests/a.test.js", "content": "test('x', () => {\n  expect(1).toBe;\n});\n", "expected": "incomplete-assertion" },
+
+  { "path": "tests/a.test.js", "content": "test('x', () => {\n  expect(p).resolves.toBe(1);\n});\n", "expected": "unawaited-assertion" },
+  { "path": "tests/a.test.js", "content": "test('x', () => {\n  expect(p).rejects.toThrow();\n});\n", "expected": "unawaited-assertion" },
+
+  { "path": "tests/t_test.py", "content": "# def test_old():\n#     assert x == 1\n", "expected": "commented-out-test" },
+  { "path": "tests/a.test.js", "content": "// it('old', () => {\n//   expect(1).toBe(1);\n// });\n", "expected": "commented-out-test" },
+
+  { "path": "tests/t_test.py", "content": "def test_a():\n    x = 1\n", "expected": "no-assertion" },
+
+  { "path": "tests/t_test.py", "content": "def test_a():\n    assert x == x\n", "expected": "tautological-assertion" },
+  { "path": "tests/a.test.js", "content": "test('x', () => {\n  expect(y).toEqual(y);\n});\n", "expected": "tautological-assertion" },
+
+  { "path": "tests/a.test.js", "content": "test('x', () => {\n  expect(1).toBe(1);\n});\n", "expected": "constant-assertion" },
+
+  { "path": ".github/workflows/ci.yml", "content": "jobs:\n  test:\n    steps:\n      - run: pytest || true\n", "expected": "gate-weakened" },
+  { "path": ".github/workflows/ci.yml", "content": "jobs:\n  test:\n    steps:\n      - uses: foo\n        continue-on-error: true\n", "expected": "gate-weakened" },
+
+  { "path": "tests/t_test.py", "content": "def test_add():\n    assert add(1, 2) == 3\n", "expected": null },
+  { "path": "tests/a.test.js", "content": "test('adds', () => {\n  expect(add(1, 2)).toBe(3);\n});\n", "expected": null }
+]
