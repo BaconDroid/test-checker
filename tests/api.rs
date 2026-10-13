@@ -1,7 +1,9 @@
 use serde_json::Value;
 use test_checker::api::{
-    check_hook_input, check_hook_input_json, check_hook_input_with_options, detect_findings_json,
+    check_hook_input, check_hook_input_from_reader, check_hook_input_json,
+    check_hook_input_with_options, detect_findings_json,
 };
+use test_checker::engine::Options;
 
 #[test]
 fn check_hook_input_given_brand_new_loose_assertion_write_returns_pass() {
@@ -347,4 +349,45 @@ fn check_hook_input_given_unknown_tool_skips() {
 
     // then
     assert_eq!(result.exit_code, 0);
+}
+
+/// Options that keep low-confidence findings, so the harness/config rules are observable.
+fn low_confidence_options() -> Options {
+    Options {
+        min_confidence: Some("low".to_owned()),
+        ..Options::default()
+    }
+}
+
+#[test]
+fn check_hook_input_from_reader_given_harness_edit_reports_harness_edited() {
+    // given: a harness edit with no gate marker, checked with low findings kept
+    let input = r#"{"tool_name":"Edit","tool_input":{"file_path":".github/workflows/ci.yml","old_string":"      - run: cargo fmt\n","new_string":"      - run: cargo clippy\n"}}"#;
+
+    // when
+    let result = check_hook_input_from_reader(input.as_bytes(), &low_confidence_options());
+
+    // then: harness-edited fires as its own low-confidence finding
+    assert_eq!(result.exit_code, 2);
+    assert!(
+        result.message.contains("harness-edited"),
+        "message: {}",
+        result.message
+    );
+}
+
+#[test]
+fn check_hook_input_from_reader_given_non_harness_edit_does_not_report_harness_edited() {
+    // given: a plain test-file edit, checked with low findings kept
+    let input = r#"{"tool_name":"Edit","tool_input":{"file_path":"tests/test_app.py","old_string":"def test_a():\n    assert x == 1\n","new_string":"def test_a():\n    assert x == 2\n"}}"#;
+
+    // when
+    let result = check_hook_input_from_reader(input.as_bytes(), &low_confidence_options());
+
+    // then
+    assert!(
+        !result.message.contains("harness-edited"),
+        "message: {}",
+        result.message
+    );
 }

@@ -95,7 +95,7 @@ blocks (`<script>`, markdown fences, …).
 `incomplete-assertion`, `unawaited-assertion`, `broad-exception`, `mock-of-sut`, `over-mocking`,
 `duplicate-test`, `expected-copied-from-actual`, `snapshot-regenerated`, `tolerance-broadened`,
 `conditional-assertion`, `retry-added`, `agent-memo-test`, `allow-added`, `gate-weakened`,
-`commented-out-test`.
+`commented-out-test`, `source-grep-test`, `test-volume`, `harness-edited`.
 
 Each finding carries a `confidence` of `high`/`medium`/`low`. Line rules classify the added lines of
 the captured test bodies (comments stripped); diff rules compare an edit's old and new content.

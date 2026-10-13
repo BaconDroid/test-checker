@@ -514,6 +514,10 @@ fn analyze_new_bodies(
             &lines,
         );
     }
+    let added_test_lines: Vec<usize> = bodies.iter().map(|body| body.start_row + 1).collect();
+    if let Some(finding) = rules::test_volume_finding(file_path, &added_test_lines) {
+        findings.push(finding);
+    }
     findings
 }
 
@@ -549,6 +553,14 @@ fn analyze_edited_bodies(
             body.start_row + 1,
             &full,
         );
+    }
+    let added_test_lines: Vec<usize> = bodies
+        .iter()
+        .filter(|body| added.contains(&body.start_row))
+        .map(|body| body.start_row + 1)
+        .collect();
+    if let Some(finding) = rules::test_volume_finding(file_path, &added_test_lines) {
+        findings.push(finding);
     }
     findings
 }

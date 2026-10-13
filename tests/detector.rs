@@ -609,3 +609,96 @@ fn detect_edit_given_commented_out_baseline_does_not_weaken_at_medium_or_higher(
         "findings: {findings:?}"
     );
 }
+
+#[test]
+fn detect_given_test_reading_a_source_file_reports_source_grep_test() {
+    // given: a test body that reads a source file and asserts on its text
+    let detector = TestDetector::new();
+    let source = "def test_reads_source():\n    text = Path(\"src/app.py\").read_text()\n    assert \"def \" in text\n";
+
+    // when
+    let findings = detector.detect(source, "tests/test_app.py", true, true);
+
+    // then: the rule fires at low confidence, so it is logged but does not block by default
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "source-grep-test"
+                && finding.confidence == Confidence::Low),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_given_test_reading_a_fixture_does_not_report_source_grep_test() {
+    // given: the read targets a non-source fixture, and a second body reads a source file but
+    // makes no assertion
+    let detector = TestDetector::new();
+    let fixture = "it('reads', () => {\n  const text = fs.readFileSync('tests/fixtures/data.json', 'utf8');\n  expect(text).toContain('x');\n});\n";
+    let no_assertion = "def test_reads_source():\n    text = Path(\"src/app.py\").read_text()\n";
+
+    // when
+    let fixture_findings = detector.detect(fixture, "tests/app.test.js", true, true);
+    let no_assertion_findings = detector.detect(no_assertion, "tests/test_app.py", true, true);
+
+    // then
+    assert!(
+        !fixture_findings
+            .iter()
+            .any(|finding| finding.rule == "source-grep-test"),
+        "findings: {fixture_findings:?}"
+    );
+    assert!(
+        !no_assertion_findings
+            .iter()
+            .any(|finding| finding.rule == "source-grep-test"),
+        "findings: {no_assertion_findings:?}"
+    );
+}
+
+/// Build `count` Python test functions, each carrying one assertion.
+fn python_tests(count: usize) -> String {
+    use std::fmt::Write as _;
+    let mut source = String::new();
+    for index in 0..count {
+        let _ = write!(
+            source,
+            "def test_{index}():\n    assert {index} == {index}\n"
+        );
+    }
+    source
+}
+
+#[test]
+fn detect_given_more_than_ten_added_tests_reports_test_volume() {
+    // given: eleven new test functions in one payload
+    let detector = TestDetector::new();
+    let source = python_tests(11);
+
+    // when
+    let findings = detector.detect(&source, "tests/test_app.py", true, true);
+
+    // then: one low-confidence volume warning
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "test-volume" && finding.confidence == Confidence::Low),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_given_ten_added_tests_does_not_report_test_volume() {
+    // given: exactly ten new test functions, the threshold edge
+    let detector = TestDetector::new();
+    let source = python_tests(10);
+
+    // when
+    let findings = detector.detect(&source, "tests/test_app.py", true, true);
+
+    // then
+    assert!(
+        !findings.iter().any(|finding| finding.rule == "test-volume"),
+        "findings: {findings:?}"
+    );
+}

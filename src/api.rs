@@ -247,16 +247,27 @@ fn harness_result(
     custom_prompt: &str,
     min_confidence: Confidence,
 ) -> HookCheckResult {
+    let added = raw_added_lines(hook_input);
     let mut findings = Vec::new();
-    for (line_number, text) in raw_added_lines(hook_input) {
+    // Any added non-blank line of a harness/config file is itself worth reviewing.
+    if let Some((line_number, text)) = added.iter().find(|(_, text)| !text.trim().is_empty()) {
+        findings.push(rules::harness_edited_finding(
+            file_path,
+            &AddedLine {
+                line_number: *line_number,
+                text: text.as_str(),
+            },
+        ));
+    }
+    for (line_number, text) in &added {
         // A gate marker inside a comment (e.g. a workflow's `# … || true` note) is not a real
         // weakening; comment lines are invisible to the line rules by design.
-        if rules::is_comment_line(&text) {
+        if rules::is_comment_line(text) {
             continue;
         }
         let line = AddedLine {
-            line_number,
-            text: &text,
+            line_number: *line_number,
+            text: text.as_str(),
         };
         if let Some(finding) = rules::classify_harness_line(file_path, &line) {
             findings.push(finding);
