@@ -185,6 +185,25 @@ const NESTED_TEST_MARKERS: &[&str] = &[
     "xit(",
 ];
 
+/// Source-file extensions (without the dot) that mark a literal as naming source code rather than
+/// test data; a test that reads one asserts on source text, not behaviour. The list covers each
+/// supported grammar's file extension, including the alternate `haskell` spelling alongside `hs`.
+const SOURCE_FILE_EXTENSIONS: &[&str] = &[
+    "py", "js", "ts", "tsx", "jsx", "rs", "go", "java", "rb", "php", "c", "cpp", "h", "hpp", "cs",
+    "kt", "swift", "scala", "lua", "ex", "exs", "hs", "haskell", "dart", "r", "zig",
+];
+
+/// Callee substrings that mark a file-read call; the string literal after one names the file.
+const SOURCE_READ_CALLEES: &[&str] = &[
+    "read_to_string",
+    "read_text",
+    "readFileSync",
+    "readFile",
+    "include_str!",
+    "fs::read",
+    "File::open",
+];
+
 /// Config / CI markers that weaken or bypass a test gate.
 const GATE_WEAKENING_MARKERS: &[&str] = &[
     "|| true",
@@ -676,6 +695,17 @@ pub fn classify_harness_line(file_path: &str, line: &AddedLine<'_>) -> Option<Fi
     })
 }
 
+/// The `harness-edited` finding for an added non-blank line of a harness/config file.
+pub(crate) fn harness_edited_finding(file_path: &str, line: &AddedLine<'_>) -> Finding {
+    finish(
+        "harness-edited",
+        Confidence::Low,
+        "A test-harness/config file was edited; confirm the gate was not weakened.",
+        line,
+        file_path,
+    )
+}
+
 /// Classify one added line against the line-oriented rules (presence-only, no diff baseline).
 #[must_use]
 pub fn classify_added_line(file_path: &str, added: &[AddedLine<'_>], index: usize) -> Vec<Finding> {
@@ -939,6 +969,61 @@ fn classify_agent_memo(file_path: &str, line: &AddedLine<'_>, text: &str) -> Opt
         })
 }
 
+/// Whether `value` (an already-unquoted literal) names a source file by its extension.
+fn is_source_file_name(value: &str) -> bool {
+    let Some(extension) = std::path::Path::new(value)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+    else {
+        return false;
+    };
+    SOURCE_FILE_EXTENSIONS
+        .iter()
+        .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+}
+
+/// The first string literal appearing at or after `offset` in `text`, if any.
+fn literal_after(text: &str, offset: usize) -> Option<String> {
+    quoted_strings(&text[offset..]).into_iter().next()
+}
+
+/// Whether `text` reads a source file: a read callee whose string argument names source code.
+fn reads_source_file(text: &str) -> bool {
+    if SOURCE_READ_CALLEES.iter().any(|callee| {
+        text.find(callee).is_some_and(|index| {
+            literal_after(text, index + callee.len())
+                .is_some_and(|literal| is_source_file_name(&literal))
+        })
+    }) {
+        return true;
+    }
+    // `Path("…").read_text()`: the literal precedes the `.read_text` callee.
+    text.find("Path(").is_some_and(|index| {
+        text.contains(".read_text")
+            && literal_after(text, index + "Path(".len())
+                .is_some_and(|literal| is_source_file_name(&literal))
+    })
+}
+
+/// The number of added tests a single change may carry before `test-volume` reports.
+pub(crate) const TEST_VOLUME_LIMIT: usize = 10;
+
+/// The `test-volume` finding when one change adds more than [`TEST_VOLUME_LIMIT`] tests.
+pub(crate) fn test_volume_finding(file_path: &str, added_test_lines: &[usize]) -> Option<Finding> {
+    if added_test_lines.len() <= TEST_VOLUME_LIMIT {
+        return None;
+    }
+    let first_line = *added_test_lines.iter().min()?;
+    Some(Finding::new(
+        "test-volume",
+        Confidence::Low,
+        "More than 10 tests were added in one change; review the volume.",
+        first_line,
+        file_path,
+        "",
+    ))
+}
+
 /// Classify a captured test body for body-level rules that need no diff.
 #[must_use]
 pub fn classify_test_body(
@@ -996,6 +1081,17 @@ pub fn classify_test_body(
             Confidence::Medium,
             "The test has no assertion and may never fail.",
             &anchor,
+            file_path,
+        ));
+    }
+    if has_assertion
+        && let Some(read_line) = body.iter().find(|line| reads_source_file(line.text.trim()))
+    {
+        findings.push(finish(
+            "source-grep-test",
+            Confidence::Low,
+            "This test reads a source file and asserts on its text; test behaviour, not source text.",
+            read_line,
             file_path,
         ));
     }
