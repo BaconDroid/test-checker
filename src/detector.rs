@@ -497,7 +497,7 @@ fn analyze_new_bodies(
     bodies: &[Body],
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
-    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut seen = DuplicateSignatures::default();
     for body in bodies {
         let lines = body_added_lines(content, body, language);
         findings.extend(classify_lines(file_path, &lines));
@@ -506,11 +506,13 @@ fn analyze_new_bodies(
             body.start_row + 1,
             &lines,
         ));
+        let exact_lines = body_raw_lines(content, body);
         push_duplicate(
             &mut findings,
             &mut seen,
             file_path,
             body.start_row + 1,
+            &exact_lines,
             &lines,
         );
     }
@@ -530,7 +532,7 @@ fn analyze_edited_bodies(
     added: &HashSet<usize>,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
-    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut seen = DuplicateSignatures::default();
     let removed = removed_lines(old_content, content);
     let diff = DiffContext { removed: &removed };
     for body in bodies {
@@ -546,11 +548,13 @@ fn analyze_edited_bodies(
         findings.extend(classify_diff_lines(file_path, &touched, &diff));
         // `duplicate-test` compares the whole body, so adding the same line to two different
         // tests is not mistaken for one test duplicating another.
+        let exact_lines = body_raw_lines(content, body);
         push_duplicate(
             &mut findings,
             &mut seen,
             file_path,
             body.start_row + 1,
+            &exact_lines,
             &full,
         );
     }
@@ -580,18 +584,30 @@ fn removed_lines<'a>(old_content: &'a str, new_content: &str) -> Vec<&'a str> {
         .collect()
 }
 
+/// The first line of each earlier body, keyed by its signature: `exact` preserves comments (the
+/// `duplicate-test` basis) and `comments` is comment-stripped (the `near-duplicate-test` basis).
+#[derive(Debug, Default)]
+struct DuplicateSignatures {
+    exact: HashMap<String, usize>,
+    comments: HashMap<String, usize>,
+}
+
+/// `duplicate-test` keys on the exact, comment-preserving body signature, so two tests that differ
+/// only by a comment are not exact duplicates; those fall through to `near-duplicate-test`, keyed on
+/// the comment-stripped signature. An exact match wins and suppresses the near check.
 fn push_duplicate(
     findings: &mut Vec<Finding>,
-    seen: &mut HashMap<String, usize>,
+    seen: &mut DuplicateSignatures,
     file_path: &str,
     start_line: usize,
-    lines: &[AddedLine<'_>],
+    exact_lines: &[AddedLine<'_>],
+    comment_lines: &[AddedLine<'_>],
 ) {
-    let signature = body_signature(lines);
+    let signature = body_signature(exact_lines);
     if signature.is_empty() {
         return;
     }
-    if let Some(first_line) = seen.get(&signature) {
+    if let Some(first_line) = seen.exact.get(&signature) {
         findings.push(Finding::new(
             "duplicate-test",
             Confidence::Medium,
@@ -600,9 +616,42 @@ fn push_duplicate(
             file_path,
             "",
         ));
-    } else {
-        seen.insert(signature, start_line);
+        return;
     }
+    seen.exact.insert(signature, start_line);
+
+    let comment_signature = body_signature(comment_lines);
+    if comment_signature.is_empty() {
+        return;
+    }
+    if let Some(first_line) = seen.comments.get(&comment_signature) {
+        findings.push(Finding::new(
+            "near-duplicate-test",
+            Confidence::Low,
+            format!("This test is identical to the test at line {first_line} except for comments."),
+            start_line,
+            file_path,
+            "",
+        ));
+    } else {
+        seen.comments.insert(comment_signature, start_line);
+    }
+}
+
+/// The raw body lines with their comments intact (`body_signature` still trims whitespace). This is
+/// the exact `duplicate-test` basis: a body that differs from another only by a comment line is not
+/// an exact duplicate, so it is reported as `near-duplicate-test` instead.
+fn body_raw_lines<'a>(content: &'a str, body: &Body) -> Vec<AddedLine<'a>> {
+    let Some(text) = content.get(body.start_byte..body.end_byte) else {
+        return Vec::new();
+    };
+    text.lines()
+        .enumerate()
+        .map(|(index, line)| AddedLine {
+            line_number: body.start_row + 1 + index,
+            text: line,
+        })
+        .collect()
 }
 
 fn body_added_lines<'a>(content: &'a str, body: &Body, language: &str) -> Vec<AddedLine<'a>> {

@@ -702,3 +702,94 @@ fn detect_given_ten_added_tests_does_not_report_test_volume() {
         "findings: {findings:?}"
     );
 }
+
+#[test]
+fn detect_given_comment_only_body_difference_reports_near_duplicate() {
+    // given: two tests with the same body except one carries an inner comment line
+    let detector = TestDetector::new();
+    let source = concat!(
+        "def test_with_comment():\n",
+        "    # explains the check\n",
+        "    assert add(1, 2) == 3\n",
+        "def test_without_comment():\n",
+        "    assert add(1, 2) == 3\n",
+    );
+
+    // when
+    let findings = detector.detect(source, "tests/test_app.py", true, true);
+
+    // then: the comment-only difference is reported once as a low-confidence near-duplicate, and
+    // never as an exact duplicate
+    let near: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.rule == "near-duplicate-test")
+        .collect();
+    assert_eq!(near.len(), 1, "findings: {findings:?}");
+    assert_eq!(near[0].confidence, Confidence::Low);
+    assert_eq!(
+        near[0].message,
+        "This test is identical to the test at line 1 except for comments."
+    );
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "duplicate-test"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_given_comment_only_body_difference_with_different_assertions_reports_neither() {
+    // given: identical comments but different assertions (a real behavioral difference)
+    let detector = TestDetector::new();
+    let source = concat!(
+        "def test_one():\n",
+        "    # same comment\n",
+        "    assert add(1, 2) == 3\n",
+        "def test_two():\n",
+        "    # same comment\n",
+        "    assert add(1, 2) == 4\n",
+    );
+
+    // when
+    let findings = detector.detect(source, "tests/test_app.py", true, true);
+
+    // then: neither duplicate rule fires
+    assert!(
+        !findings.iter().any(
+            |finding| finding.rule == "duplicate-test" || finding.rule == "near-duplicate-test"
+        ),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_given_exact_duplicate_reports_duplicate_not_near_duplicate() {
+    // given: two tests identical including their comment
+    let detector = TestDetector::new();
+    let source = concat!(
+        "def test_a():\n",
+        "    # same comment\n",
+        "    assert add(1, 2) == 3\n",
+        "def test_b():\n",
+        "    # same comment\n",
+        "    assert add(1, 2) == 3\n",
+    );
+
+    // when
+    let findings = detector.detect(source, "tests/test_app.py", true, true);
+
+    // then: the exact signature still wins, so only duplicate-test fires
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "duplicate-test"),
+        "findings: {findings:?}"
+    );
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "near-duplicate-test"),
+        "findings: {findings:?}"
+    );
+}
