@@ -118,6 +118,12 @@ fn evaluate(
     include_commented_out_tests: bool,
     include_body_tests: bool,
 ) -> HookCheckResult {
+    if !matches!(
+        hook_input.tool_name.as_str(),
+        "Write" | "Edit" | "MultiEdit"
+    ) {
+        return skip("Unsupported tool");
+    }
     let file_path = hook_input.tool_input.file_path.as_str();
     if file_path.is_empty() {
         return skip("No file path provided");

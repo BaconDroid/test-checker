@@ -336,3 +336,15 @@ fn check_hook_input_given_harness_comment_with_gate_marker_is_ignored() {
     // then
     assert_eq!(result.exit_code, 0);
 }
+
+#[test]
+fn check_hook_input_given_unknown_tool_skips() {
+    // given: a non-edit tool, which the hook matcher (Write|Edit|MultiEdit) never sends
+    let input = r#"{"tool_name":"Read","tool_input":{"file_path":"tests/a_test.py","content":"def test_a():\n    @pytest.mark.skip\n    assert x == 1\n"}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then
+    assert_eq!(result.exit_code, 0);
+}
