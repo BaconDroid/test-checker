@@ -10,6 +10,34 @@ when a change weakens, disables, or hollows out a test. On findings it writes a 
 **stderr** and exits **2**; otherwise it exits **0** and never panics (every failure path degrades to
 no findings).
 
+## Setup
+
+register it as a `PostToolUse` hook for `Write|Edit|MultiEdit`:
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v test-checker >/dev/null 2>&1; then exec test-checker; fi; cat >/dev/null; echo '[test-checker] did not run - nothing checked this write.' >&2; exit 1"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+use the wrapper above, **not** a bare `test-checker`. A bare command exits `127` without reading
+stdin when the binary is not on `PATH`, so the edit goes unchecked and you are never told — a silent
+pass. The wrapper resolves the binary, passes `0`/`2` through, and otherwise drains stdin (so a large
+payload never raises SIGPIPE) and exits `1` with `did not run`. `tests/readme_hook.rs` runs this exact
+command text, so weakening it (a bare command, `|| exit 0`, …) fails the build.
+
 ## Contract
 
 - **stdin**: `{ "tool_name": "Write"|"Edit"|"MultiEdit", "tool_input": { "file_path"?, "content"?,
