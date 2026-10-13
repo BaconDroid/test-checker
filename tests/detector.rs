@@ -176,7 +176,7 @@ const WEAKEN_CASES: [(&str, &str); 21] = [
     ),
 ];
 
-const NON_FRAMEWORK_CASES: [(&str, &str); 10] = [
+const NON_FRAMEWORK_CASES: [(&str, &str); 13] = [
     ("tests/clean.css", "body { color: red; }\n"),
     ("tests/clean.cue", "package x\n"),
     ("Dockerfile", "FROM debian\n"),
@@ -187,6 +187,9 @@ const NON_FRAMEWORK_CASES: [(&str, &str); 10] = [
     ("tests/clean.svelte", "<div></div>\n"),
     ("tests/clean.toml", "x = 1\n"),
     ("tests/clean.yaml", "x: 1\n"),
+    ("tests/clean.dart", "void main() {}\n"),
+    ("tests/clean.hs", "main = pure ()\n"),
+    ("tests/clean.r", "x <- 1\n"),
 ];
 
 #[test]

@@ -78,7 +78,7 @@ reported as `gate-weakened`.
 
 ## Languages
 
-Every language compiled by `tree-sitter-language-pack` (31, listed in `.cargo/config.toml`'s
+Every language compiled by `tree-sitter-language-pack` (34, listed in `.cargo/config.toml`'s
 `TSLP_LANGUAGES`)
 is parsed. A language yields body-based findings only when it has a real test framework and a
 compiling test-body query (21): python, javascript, typescript, tsx, go, rust, ruby, java, csharp,
