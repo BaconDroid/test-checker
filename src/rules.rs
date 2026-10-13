@@ -186,10 +186,11 @@ const NESTED_TEST_MARKERS: &[&str] = &[
 ];
 
 /// Source-file extensions (without the dot) that mark a literal as naming source code rather than
-/// test data; a test that reads one asserts on source text, not behaviour.
+/// test data; a test that reads one asserts on source text, not behaviour. The list covers each
+/// supported grammar's file extension, including the alternate `haskell` spelling alongside `hs`.
 const SOURCE_FILE_EXTENSIONS: &[&str] = &[
     "py", "js", "ts", "tsx", "jsx", "rs", "go", "java", "rb", "php", "c", "cpp", "h", "hpp", "cs",
-    "kt", "swift", "scala", "lua", "ex", "exs", "hs",
+    "kt", "swift", "scala", "lua", "ex", "exs", "hs", "haskell", "dart", "r", "zig",
 ];
 
 /// Callee substrings that mark a file-read call; the string literal after one names the file.

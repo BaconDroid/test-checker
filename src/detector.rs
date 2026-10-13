@@ -506,15 +506,19 @@ fn analyze_new_bodies(
             body.start_row + 1,
             &lines,
         ));
+        // `duplicate-test` compares the whole body, so adding the same line to two different
+        // tests is not mistaken for one test duplicating another. Every captured body is recorded;
+        // a `Write` adds every line, so every body is touched and emits its finding.
         let exact_lines = body_raw_lines(content, body);
-        push_duplicate(
-            &mut findings,
+        if let Some(finding) = push_duplicate(
             &mut seen,
             file_path,
             body.start_row + 1,
             &exact_lines,
             &lines,
-        );
+        ) {
+            findings.push(finding);
+        }
     }
     let added_test_lines: Vec<usize> = bodies.iter().map(|body| body.start_row + 1).collect();
     if let Some(finding) = rules::test_volume_finding(file_path, &added_test_lines) {
@@ -542,21 +546,25 @@ fn analyze_edited_bodies(
             .copied()
             .filter(|line| added.contains(&(line.line_number - 1)))
             .collect();
-        if touched.is_empty() {
-            continue;
+        let is_touched = !touched.is_empty();
+        if is_touched {
+            findings.extend(classify_diff_lines(file_path, &touched, &diff));
         }
-        findings.extend(classify_diff_lines(file_path, &touched, &diff));
         // `duplicate-test` compares the whole body, so adding the same line to two different
-        // tests is not mistaken for one test duplicating another.
+        // tests is not mistaken for one test duplicating another. Every captured body is
+        // recorded, so an unchanged test still serves as the baseline a touched near-duplicate is
+        // compared against; only a touched body emits the finding it earns.
         let exact_lines = body_raw_lines(content, body);
-        push_duplicate(
-            &mut findings,
+        let duplicate = push_duplicate(
             &mut seen,
             file_path,
             body.start_row + 1,
             &exact_lines,
             &full,
         );
+        if is_touched && let Some(finding) = duplicate {
+            findings.push(finding);
+        }
     }
     let added_test_lines: Vec<usize> = bodies
         .iter()
@@ -595,20 +603,23 @@ struct DuplicateSignatures {
 /// `duplicate-test` keys on the exact, comment-preserving body signature, so two tests that differ
 /// only by a comment are not exact duplicates; those fall through to `near-duplicate-test`, keyed on
 /// the comment-stripped signature. An exact match wins and suppresses the near check.
+///
+/// The body's signatures are always recorded in `seen`, and the finding it earns is returned for
+/// the caller to emit only when the change touched the body: an unchanged test still serves as the
+/// baseline a later near-duplicate is compared against without being reported itself.
 fn push_duplicate(
-    findings: &mut Vec<Finding>,
     seen: &mut DuplicateSignatures,
     file_path: &str,
     start_line: usize,
     exact_lines: &[AddedLine<'_>],
     comment_lines: &[AddedLine<'_>],
-) {
+) -> Option<Finding> {
     let signature = body_signature(exact_lines);
     if signature.is_empty() {
-        return;
+        return None;
     }
     if let Some(first_line) = seen.exact.get(&signature) {
-        findings.push(Finding::new(
+        return Some(Finding::new(
             "duplicate-test",
             Confidence::Medium,
             format!("This test duplicates another test already defined at line {first_line}."),
@@ -616,16 +627,15 @@ fn push_duplicate(
             file_path,
             "",
         ));
-        return;
     }
     seen.exact.insert(signature, start_line);
 
     let comment_signature = body_signature(comment_lines);
     if comment_signature.is_empty() {
-        return;
+        return None;
     }
     if let Some(first_line) = seen.comments.get(&comment_signature) {
-        findings.push(Finding::new(
+        return Some(Finding::new(
             "near-duplicate-test",
             Confidence::Low,
             format!("This test is identical to the test at line {first_line} except for comments."),
@@ -633,9 +643,9 @@ fn push_duplicate(
             file_path,
             "",
         ));
-    } else {
-        seen.comments.insert(comment_signature, start_line);
     }
+    seen.comments.insert(comment_signature, start_line);
+    None
 }
 
 /// The raw body lines with their comments intact (`body_signature` still trims whitespace). This is

@@ -48,7 +48,9 @@ fn corpus() -> Result<Vec<Case>, Box<dyn std::error::Error>> {
     Ok(serde_json::from_str(&raw)?)
 }
 
-/// Run the real hook binary and collect the `rule="..."` ids from its stderr.
+/// Run the real hook binary and collect the `rule="..."` ids from its stderr. The corpus spans
+/// every confidence band, so the binary runs at `--min-confidence low`; a clean case must then
+/// still produce no findings.
 fn detected(case: &Case) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let payload = serde_json::json!({
         "tool_name": "Write",
@@ -56,6 +58,8 @@ fn detected(case: &Case) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     })
     .to_string();
     let mut child = Command::new(env!("CARGO_BIN_EXE_test-checker"))
+        .arg("--min-confidence")
+        .arg("low")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

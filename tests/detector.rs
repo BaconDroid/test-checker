@@ -794,3 +794,40 @@ fn detect_given_exact_duplicate_reports_duplicate_not_near_duplicate() {
         "findings: {findings:?}"
     );
 }
+
+#[test]
+fn detect_edit_given_added_comment_only_variant_of_unchanged_test_reports_near_duplicate() {
+    // given: an edit appends a test that matches an existing, untouched test except for a comment;
+    // the unchanged test must still act as the near-duplicate baseline (duplicate-test contract).
+    let detector = TestDetector::new();
+    let old = "def test_existing():\n    assert add(1, 2) == 3\n";
+    let new = concat!(
+        "def test_existing():\n",
+        "    assert add(1, 2) == 3\n",
+        "def test_added():\n",
+        "    # explains the check\n",
+        "    assert add(1, 2) == 3\n",
+    );
+
+    // when
+    let findings = detector.detect_edit(old, new, "tests/test_app.py", true, true);
+
+    // then: the touched variant is a low-confidence near-duplicate of the untouched test at line 1,
+    // and is never reported as an exact duplicate
+    let near: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.rule == "near-duplicate-test")
+        .collect();
+    assert_eq!(near.len(), 1, "findings: {findings:?}");
+    assert_eq!(near[0].confidence, Confidence::Low);
+    assert_eq!(
+        near[0].message,
+        "This test is identical to the test at line 1 except for comments."
+    );
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "duplicate-test"),
+        "findings: {findings:?}"
+    );
+}
