@@ -316,14 +316,14 @@ fn check_hook_input_given_harness_gate_weakened_exits_two() {
 }
 
 #[test]
-fn check_hook_input_given_harness_without_marker_returns_success() {
-    // given
-    let input = r#"{"tool_name":"Edit","tool_input":{"file_path":".github/workflows/ci.yml","old_string":"      - run: cargo fmt\n","new_string":"      - run: cargo clippy\n"}}"#;
+fn check_hook_input_given_non_sensitive_harness_edit_returns_success() {
+    // given: an edit to a harness path outside the sensitive set, with no gate marker
+    let input = r#"{"tool_name":"Edit","tool_input":{"file_path":"makefile","old_string":"\tgo test ./...\n","new_string":"\tgo test ./... -count=1\n"}}"#;
 
     // when
     let result = check_hook_input(input, "");
 
-    // then
+    // then: harness-edited stays low on a non-sensitive path, so it does not block by default
     assert_eq!(result.exit_code, 0);
 }
 
@@ -335,8 +335,14 @@ fn check_hook_input_given_harness_comment_with_gate_marker_is_ignored() {
     // when
     let result = check_hook_input(input, "");
 
-    // then
-    assert_eq!(result.exit_code, 0);
+    // then: the comment is not read as a gate weakening; the sensitive-path harness-edited is the
+    // only finding, and it is expected under the confidence policy
+    assert!(
+        !result.message.contains("gate-weakened"),
+        "message: {}",
+        result.message
+    );
+    assert!(result.message.contains("harness-edited"));
 }
 
 #[test]
@@ -360,19 +366,55 @@ fn low_confidence_options() -> Options {
 }
 
 #[test]
-fn check_hook_input_from_reader_given_harness_edit_reports_harness_edited() {
-    // given: a harness edit with no gate marker, checked with low findings kept
+fn check_hook_input_from_reader_given_sensitive_harness_edit_reports_harness_edited() {
+    // given: an edit to a sensitive harness path (a CI workflow) with no gate marker
     let input = r#"{"tool_name":"Edit","tool_input":{"file_path":".github/workflows/ci.yml","old_string":"      - run: cargo fmt\n","new_string":"      - run: cargo clippy\n"}}"#;
 
-    // when
-    let result = check_hook_input_from_reader(input.as_bytes(), &low_confidence_options());
+    // when: checked at the default medium gate
+    let result = check_hook_input_from_reader(input.as_bytes(), &Options::default());
 
-    // then: harness-edited fires as its own low-confidence finding
+    // then: harness-edited is medium on a sensitive path, so it blocks at the default gate
     assert_eq!(result.exit_code, 2);
     assert!(
         result.message.contains("harness-edited"),
         "message: {}",
         result.message
+    );
+}
+
+#[test]
+fn check_hook_input_given_source_grep_test_blocks_at_the_default_gate() {
+    // given: a test that reads a source file and asserts on its text (policy D29: behaviour-changing)
+    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/test_app.py","content":"def test_reads_source():\n    text = Path(\"src/app.py\").read_text()\n    assert \"def \" in text\n"}}"#;
+
+    // when: only the default medium gate applies
+    let result = check_hook_input(input, "");
+
+    // then: source-grep-test is medium and blocks instead of being low telemetry
+    assert_eq!(result.exit_code, 2);
+    assert!(
+        result.message.contains("source-grep-test"),
+        "message: {}",
+        result.message
+    );
+}
+
+#[test]
+fn check_hook_input_given_non_sensitive_harness_edit_is_low_telemetry() {
+    // given: a harness edit outside the sensitive set (package.json), with no gate marker
+    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"package.json","content":"{\n  \"scripts\": {\n    \"test\": \"jest\"\n  }\n}\n"}}"#;
+
+    // when: the default medium gate keeps only medium+ findings; the low band keeps all
+    let default = check_hook_input(input, "");
+    let low = check_hook_input_from_reader(input.as_bytes(), &low_confidence_options());
+
+    // then: a non-sensitive harness path stays low, so it is telemetry that does not block
+    assert_eq!(default.exit_code, 0);
+    assert_eq!(low.exit_code, 2);
+    assert!(
+        low.message.contains("harness-edited"),
+        "message: {}",
+        low.message
     );
 }
 

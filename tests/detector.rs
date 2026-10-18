@@ -620,12 +620,13 @@ fn detect_given_test_reading_a_source_file_reports_source_grep_test() {
     // when
     let findings = detector.detect(source, "tests/test_app.py", true, true);
 
-    // then: the rule fires at low confidence, so it is logged but does not block by default
+    // then: the rule fires at medium confidence (policy D29: it is meant to change behaviour), so
+    // it reaches the default `--min-confidence medium` gate
     assert!(
         findings
             .iter()
             .any(|finding| finding.rule == "source-grep-test"
-                && finding.confidence == Confidence::Low),
+                && finding.confidence == Confidence::Medium),
         "findings: {findings:?}"
     );
 }

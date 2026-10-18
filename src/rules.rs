@@ -1,4 +1,5 @@
 use crate::filters::is_agent_memo_phrase;
+use crate::language::is_sensitive_harness_path;
 use crate::models::{Confidence, Finding};
 
 /// A single added line with its real (1-based) line number in the file.
@@ -696,10 +697,19 @@ pub fn classify_harness_line(file_path: &str, line: &AddedLine<'_>) -> Option<Fi
 }
 
 /// The `harness-edited` finding for an added non-blank line of a harness/config file.
+///
+/// Policy D29: a rule meant to change agent behaviour must be Medium or higher. The sensitive
+/// harness paths (CI workflows and the pytest/tox/conftest and jest/vitest configs) clear that bar;
+/// every other harness file stays Low telemetry.
 pub(crate) fn harness_edited_finding(file_path: &str, line: &AddedLine<'_>) -> Finding {
+    let confidence = if is_sensitive_harness_path(file_path) {
+        Confidence::Medium
+    } else {
+        Confidence::Low
+    };
     finish(
         "harness-edited",
-        Confidence::Low,
+        confidence,
         "A test-harness/config file was edited; confirm the gate was not weakened.",
         line,
         file_path,
@@ -1089,7 +1099,7 @@ pub fn classify_test_body(
     {
         findings.push(finish(
             "source-grep-test",
-            Confidence::Low,
+            Confidence::Medium,
             "This test reads a source file and asserts on its text; test behaviour, not source text.",
             read_line,
             file_path,

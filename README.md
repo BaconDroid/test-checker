@@ -97,6 +97,10 @@ blocks (`<script>`, markdown fences, …).
 `conditional-assertion`, `retry-added`, `agent-memo-test`, `allow-added`, `gate-weakened`,
 `commented-out-test`, `source-grep-test`, `test-volume`, `harness-edited`, `near-duplicate-test`.
 
+Confidence policy: `source-grep-test` is `medium`; `harness-edited` is `medium` on sensitive harness
+paths (CI workflows, pytest/tox/conftest, jest/vitest config) and `low` otherwise; `test-volume` and
+`near-duplicate-test` are `low` telemetry, visible only with `--min-confidence low`.
+
 Each finding carries a `confidence` of `high`/`medium`/`low`. Line rules classify the added lines of
 the captured test bodies (comments stripped); diff rules compare an edit's old and new content.
 
