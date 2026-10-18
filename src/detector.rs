@@ -497,7 +497,7 @@ fn analyze_new_bodies(
     bodies: &[Body],
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
-    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut seen = DuplicateSignatures::default();
     for body in bodies {
         let lines = body_added_lines(content, body, language);
         findings.extend(classify_lines(file_path, &lines));
@@ -506,13 +506,23 @@ fn analyze_new_bodies(
             body.start_row + 1,
             &lines,
         ));
-        push_duplicate(
-            &mut findings,
+        // `duplicate-test` compares the whole body, so adding the same line to two different
+        // tests is not mistaken for one test duplicating another. Every captured body is recorded;
+        // a `Write` adds every line, so every body is touched and emits its finding.
+        let exact_lines = body_raw_lines(content, body);
+        if let Some(finding) = push_duplicate(
             &mut seen,
             file_path,
             body.start_row + 1,
+            &exact_lines,
             &lines,
-        );
+        ) {
+            findings.push(finding);
+        }
+    }
+    let added_test_lines: Vec<usize> = bodies.iter().map(|body| body.start_row + 1).collect();
+    if let Some(finding) = rules::test_volume_finding(file_path, &added_test_lines) {
+        findings.push(finding);
     }
     findings
 }
@@ -526,7 +536,7 @@ fn analyze_edited_bodies(
     added: &HashSet<usize>,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
-    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut seen = DuplicateSignatures::default();
     let removed = removed_lines(old_content, content);
     let diff = DiffContext { removed: &removed };
     for body in bodies {
@@ -536,19 +546,33 @@ fn analyze_edited_bodies(
             .copied()
             .filter(|line| added.contains(&(line.line_number - 1)))
             .collect();
-        if touched.is_empty() {
-            continue;
+        let is_touched = !touched.is_empty();
+        if is_touched {
+            findings.extend(classify_diff_lines(file_path, &touched, &diff));
         }
-        findings.extend(classify_diff_lines(file_path, &touched, &diff));
         // `duplicate-test` compares the whole body, so adding the same line to two different
-        // tests is not mistaken for one test duplicating another.
-        push_duplicate(
-            &mut findings,
+        // tests is not mistaken for one test duplicating another. Every captured body is
+        // recorded, so an unchanged test still serves as the baseline a touched near-duplicate is
+        // compared against; only a touched body emits the finding it earns.
+        let exact_lines = body_raw_lines(content, body);
+        let duplicate = push_duplicate(
             &mut seen,
             file_path,
             body.start_row + 1,
+            &exact_lines,
             &full,
         );
+        if is_touched && let Some(finding) = duplicate {
+            findings.push(finding);
+        }
+    }
+    let added_test_lines: Vec<usize> = bodies
+        .iter()
+        .filter(|body| added.contains(&body.start_row))
+        .map(|body| body.start_row + 1)
+        .collect();
+    if let Some(finding) = rules::test_volume_finding(file_path, &added_test_lines) {
+        findings.push(finding);
     }
     findings
 }
@@ -568,19 +592,34 @@ fn removed_lines<'a>(old_content: &'a str, new_content: &str) -> Vec<&'a str> {
         .collect()
 }
 
+/// The first line of each earlier body, keyed by its signature: `exact` preserves comments (the
+/// `duplicate-test` basis) and `comments` is comment-stripped (the `near-duplicate-test` basis).
+#[derive(Debug, Default)]
+struct DuplicateSignatures {
+    exact: HashMap<String, usize>,
+    comments: HashMap<String, usize>,
+}
+
+/// `duplicate-test` keys on the exact, comment-preserving body signature, so two tests that differ
+/// only by a comment are not exact duplicates; those fall through to `near-duplicate-test`, keyed on
+/// the comment-stripped signature. An exact match wins and suppresses the near check.
+///
+/// The body's signatures are always recorded in `seen`, and the finding it earns is returned for
+/// the caller to emit only when the change touched the body: an unchanged test still serves as the
+/// baseline a later near-duplicate is compared against without being reported itself.
 fn push_duplicate(
-    findings: &mut Vec<Finding>,
-    seen: &mut HashMap<String, usize>,
+    seen: &mut DuplicateSignatures,
     file_path: &str,
     start_line: usize,
-    lines: &[AddedLine<'_>],
-) {
-    let signature = body_signature(lines);
+    exact_lines: &[AddedLine<'_>],
+    comment_lines: &[AddedLine<'_>],
+) -> Option<Finding> {
+    let signature = body_signature(exact_lines);
     if signature.is_empty() {
-        return;
+        return None;
     }
-    if let Some(first_line) = seen.get(&signature) {
-        findings.push(Finding::new(
+    if let Some(first_line) = seen.exact.get(&signature) {
+        return Some(Finding::new(
             "duplicate-test",
             Confidence::Medium,
             format!("This test duplicates another test already defined at line {first_line}."),
@@ -588,9 +627,41 @@ fn push_duplicate(
             file_path,
             "",
         ));
-    } else {
-        seen.insert(signature, start_line);
     }
+    seen.exact.insert(signature, start_line);
+
+    let comment_signature = body_signature(comment_lines);
+    if comment_signature.is_empty() {
+        return None;
+    }
+    if let Some(first_line) = seen.comments.get(&comment_signature) {
+        return Some(Finding::new(
+            "near-duplicate-test",
+            Confidence::Low,
+            format!("This test is identical to the test at line {first_line} except for comments."),
+            start_line,
+            file_path,
+            "",
+        ));
+    }
+    seen.comments.insert(comment_signature, start_line);
+    None
+}
+
+/// The raw body lines with their comments intact (`body_signature` still trims whitespace). This is
+/// the exact `duplicate-test` basis: a body that differs from another only by a comment line is not
+/// an exact duplicate, so it is reported as `near-duplicate-test` instead.
+fn body_raw_lines<'a>(content: &'a str, body: &Body) -> Vec<AddedLine<'a>> {
+    let Some(text) = content.get(body.start_byte..body.end_byte) else {
+        return Vec::new();
+    };
+    text.lines()
+        .enumerate()
+        .map(|(index, line)| AddedLine {
+            line_number: body.start_row + 1 + index,
+            text: line,
+        })
+        .collect()
 }
 
 fn body_added_lines<'a>(content: &'a str, body: &Body, language: &str) -> Vec<AddedLine<'a>> {

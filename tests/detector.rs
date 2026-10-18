@@ -176,7 +176,7 @@ const WEAKEN_CASES: [(&str, &str); 21] = [
     ),
 ];
 
-const NON_FRAMEWORK_CASES: [(&str, &str); 10] = [
+const NON_FRAMEWORK_CASES: [(&str, &str); 14] = [
     ("tests/clean.css", "body { color: red; }\n"),
     ("tests/clean.cue", "package x\n"),
     ("Dockerfile", "FROM debian\n"),
@@ -187,6 +187,10 @@ const NON_FRAMEWORK_CASES: [(&str, &str); 10] = [
     ("tests/clean.svelte", "<div></div>\n"),
     ("tests/clean.toml", "x = 1\n"),
     ("tests/clean.yaml", "x: 1\n"),
+    ("tests/clean.dart", "void main() {}\n"),
+    ("tests/clean.hs", "main = pure ()\n"),
+    ("tests/clean.r", "x <- 1\n"),
+    ("tests/clean.zig", "pub fn main() void {}\n"),
 ];
 
 #[test]
@@ -603,6 +607,228 @@ fn detect_edit_given_commented_out_baseline_does_not_weaken_at_medium_or_higher(
             .iter()
             .any(|finding| finding.rule == "weakened-assertion"
                 && finding.confidence != Confidence::Low),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_given_test_reading_a_source_file_reports_source_grep_test() {
+    // given: a test body that reads a source file and asserts on its text
+    let detector = TestDetector::new();
+    let source = "def test_reads_source():\n    text = Path(\"src/app.py\").read_text()\n    assert \"def \" in text\n";
+
+    // when
+    let findings = detector.detect(source, "tests/test_app.py", true, true);
+
+    // then: the rule fires at medium confidence (policy D29: it is meant to change behaviour), so
+    // it reaches the default `--min-confidence medium` gate
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "source-grep-test"
+                && finding.confidence == Confidence::Medium),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_given_test_reading_a_fixture_does_not_report_source_grep_test() {
+    // given: the read targets a non-source fixture, and a second body reads a source file but
+    // makes no assertion
+    let detector = TestDetector::new();
+    let fixture = "it('reads', () => {\n  const text = fs.readFileSync('tests/fixtures/data.json', 'utf8');\n  expect(text).toContain('x');\n});\n";
+    let no_assertion = "def test_reads_source():\n    text = Path(\"src/app.py\").read_text()\n";
+
+    // when
+    let fixture_findings = detector.detect(fixture, "tests/app.test.js", true, true);
+    let no_assertion_findings = detector.detect(no_assertion, "tests/test_app.py", true, true);
+
+    // then
+    assert!(
+        !fixture_findings
+            .iter()
+            .any(|finding| finding.rule == "source-grep-test"),
+        "findings: {fixture_findings:?}"
+    );
+    assert!(
+        !no_assertion_findings
+            .iter()
+            .any(|finding| finding.rule == "source-grep-test"),
+        "findings: {no_assertion_findings:?}"
+    );
+}
+
+/// Build `count` Python test functions, each carrying one assertion.
+fn python_tests(count: usize) -> String {
+    use std::fmt::Write as _;
+    let mut source = String::new();
+    for index in 0..count {
+        let _ = write!(
+            source,
+            "def test_{index}():\n    assert {index} == {index}\n"
+        );
+    }
+    source
+}
+
+#[test]
+fn detect_given_more_than_ten_added_tests_reports_test_volume() {
+    // given: eleven new test functions in one payload
+    let detector = TestDetector::new();
+    let source = python_tests(11);
+
+    // when
+    let findings = detector.detect(&source, "tests/test_app.py", true, true);
+
+    // then: one low-confidence volume warning
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "test-volume" && finding.confidence == Confidence::Low),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_given_ten_added_tests_does_not_report_test_volume() {
+    // given: exactly ten new test functions, the threshold edge
+    let detector = TestDetector::new();
+    let source = python_tests(10);
+
+    // when
+    let findings = detector.detect(&source, "tests/test_app.py", true, true);
+
+    // then
+    assert!(
+        !findings.iter().any(|finding| finding.rule == "test-volume"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_given_comment_only_body_difference_reports_near_duplicate() {
+    // given: two tests with the same body except one carries an inner comment line
+    let detector = TestDetector::new();
+    let source = concat!(
+        "def test_with_comment():\n",
+        "    # explains the check\n",
+        "    assert add(1, 2) == 3\n",
+        "def test_without_comment():\n",
+        "    assert add(1, 2) == 3\n",
+    );
+
+    // when
+    let findings = detector.detect(source, "tests/test_app.py", true, true);
+
+    // then: the comment-only difference is reported once as a low-confidence near-duplicate, and
+    // never as an exact duplicate
+    let near: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.rule == "near-duplicate-test")
+        .collect();
+    assert_eq!(near.len(), 1, "findings: {findings:?}");
+    assert_eq!(near[0].confidence, Confidence::Low);
+    assert_eq!(
+        near[0].message,
+        "This test is identical to the test at line 1 except for comments."
+    );
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "duplicate-test"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_given_comment_only_body_difference_with_different_assertions_reports_neither() {
+    // given: identical comments but different assertions (a real behavioral difference)
+    let detector = TestDetector::new();
+    let source = concat!(
+        "def test_one():\n",
+        "    # same comment\n",
+        "    assert add(1, 2) == 3\n",
+        "def test_two():\n",
+        "    # same comment\n",
+        "    assert add(1, 2) == 4\n",
+    );
+
+    // when
+    let findings = detector.detect(source, "tests/test_app.py", true, true);
+
+    // then: neither duplicate rule fires
+    assert!(
+        !findings.iter().any(
+            |finding| finding.rule == "duplicate-test" || finding.rule == "near-duplicate-test"
+        ),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_given_exact_duplicate_reports_duplicate_not_near_duplicate() {
+    // given: two tests identical including their comment
+    let detector = TestDetector::new();
+    let source = concat!(
+        "def test_a():\n",
+        "    # same comment\n",
+        "    assert add(1, 2) == 3\n",
+        "def test_b():\n",
+        "    # same comment\n",
+        "    assert add(1, 2) == 3\n",
+    );
+
+    // when
+    let findings = detector.detect(source, "tests/test_app.py", true, true);
+
+    // then: the exact signature still wins, so only duplicate-test fires
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "duplicate-test"),
+        "findings: {findings:?}"
+    );
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "near-duplicate-test"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_edit_given_added_comment_only_variant_of_unchanged_test_reports_near_duplicate() {
+    // given: an edit appends a test that matches an existing, untouched test except for a comment;
+    // the unchanged test must still act as the near-duplicate baseline (duplicate-test contract).
+    let detector = TestDetector::new();
+    let old = "def test_existing():\n    assert add(1, 2) == 3\n";
+    let new = concat!(
+        "def test_existing():\n",
+        "    assert add(1, 2) == 3\n",
+        "def test_added():\n",
+        "    # explains the check\n",
+        "    assert add(1, 2) == 3\n",
+    );
+
+    // when
+    let findings = detector.detect_edit(old, new, "tests/test_app.py", true, true);
+
+    // then: the touched variant is a low-confidence near-duplicate of the untouched test at line 1,
+    // and is never reported as an exact duplicate
+    let near: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.rule == "near-duplicate-test")
+        .collect();
+    assert_eq!(near.len(), 1, "findings: {findings:?}");
+    assert_eq!(near[0].confidence, Confidence::Low);
+    assert_eq!(
+        near[0].message,
+        "This test is identical to the test at line 1 except for comments."
+    );
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "duplicate-test"),
         "findings: {findings:?}"
     );
 }

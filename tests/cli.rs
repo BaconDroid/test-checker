@@ -135,3 +135,48 @@ fn cli_given_min_confidence_equals_low_keeps_medium_finding() -> std::io::Result
     assert_eq!(output.status.code(), Some(2));
     Ok(())
 }
+
+#[test]
+fn cli_given_version_prints_name_and_version() -> std::io::Result<()> {
+    // given / when
+    let output = run_checker("", &["--version"])?;
+
+    // then
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(env!("CARGO_PKG_NAME")), "stdout: {stdout}");
+    assert!(
+        stdout.contains(env!("CARGO_PKG_VERSION")),
+        "stdout: {stdout}"
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_given_prompt_version_treats_it_as_a_prompt_value() -> std::io::Result<()> {
+    // given: `--version` is the value consumed by `--prompt`, not a standalone flag
+    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/a_test.py","content":"def test_a():\n    @pytest.mark.skip\n    assert x == 1\n"}}"#;
+
+    // when
+    let output = run_checker(input, &["--prompt", "--version"])?;
+
+    // then
+    assert!(output.stdout.is_empty(), "the version must not be printed");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "--version");
+    assert_eq!(output.status.code(), Some(2));
+    Ok(())
+}
+
+#[test]
+fn cli_given_strip_is_inert_and_still_reports() -> std::io::Result<()> {
+    // given: a trigger payload with the inert --strip flag
+    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/a_test.py","content":"def test_a():\n    @pytest.mark.skip\n    assert x == 1\n"}}"#;
+
+    // when
+    let output = run_checker(input, &["--strip"])?;
+
+    // then
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("inert"));
+    Ok(())
+}

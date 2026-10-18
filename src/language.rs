@@ -109,6 +109,7 @@ pub fn is_harness_path(file_path: &str) -> bool {
             file,
             "pytest.ini"
                 | "tox.ini"
+                | "conftest.py"
                 | "setup.cfg"
                 | "pyproject.toml"
                 | "package.json"
@@ -121,9 +122,32 @@ pub fn is_harness_path(file_path: &str) -> bool {
         || file.starts_with(".nycrc")
 }
 
+/// Harness paths whose edit directly decides what CI runs.
+///
+/// The sensitive subset of [`is_harness_path`]: CI workflows and the runner's own pytest/tox/
+/// conftest or jest/vitest configuration. Per policy D29 a finding on one of these clears the
+/// Medium bar, while every other harness file (`package.json`, `codecov.yml`, `makefile`, …) stays
+/// Low telemetry. [`is_harness_path`] remains the outer gate; this narrows within it.
+#[must_use]
+pub(crate) fn is_sensitive_harness_path(file_path: &str) -> bool {
+    if !is_harness_path(file_path) {
+        return false;
+    }
+    let normalized = file_path.replace('\\', "/").to_lowercase();
+    let file = normalized.rsplit('/').next().unwrap_or("");
+    normalized.contains(".github/workflows/")
+        || normalized.contains(".gitlab-ci")
+        || matches!(file, "pytest.ini" | "tox.ini" | "conftest.py")
+        || file.starts_with("jest.config")
+        || file.starts_with("vitest.config")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{is_harness_path, is_test_callee, is_test_function_name, is_test_path};
+    use super::{
+        is_harness_path, is_sensitive_harness_path, is_test_callee, is_test_function_name,
+        is_test_path,
+    };
 
     #[test]
     fn is_harness_path_given_config_or_ci_returns_true() {
@@ -133,6 +157,27 @@ mod tests {
         assert!(is_harness_path("package.json"));
         assert!(is_harness_path("jest.config.js"));
         assert!(!is_harness_path("src/app.py"));
+    }
+
+    #[test]
+    fn is_sensitive_harness_path_given_ci_or_runner_config_returns_true() {
+        // then: the paths that directly decide what CI runs are sensitive
+        assert!(is_sensitive_harness_path("pytest.ini"));
+        assert!(is_sensitive_harness_path("tox.ini"));
+        assert!(is_sensitive_harness_path("conftest.py"));
+        assert!(is_sensitive_harness_path(".github/workflows/ci.yml"));
+        assert!(is_sensitive_harness_path(".gitlab-ci.yml"));
+        assert!(is_sensitive_harness_path("jest.config.js"));
+        assert!(is_sensitive_harness_path("vitest.config.ts"));
+    }
+
+    #[test]
+    fn is_sensitive_harness_path_given_other_harness_file_returns_false() {
+        // then: a harness file that does not gate the run stays low-confidence telemetry
+        assert!(!is_sensitive_harness_path("package.json"));
+        assert!(!is_sensitive_harness_path("codecov.yml"));
+        assert!(!is_sensitive_harness_path("pyproject.toml"));
+        assert!(!is_sensitive_harness_path("src/app.py"));
     }
 
     #[test]

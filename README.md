@@ -10,6 +10,38 @@ when a change weakens, disables, or hollows out a test. On findings it writes a 
 **stderr** and exits **2**; otherwise it exits **0** and never panics (every failure path degrades to
 no findings).
 
+## Setup
+
+register it as a `PostToolUse` hook for `Write|Edit|MultiEdit`:
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v test-checker >/dev/null 2>&1; then exec test-checker; fi; cat >/dev/null; echo '[test-checker] did not run - nothing checked this write.' >&2; exit 1"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+use the wrapper above, **not** a bare `test-checker`. A bare command exits `127` without reading
+stdin when the binary is not on `PATH`, so the edit goes unchecked and you are never told — a silent
+pass. The wrapper resolves the binary, passes `0`/`2` through, and otherwise drains stdin (so a large
+payload never raises SIGPIPE) and exits `1` with `did not run`. `tests/readme_hook.rs` runs this exact
+command text, so weakening it (a bare command, `|| exit 0`, …) fails the build.
+
+the wrapper assumes a POSIX shell: `command -v`, `cat`, and `>&2` must exist. On Windows without one,
+wire the binary directly (`test-checker.exe`) or run it through a shell that provides them; this
+command text does not claim native Windows support.
+
 ## Contract
 
 - **stdin**: `{ "tool_name": "Write"|"Edit"|"MultiEdit", "tool_input": { "file_path"?, "content"?,
@@ -33,6 +65,9 @@ no findings).
 Clean runs print `[test-checker] Success: No problematic tests found`; skipped runs print
 `[test-checker] Skipping: <reason>`.
 
+`--strip` is accepted for forward compatibility but is **inert**: an inert notice is printed and the
+file is never rewritten.
+
 ## Test gate
 
 A file is checked only when its language resolves **and** it is a test file: the payload's explicit
@@ -47,7 +82,7 @@ reported as `gate-weakened`.
 
 ## Languages
 
-Every language compiled by `tree-sitter-language-pack` (31, listed in `.cargo/config.toml`'s
+Every language compiled by `tree-sitter-language-pack` (35, listed in `.cargo/config.toml`'s
 `TSLP_LANGUAGES`)
 is parsed. A language yields body-based findings only when it has a real test framework and a
 compiling test-body query (21): python, javascript, typescript, tsx, go, rust, ruby, java, csharp,
@@ -64,7 +99,11 @@ blocks (`<script>`, markdown fences, …).
 `incomplete-assertion`, `unawaited-assertion`, `broad-exception`, `mock-of-sut`, `over-mocking`,
 `duplicate-test`, `expected-copied-from-actual`, `snapshot-regenerated`, `tolerance-broadened`,
 `conditional-assertion`, `retry-added`, `agent-memo-test`, `allow-added`, `gate-weakened`,
-`commented-out-test`.
+`commented-out-test`, `source-grep-test`, `test-volume`, `harness-edited`, `near-duplicate-test`.
+
+Confidence policy: `source-grep-test` is `medium`; `harness-edited` is `medium` on sensitive harness
+paths (CI workflows, pytest/tox/conftest, jest/vitest config) and `low` otherwise; `test-volume` and
+`near-duplicate-test` are `low` telemetry, visible only with `--min-confidence low`.
 
 Each finding carries a `confidence` of `high`/`medium`/`low`. Line rules classify the added lines of
 the captured test bodies (comments stripped); diff rules compare an edit's old and new content.
@@ -89,6 +128,23 @@ brand-new test is not blocked for using a loose matcher.
 
 `agent-memo-test` findings are additionally summarised under a dedicated banner, pointing at the test
 name/assertion message that describes a change instead of the behavior.
+
+## Scope and non-goals
+
+`test-checker` targets **test weakening** (a change that disables, hollows out, or loosens a test
+while still passing) and **bad or surplus tests** (no assertion, tautological/constant assertions,
+swallowed errors, over-mocking, duplicates). It is deliberately **not**:
+
+- **production code written to pass the tests** (a test-mode branch, a constant `__eq__`, stack
+  introspection, cross-file hardcoding). Detecting that needs cross-file heuristics or a judge, not
+  a per-write hook; a separate `prod-checker` would own it.
+- **rules over Bash commands** (`git log -S`, `curl *.patch`, `-u` snapshot regeneration): a
+  different matcher, a different binary.
+- **`tests-not-run`**: not observable from a `Write`/`Edit`.
+- **classic test smells** (Assertion Roulette, Magic Number, Eager, Long): noisy on generated tests.
+
+The shared vocabulary (verdict, reason, evidence, unreliable, floor, and the difference between
+fail-open and a silent pass) is in [`CONCEPTS.md`](CONCEPTS.md).
 
 ## Library
 
