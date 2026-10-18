@@ -38,6 +38,10 @@ pass. The wrapper resolves the binary, passes `0`/`2` through, and otherwise dra
 payload never raises SIGPIPE) and exits `1` with `did not run`. `tests/readme_hook.rs` runs this exact
 command text, so weakening it (a bare command, `|| exit 0`, …) fails the build.
 
+the wrapper assumes a POSIX shell: `command -v`, `cat`, and `>&2` must exist. On Windows without one,
+wire the binary directly (`test-checker.exe`) or run it through a shell that provides them; this
+command text does not claim native Windows support.
+
 ## Contract
 
 - **stdin**: `{ "tool_name": "Write"|"Edit"|"MultiEdit", "tool_input": { "file_path"?, "content"?,
