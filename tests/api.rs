@@ -357,6 +357,47 @@ fn check_hook_input_given_unknown_tool_skips() {
     assert_eq!(result.exit_code, 0);
 }
 
+#[test]
+fn check_hook_input_given_apply_patch_weakening_edit_exits_two() {
+    // given: the OpenCode plugin forwards `apply_patch`, which must be checked as an edit and not
+    // silently skipped.
+    let input = r#"{"tool_name":"apply_patch","tool_input":{"file_path":"tests/app.test.js","old_string":"it('sums', () => {\n  expect(add(1, 2)).toEqual(3);\n});\n","new_string":"it('sums', () => {\n  expect(add(1, 2)).toBeDefined();\n});\n"}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then
+    assert_eq!(result.exit_code, 2);
+    assert!(result.message.contains("weakened-assertion"));
+}
+
+#[test]
+fn check_hook_input_given_lowercase_write_exits_two() {
+    // given: the OpenCode plugin forwards the tool name lowercased.
+    let input = r#"{"tool_name":"write","tool_input":{"file_path":"tests/test_app.py","content":"def test_sums():\n    @pytest.mark.skip\n    assert add(1, 2) == 3\n"}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then
+    assert_eq!(result.exit_code, 2);
+    assert!(result.message.contains("skip-added"));
+}
+
+#[test]
+fn check_hook_input_given_edit_with_edits_array_analyzes_deletion() {
+    // given: an `Edit` carrying the plugin's `edits[]` array, whose only edit deletes an assertion
+    // (the top-level `new_string` is empty).
+    let input = r#"{"tool_name":"Edit","tool_input":{"file_path":"tests/test_app.py","edits":[{"old_string":"def test_sums():\n    assert add(1, 2) == 3\n","new_string":""}]}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then
+    assert_eq!(result.exit_code, 2);
+    assert!(result.message.contains("gutted-test"));
+}
+
 /// Options that keep low-confidence findings, so the harness/config rules are observable.
 fn low_confidence_options() -> Options {
     Options {
