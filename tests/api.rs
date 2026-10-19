@@ -398,6 +398,32 @@ fn check_hook_input_given_edit_with_edits_array_analyzes_deletion() {
     assert!(result.message.contains("gutted-test"));
 }
 
+#[test]
+fn check_hook_input_given_linter_directive_next_to_skip_still_reports_skip() {
+    // given: a skip marker and a linter directive on the same line
+    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/test_app.py","content":"def test_a():\n    @pytest.mark.skip  # noqa\n    assert x == 1\n"}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then: the directive does not silence the skip finding
+    assert_eq!(result.exit_code, 2);
+    assert!(result.message.contains("skip-added"));
+}
+
+#[test]
+fn check_hook_input_given_scoped_marker_added_reports_allow_added() {
+    // given: a scoped marker added in the same Write
+    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/test_app.py","content":"def test_a():\n    @pytest.mark.skip  # test-checker: allow skip-added -- legacy\n    assert x == 1\n"}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then: the marker itself is reported even though it scopes a rule
+    assert_eq!(result.exit_code, 2);
+    assert!(result.message.contains("allow-added"));
+}
+
 /// Options that keep low-confidence findings, so the harness/config rules are observable.
 fn low_confidence_options() -> Options {
     Options {

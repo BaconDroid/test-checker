@@ -165,7 +165,11 @@ fn evaluate(
 
     let marker_added = marker_added_in_change(tool, hook_input);
     if !marker_added && file_suppressed(tool, hook_input) {
-        return skip("Suppressed by test-checker: allow");
+        return skip(if crate::filters::file_wide_allowed() {
+            "Suppressed by test-checker: allow"
+        } else {
+            "Suppressed by test-checker: allow (deprecated file-wide marker: set TEST_CHECKER_ALLOW_FILE_WIDE=1, or use `test-checker: allow <rule> -- <reason>` on the line)"
+        });
     }
 
     let detector = TestDetector::new();
@@ -416,7 +420,9 @@ fn marker_added_in_change(tool: ToolKind, hook_input: &HookInput) -> bool {
             .edits
             .iter()
             .any(|edit| added_line_has_marker(&edit.old_string, &edit.new_string)),
-        ToolKind::Write => SuppressionFilter.is_file_suppressed(get_content_to_check(hook_input)),
+        ToolKind::Write => get_content_to_check(hook_input)
+            .lines()
+            .any(is_line_suppressed),
     }
 }
 

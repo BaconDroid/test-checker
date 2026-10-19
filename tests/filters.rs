@@ -50,6 +50,31 @@ fn suppression_filter_given_marker_returns_true() {
     assert!(!filter.is_file_suppressed("x = 1"));
 }
 
+fn rule_finding(rule: &str, text: &str) -> Finding {
+    Finding::new(rule, Confidence::High, "m", 1, "tests/test_app.py", text)
+}
+
+#[test]
+fn suppression_filter_given_scoped_marker_suppresses_only_its_rule() {
+    // given
+    let filter = SuppressionFilter;
+    let text = "@pytest.mark.skip  # test-checker: allow skip-added -- legacy";
+
+    // when / then
+    assert!(filter.should_skip(&rule_finding("skip-added", text)));
+    assert!(!filter.should_skip(&rule_finding("no-assertion", text)));
+}
+
+#[test]
+fn suppression_filter_given_scoped_marker_does_not_suppress_the_file() {
+    // given
+    let filter = SuppressionFilter;
+
+    // when / then
+    assert!(!filter.is_file_suppressed("x = 1  # test-checker: allow skip-added -- legacy"));
+    assert!(filter.is_file_suppressed("x = 1  # test-checker: allow"));
+}
+
 #[test]
 fn shebang_filter_given_shebang_returns_true() {
     // given

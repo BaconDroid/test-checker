@@ -154,8 +154,12 @@ brand-new test is not blocked for using a loose matcher.
 - **BDD keywords** (`given`, `when`, `then`, `arrange`, `act`, `assert`, …) are allowed.
 - **Directives** (`noqa`, `ts-ignore`, `eslint-disable`, `clippy:`, `allow`, …) are allowed.
 - **Shebang lines** (`#!…`) are allowed.
-- **Opt-out marker** `test-checker: allow` suppresses findings for a file. Adding the marker **in the
-  same change** does not suppress it: it is reported as an `allow-added` finding instead.
+- **Opt-out marker.** `test-checker: allow <rule> -- <reason>` on a line suppresses only that rule's
+  finding on that line (the escape hatch for a deliberate exception). A bare `test-checker: allow`
+  still suppresses the whole file for now, but it is **deprecated**: set
+  `TEST_CHECKER_ALLOW_FILE_WIDE=1` in a human-owned hook configuration to silence the deprecation
+  notice, or migrate to the per-line form. Adding the marker **in the same change** does not
+  suppress it: it is reported as an `allow-added` finding instead.
 
 `agent-memo-test` findings are additionally summarised under a dedicated banner, pointing at the test
 name/assertion message that describes a change instead of the behavior.

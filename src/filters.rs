@@ -49,18 +49,53 @@ impl ShebangFilter {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SuppressionFilter;
 
+/// How a `test-checker: allow` marker scopes suppression.
+enum MarkerScope<'a> {
+    /// Bare marker: file-wide, reserved for human-owned configuration.
+    FileWide,
+    /// `test-checker: allow <rule> -- <reason>`: only that rule, on the marker's line.
+    Rule(&'a str),
+}
+
+fn marker_scope(text: &str) -> Option<MarkerScope<'_>> {
+    let index = text.to_ascii_lowercase().find(SUPPRESSION_MARKER)?;
+    let rest = text[index + SUPPRESSION_MARKER.len()..].trim();
+    match rest.split_once("--") {
+        Some((rule, _reason)) if !rule.trim().is_empty() => Some(MarkerScope::Rule(rule.trim())),
+        _ => Some(MarkerScope::FileWide),
+    }
+}
+
 impl SuppressionFilter {
     #[must_use]
     pub fn should_skip(&self, finding: &Finding) -> bool {
-        is_line_suppressed(&finding.text)
+        match marker_scope(&finding.text) {
+            Some(MarkerScope::FileWide) => true,
+            Some(MarkerScope::Rule(rule)) => rule.eq_ignore_ascii_case(&finding.rule),
+            None => false,
+        }
     }
 
     #[must_use]
     pub fn is_file_suppressed(&self, content: &str) -> bool {
-        engine::is_file_suppressed(content, SUPPRESSION_MARKER)
+        content
+            .lines()
+            .any(|line| matches!(marker_scope(line), Some(MarkerScope::FileWide)))
     }
 }
 
+/// Whether the human-owned configuration enables the file-wide marker.
+#[must_use]
+pub(crate) fn file_wide_allowed() -> bool {
+    std::env::var("TEST_CHECKER_ALLOW_FILE_WIDE").is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+/// Whether the line carries any suppression marker (bare or scoped).
 #[must_use]
 pub fn is_line_suppressed(text: &str) -> bool {
     engine::is_line_suppressed(text, SUPPRESSION_MARKER)
