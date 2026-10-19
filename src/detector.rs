@@ -25,6 +25,9 @@ struct Body {
     end_byte: usize,
     start_row: usize,
     name: Option<String>,
+    /// The fragment contains this complete test node (no parse error inside it); whole-test rules
+    /// such as `no-assertion` and `echo-test` must not run on an incomplete fragment.
+    reliable: bool,
 }
 
 #[derive(Debug, Default)]
@@ -143,14 +146,18 @@ impl TestDetector {
                 if let Some(old_tree) = &old_tree {
                     let old_bodies =
                         capture_bodies(&runtime, query, old_tree, old_string.as_bytes());
-                    findings.extend(removed_test_findings(
-                        &runtime.name,
-                        file_path,
-                        old_string,
-                        &old_bodies,
-                        new_string,
-                        &bodies,
-                    ));
+                    // `test-removed` needs both fragments to contain their complete tests: a
+                    // parse error means the fragment is partial, so absence proves nothing.
+                    if !tree.root_node().has_error() && !old_tree.root_node().has_error() {
+                        findings.extend(removed_test_findings(
+                            &runtime.name,
+                            file_path,
+                            old_string,
+                            &old_bodies,
+                            new_string,
+                            &bodies,
+                        ));
+                    }
                 }
             }
         }
@@ -340,6 +347,7 @@ fn capture_bodies(
                     end_byte: expanded_end(&runtime.name, node, source),
                     start_row,
                     name: name.or(callee),
+                    reliable: !node.has_error(),
                 });
             }
         }
@@ -501,22 +509,25 @@ fn analyze_new_bodies(
     for body in bodies {
         let lines = body_added_lines(content, body, language);
         findings.extend(classify_lines(file_path, &lines));
-        findings.extend(rules::classify_test_body(
+        findings.extend(rules::classify_test_body_with_reliability(
             file_path,
             body.start_row + 1,
             &lines,
+            body.reliable,
         ));
         // `duplicate-test` compares the whole body, so adding the same line to two different
         // tests is not mistaken for one test duplicating another. Every captured body is recorded;
         // a `Write` adds every line, so every body is touched and emits its finding.
         let exact_lines = body_raw_lines(content, body);
-        if let Some(finding) = push_duplicate(
-            &mut seen,
-            file_path,
-            body.start_row + 1,
-            &exact_lines,
-            &lines,
-        ) {
+        if body.reliable
+            && let Some(finding) = push_duplicate(
+                &mut seen,
+                file_path,
+                body.start_row + 1,
+                &exact_lines,
+                &lines,
+            )
+        {
             findings.push(finding);
         }
     }
@@ -549,20 +560,27 @@ fn analyze_edited_bodies(
         let is_touched = !touched.is_empty();
         if is_touched {
             findings.extend(classify_diff_lines(file_path, &touched, &diff));
+            if let Some(finding) =
+                rules::classify_echo_body(file_path, &full, body.reliable, Some(added))
+            {
+                findings.push(finding);
+            }
         }
         // `duplicate-test` compares the whole body, so adding the same line to two different
         // tests is not mistaken for one test duplicating another. Every captured body is
         // recorded, so an unchanged test still serves as the baseline a touched near-duplicate is
         // compared against; only a touched body emits the finding it earns.
         let exact_lines = body_raw_lines(content, body);
-        let duplicate = push_duplicate(
-            &mut seen,
-            file_path,
-            body.start_row + 1,
-            &exact_lines,
-            &full,
-        );
-        if is_touched && let Some(finding) = duplicate {
+        if body.reliable
+            && let Some(finding) = push_duplicate(
+                &mut seen,
+                file_path,
+                body.start_row + 1,
+                &exact_lines,
+                &full,
+            )
+            && is_touched
+        {
             findings.push(finding);
         }
     }

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::filters::is_agent_memo_phrase;
 use crate::language::is_sensitive_harness_path;
 use crate::models::{Confidence, Finding};
@@ -106,6 +108,12 @@ const SLEEP_MARKERS: &[&str] = &["time.sleep(", "cy.wait(", "await sleep(", "Thr
 const LOOSE_MAX: u8 = 10;
 /// Strength at or above this is an exact/deep equality (the strong end).
 const EXACT_MIN: u8 = 30;
+
+/// `echo-test` is a heuristic over a whole test body; it stays telemetry until its FP audit clears
+/// the Medium bar.
+const ECHO_TEST_CONFIDENCE: Confidence = Confidence::Low;
+/// `mirror-implementation-test` is line-local but still heuristic: telemetry until audited.
+const MIRROR_IMPLEMENTATION_CONFIDENCE: Confidence = Confidence::Low;
 
 const RETRY_MARKERS: &[&str] = &[
     "@retry",
@@ -773,6 +781,9 @@ fn classify_line(
     if let Some(finding) = classify_assertion(file_path, &line, text) {
         findings.push(finding);
     }
+    if let Some(finding) = classify_mirror_implementation(file_path, &line, text) {
+        findings.push(finding);
+    }
     if let Some(finding) = classify_swallowed_error(file_path, added, index, text) {
         findings.push(finding);
     }
@@ -887,6 +898,566 @@ fn classify_assertion(file_path: &str, line: &AddedLine<'_>, text: &str) -> Opti
                 line,
                 file_path,
             ));
+        }
+    }
+    None
+}
+
+/// `mirror-implementation-test`: the expected value is built from the same arguments with the same
+/// shape as the call under test (`assert add(a, b) == a + b`).
+fn classify_mirror_implementation(
+    file_path: &str,
+    line: &AddedLine<'_>,
+    text: &str,
+) -> Option<Finding> {
+    let code = code_only(text);
+    let (left, right) = assertion_operands(&code)?;
+    if !mirror_pair(&left, &right) && !mirror_pair(&right, &left) {
+        return None;
+    }
+    Some(finish(
+        "mirror-implementation-test",
+        MIRROR_IMPLEMENTATION_CONFIDENCE,
+        "The expected value restates the code under test instead of pinning its behaviour.",
+        line,
+        file_path,
+    ))
+}
+
+/// The line with the contents of string literals blanked, so an assertion quoted inside a fixture
+/// string is not mistaken for code.
+fn code_only(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_string = false;
+    let mut quote = '\0';
+    let mut escaped = false;
+    for character in text.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == quote {
+                in_string = false;
+                out.push(character);
+            } else {
+                out.push(' ');
+            }
+            continue;
+        }
+        if matches!(character, '"' | '\'' | '`') {
+            in_string = true;
+            quote = character;
+        }
+        out.push(character);
+    }
+    out
+}
+
+fn mirror_pair(call: &str, expected: &str) -> bool {
+    let Some(args) = simple_call_arguments(call) else {
+        return false;
+    };
+    if !args.iter().any(|arg| !is_literal(arg)) {
+        return false;
+    }
+    if !args.iter().any(|arg| contains_token(expected, arg)) {
+        return false;
+    }
+    if contains_call(expected) {
+        return false;
+    }
+    let expected = trim_outer_parens(expected.trim());
+    has_binary_operator(expected) && mirror_expression_matches(expected, &args)
+}
+
+/// The arguments of a simple call expression (`add(a, b)`, `self.add(a)`), or `None` when the
+/// expression is not exactly one call.
+fn simple_call_arguments(expr: &str) -> Option<Vec<String>> {
+    let expr = trim_outer_parens(expr.trim());
+    let open = expr.find('(')?;
+    let name = expr[..open].trim();
+    if !is_call_name(name) {
+        return None;
+    }
+    let inner = inner_args(expr, "(")?;
+    let close = open + 1 + inner.len();
+    if expr[close..].trim() != ")" {
+        return None;
+    }
+    let args = split_top_level(inner);
+    if args.is_empty() {
+        return None;
+    }
+    Some(
+        args.into_iter()
+            .map(|arg| arg.trim().to_string())
+            .filter(|arg| !arg.is_empty())
+            .collect(),
+    )
+}
+
+fn is_call_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | ':' | '$')
+        })
+}
+
+/// A value that is a mirrored operand: an argument of the call, a literal, or a nested expression
+/// over those.
+fn mirror_expression_matches(expr: &str, args: &[String]) -> bool {
+    let expr = trim_outer_parens(expr.trim());
+    if args.iter().any(|arg| arg.trim() == expr) || is_literal(expr) {
+        return true;
+    }
+    let Some((left, right)) = split_binary_expression(expr) else {
+        return false;
+    };
+    mirror_expression_matches(left, args) && mirror_expression_matches(right, args)
+}
+
+fn has_binary_operator(expr: &str) -> bool {
+    split_binary_expression(expr).is_some()
+}
+
+/// Split at the first top-level arithmetic operator, ignoring strings and nested delimiters.
+fn split_binary_expression(expr: &str) -> Option<(&str, &str)> {
+    let bytes = expr.as_bytes();
+    let mut depth = 0_u32;
+    let mut in_string = false;
+    let mut quote = 0_u8;
+    let mut escaped = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == quote {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'"' | b'\'' | b'`' => {
+                in_string = true;
+                quote = byte;
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            _ if depth == 0 && binary_operator_len(bytes, index).is_some() => {
+                let left = expr[..index].trim();
+                let right = expr[index + 1..].trim();
+                if !left.is_empty() && !right.is_empty() {
+                    return Some((left, right));
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+fn binary_operator_len(bytes: &[u8], index: usize) -> Option<usize> {
+    let byte = bytes[index];
+    if !matches!(byte, b'+' | b'-' | b'*' | b'/' | b'%') {
+        return None;
+    }
+    let previous = index.checked_sub(1).and_then(|offset| bytes.get(offset));
+    let next = bytes.get(index + 1);
+    // Assignment, comparison, arrow, increment and double-slash/power forms are not binary
+    // arithmetic operators for this check.
+    if matches!(next, Some(b'=' | b'>' | b'+' | b'-' | b'/' | b'*'))
+        || matches!(
+            previous,
+            Some(b'=' | b'!' | b'<' | b'>' | b'+' | b'-' | b'*' | b'/' | b'%' | b'&' | b'|')
+        )
+    {
+        return None;
+    }
+    Some(1)
+}
+
+fn contains_call(expr: &str) -> bool {
+    let bytes = expr.as_bytes();
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte != b'(' || index == 0 {
+            continue;
+        }
+        let mut cursor = index;
+        while cursor > 0 {
+            let previous = bytes[cursor - 1];
+            if previous.is_ascii_whitespace() {
+                cursor -= 1;
+                continue;
+            }
+            if is_identifier_byte(previous) {
+                return true;
+            }
+            break;
+        }
+    }
+    false
+}
+
+fn contains_token(haystack: &str, needle: &str) -> bool {
+    let needle = needle.trim();
+    if needle.is_empty() {
+        return false;
+    }
+    let bytes = haystack.as_bytes();
+    let mut from = 0;
+    while from < haystack.len() {
+        let Some(offset) = haystack[from..].find(needle) else {
+            return false;
+        };
+        let index = from + offset;
+        let end = index + needle.len();
+        let before_ok = index == 0 || !is_identifier_byte(bytes[index - 1]);
+        let after_ok = end == bytes.len() || !is_identifier_byte(bytes[end]);
+        if before_ok && after_ok {
+            return true;
+        }
+        from = index + 1;
+    }
+    false
+}
+
+fn trim_outer_parens(text: &str) -> &str {
+    let mut current = text.trim();
+    while current.starts_with('(') && current.ends_with(')') {
+        let Some(inner) = inner_args(current, "(") else {
+            break;
+        };
+        if inner.len() + 2 != current.len() {
+            break;
+        }
+        current = inner.trim();
+    }
+    current
+}
+
+/// A value written by one statement: `<receiver>.<field> = value`, `<receiver>.setField(value)`,
+/// or `<receiver> = Type(value)`.
+#[derive(Debug)]
+struct EchoWrite {
+    receiver: String,
+    field: Option<String>,
+    value: String,
+}
+
+/// `echo-test`: a test writes a value and reads the same value back through a trivial accessor
+/// with no statement in between.
+fn classify_echo(
+    file_path: &str,
+    body: &[AddedLine<'_>],
+    added: Option<&HashSet<usize>>,
+) -> Option<Finding> {
+    let meaningful: Vec<&AddedLine<'_>> = body
+        .iter()
+        .filter(|line| !line.text.trim().is_empty())
+        .collect();
+    for index in 0..meaningful.len().saturating_sub(1) {
+        let Some(write) = parse_echo_write(meaningful[index].text) else {
+            continue;
+        };
+        let assertion = meaningful[index + 1];
+        if let Some(lines) = added {
+            let write_line = meaningful[index].line_number - 1;
+            let assertion_line = assertion.line_number - 1;
+            if !lines.contains(&write_line) && !lines.contains(&assertion_line) {
+                continue;
+            }
+        }
+        if echo_assertion_operands(&code_only(assertion.text)).is_none() {
+            continue;
+        }
+        let Some((left, right)) = echo_assertion_operands(assertion.text.trim()) else {
+            continue;
+        };
+        let matches = (echo_read_matches(&left, &write)
+            && echo_value_matches(&right, &write.value))
+            || (echo_read_matches(&right, &write) && echo_value_matches(&left, &write.value));
+        if matches {
+            return Some(finish(
+                "echo-test",
+                ECHO_TEST_CONFIDENCE,
+                "The test writes a value and reads it back unchanged through a trivial accessor.",
+                assertion,
+                file_path,
+            ));
+        }
+    }
+    None
+}
+
+/// The edit-path entry point: run `echo-test` over a touched body, emitting only when the
+/// assertion line itself was added by the edit and the fragment contains the complete test.
+pub(crate) fn classify_echo_body(
+    file_path: &str,
+    body: &[AddedLine<'_>],
+    reliable: bool,
+    added: Option<&HashSet<usize>>,
+) -> Option<Finding> {
+    if !reliable {
+        return None;
+    }
+    classify_echo(file_path, body, added)
+}
+
+fn parse_echo_write(line: &str) -> Option<EchoWrite> {
+    let text = line.trim().trim_end_matches(';').trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Some((field, receiver, value)) = parse_setter_call(text) {
+        return Some(EchoWrite {
+            receiver,
+            field: Some(normalize_echo_field(&field)),
+            value,
+        });
+    }
+
+    let (left, right) = split_assignment(text)?;
+    let target = left.split_whitespace().last()?.trim();
+    if target.is_empty() {
+        return None;
+    }
+    if let Some((receiver, field)) = target.rsplit_once('.') {
+        let receiver = receiver.trim();
+        let field = field.trim();
+        if !is_call_name(receiver) || field.is_empty() {
+            return None;
+        }
+        return Some(EchoWrite {
+            receiver: receiver.to_string(),
+            field: Some(normalize_echo_field(field)),
+            value: right.trim().to_string(),
+        });
+    }
+    Some(EchoWrite {
+        receiver: target.to_string(),
+        field: None,
+        value: single_constructor_value(right)?,
+    })
+}
+
+/// `obj.set_field(value)` / `obj.setField(value)`.
+fn parse_setter_call(text: &str) -> Option<(String, String, String)> {
+    let dot = text.find(".set")?;
+    let receiver = text[..dot].trim();
+    if !is_call_name(receiver) {
+        return None;
+    }
+    let open = dot + text[dot..].find('(')?;
+    let method = &text[dot + 1..open];
+    if !method.starts_with("set") || method.len() == 3 {
+        return None;
+    }
+    let inner = inner_args(text, "(")?;
+    let close = open + 1 + inner.len();
+    if text[close..].trim() != ")" {
+        return None;
+    }
+    let args = split_top_level(inner);
+    if args.len() != 1 {
+        return None;
+    }
+    let value = args[0].trim().to_string();
+    if value.is_empty() {
+        return None;
+    }
+    Some((method[3..].trim().to_string(), receiver.to_string(), value))
+}
+
+fn split_assignment(text: &str) -> Option<(&str, &str)> {
+    let bytes = text.as_bytes();
+    let mut depth = 0_u32;
+    let mut in_string = false;
+    let mut quote = 0_u8;
+    let mut escaped = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == quote {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'"' | b'\'' | b'`' => {
+                in_string = true;
+                quote = byte;
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            b'=' if depth == 0 => {
+                let previous = index.checked_sub(1).and_then(|offset| bytes.get(offset));
+                let next = bytes.get(index + 1);
+                if matches!(next, Some(b'=' | b'>'))
+                    || matches!(
+                        previous,
+                        Some(
+                            b'=' | b'!'
+                                | b'<'
+                                | b'>'
+                                | b'+'
+                                | b'-'
+                                | b'*'
+                                | b'/'
+                                | b'%'
+                                | b'&'
+                                | b'|'
+                        )
+                    )
+                {
+                    index += 1;
+                    continue;
+                }
+                let left = text[..index].trim();
+                let right = text[index + 1..].trim();
+                if !left.is_empty() && !right.is_empty() {
+                    return Some((left, right));
+                }
+                return None;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// The one value carried by `Type(value)`, `new Type(value)`, `Type::new(value)`, or
+/// `Type { field: value }`.
+fn single_constructor_value(right: &str) -> Option<String> {
+    let right = right.trim();
+    if let Some(inner) = right.strip_prefix("new ") {
+        let inner = inner.trim();
+        let open = inner.find('(')?;
+        let args = inner_args(inner, "(")?;
+        let close = open + 1 + args.len();
+        if inner[close..].trim() != ")" {
+            return None;
+        }
+        let args = split_top_level(args);
+        return (args.len() == 1).then(|| args[0].trim().to_string());
+    }
+    if let Some(open) = right.find('(') {
+        let name = right[..open].trim().trim_end_matches("::new").trim();
+        if !is_call_name(name) {
+            return None;
+        }
+        let inner = inner_args(right, "(")?;
+        let close = open + 1 + inner.len();
+        if right[close..].trim() != ")" {
+            return None;
+        }
+        let args = split_top_level(inner);
+        return (args.len() == 1).then(|| args[0].trim().to_string());
+    }
+    // Rust struct literal: `Type { field: value }`.
+    let open = right.find('{')?;
+    let close = right.rfind('}')?;
+    if close <= open {
+        return None;
+    }
+    let field = right[open + 1..close].trim();
+    let (_, value) = field.split_once(':')?;
+    let value = value.trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn normalize_echo_field(field: &str) -> String {
+    field
+        .trim()
+        .trim_start_matches('_')
+        .replace('_', "")
+        .to_ascii_lowercase()
+}
+
+fn echo_read_matches(operand: &str, write: &EchoWrite) -> bool {
+    let operand = trim_outer_parens(operand.trim());
+    let prefix = format!("{}.", write.receiver);
+    let Some(rest) = operand.strip_prefix(&prefix) else {
+        return false;
+    };
+    let rest = rest.trim().trim_end_matches("()").trim();
+    let field = strip_getter_prefix(rest).unwrap_or(rest);
+    if field.is_empty() || !field.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return false;
+    }
+    write
+        .field
+        .as_ref()
+        .is_none_or(|expected| normalize_echo_field(field) == *expected)
+}
+
+fn strip_getter_prefix(field: &str) -> Option<&str> {
+    for prefix in ["get_", "Get_", "get", "Get"] {
+        if let Some(rest) = field.strip_prefix(prefix)
+            && (prefix.ends_with('_')
+                || rest.starts_with(|character: char| character.is_ascii_uppercase()))
+        {
+            return Some(rest);
+        }
+    }
+    None
+}
+
+fn echo_value_matches(operand: &str, value: &str) -> bool {
+    let operand = trim_outer_parens(operand.trim());
+    let value = trim_outer_parens(value.trim());
+    !operand.is_empty() && compact_whitespace(operand) == compact_whitespace(value)
+}
+
+fn compact_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The two sides of an equality-style assertion for frameworks not covered by
+/// [`assertion_operands`].
+fn echo_assertion_operands(text: &str) -> Option<(String, String)> {
+    if let Some(operands) = assertion_operands(text) {
+        return Some(operands);
+    }
+    for marker in [
+        "XCTAssertEqual(",
+        "EXPECT_EQ(",
+        "ASSERT_EQ(",
+        "assert.are.equal(",
+        "assert.equal(",
+    ] {
+        if let Some(inner) = inner_args(text, marker) {
+            let args = split_top_level(inner);
+            if let [left, right] = args.as_slice() {
+                return Some((left.trim().to_string(), right.trim().to_string()));
+            }
+        }
+    }
+    if let Some(rest) = text.strip_prefix("assert_equal ") {
+        let args = split_top_level(rest);
+        if let [left, right] = args.as_slice() {
+            return Some((left.trim().to_string(), right.trim().to_string()));
+        }
+    }
+    if let Some(inner) = inner_args(text, "assert(") {
+        if let Some((left, right)) = inner.split_once("==") {
+            let (left, right) = (left.trim(), right.trim());
+            if !left.is_empty() && !right.is_empty() {
+                return Some((left.to_string(), right.to_string()));
+            }
         }
     }
     None
@@ -1041,6 +1612,18 @@ pub fn classify_test_body(
     body_start: usize,
     body: &[AddedLine<'_>],
 ) -> Vec<Finding> {
+    classify_test_body_with_reliability(file_path, body_start, body, true)
+}
+
+/// Classify a captured test body, suppressing the rules that need the whole test when the parsed
+/// fragment is unreliable (it does not contain the complete test).
+#[must_use]
+pub(crate) fn classify_test_body_with_reliability(
+    file_path: &str,
+    body_start: usize,
+    body: &[AddedLine<'_>],
+    reliable: bool,
+) -> Vec<Finding> {
     let mut findings = Vec::new();
     let meaningful: Vec<&str> = body
         .iter()
@@ -1052,13 +1635,15 @@ pub fn classify_test_body(
         text: meaningful.first().copied().unwrap_or(""),
     };
     if meaningful.is_empty() {
-        findings.push(finish(
-            "gutted-test",
-            Confidence::High,
-            "The test body is empty.",
-            &anchor,
-            file_path,
-        ));
+        if reliable {
+            findings.push(finish(
+                "gutted-test",
+                Confidence::High,
+                "The test body is empty.",
+                &anchor,
+                file_path,
+            ));
+        }
         return findings;
     }
 
@@ -1070,7 +1655,7 @@ pub fn classify_test_body(
         .iter()
         .filter(|line| has_marker(line, ASSERTION_MARKERS))
         .count();
-    if mock_count >= 2 && mock_count > assertion_count {
+    if reliable && mock_count >= 2 && mock_count > assertion_count {
         findings.push(finish(
             "over-mocking",
             Confidence::Medium,
@@ -1085,7 +1670,7 @@ pub fn classify_test_body(
     let has_nested_test = meaningful
         .iter()
         .any(|line| has_marker(line, NESTED_TEST_MARKERS));
-    if !has_assertion && !has_nested_test {
+    if reliable && !has_assertion && !has_nested_test {
         findings.push(finish(
             "no-assertion",
             Confidence::Medium,
@@ -1093,6 +1678,9 @@ pub fn classify_test_body(
             &anchor,
             file_path,
         ));
+    }
+    if reliable && let Some(finding) = classify_echo(file_path, body, None) {
+        findings.push(finding);
     }
     if has_assertion
         && let Some(read_line) = body.iter().find(|line| reads_source_file(line.text.trim()))
@@ -1467,8 +2055,8 @@ fn strip_comment_markers(text: &str) -> &str {
 mod tests {
     use super::{
         AddedLine, Confidence, DiffContext, assertion_operands, classify_added_line,
-        classify_diff_line, classify_harness_line, classify_test_body, diff_findings,
-        looks_like_commented_out_test,
+        classify_diff_line, classify_harness_line, classify_test_body,
+        classify_test_body_with_reliability, diff_findings, looks_like_commented_out_test,
     };
 
     fn lines<'a>(texts: &'a [&'a str]) -> Vec<AddedLine<'a>> {
@@ -2457,6 +3045,152 @@ mod tests {
             !findings
                 .iter()
                 .any(|finding| finding.rule == "swallowed-error"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn classify_test_body_given_field_round_trip_reports_echo_test() {
+        // given: a DTO is constructed with a value and the value is read back unchanged
+        let body = lines(&[
+            "def test_dto():",
+            "    dto = Dto(name)",
+            "    assert dto.name == name",
+        ]);
+
+        // when
+        let findings = classify_test_body("tests/test_dto.py", 1, &body);
+
+        // then
+        assert!(
+            findings.iter().any(|finding| finding.rule == "echo-test"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn classify_test_body_given_setter_getter_reports_echo_test() {
+        // given: a setter is read back through its getter on the next statement
+        let body = lines(&[
+            "it('stores', () => {",
+            "  dto.set_name(name);",
+            "  expect(dto.get_name()).toBe(name);",
+            "});",
+        ]);
+
+        // when
+        let findings = classify_test_body("tests/app.test.js", 1, &body);
+
+        // then
+        assert!(
+            findings.iter().any(|finding| finding.rule == "echo-test"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn classify_test_body_given_logic_between_write_and_read_reports_no_echo_test() {
+        // given: another statement sits between the write and the read
+        let body = lines(&[
+            "def test_dto():",
+            "    dto = Dto(name)",
+            "    dto.normalize()",
+            "    assert dto.name == name",
+        ]);
+
+        // when
+        let findings = classify_test_body("tests/test_dto.py", 1, &body);
+
+        // then
+        assert!(
+            !findings.iter().any(|finding| finding.rule == "echo-test"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn classify_test_body_given_changed_value_reports_no_echo_test() {
+        // given: the read-back value differs from the value written
+        let body = lines(&[
+            "def test_dto():",
+            "    dto.name = name",
+            "    assert dto.name == other",
+        ]);
+
+        // when
+        let findings = classify_test_body("tests/test_dto.py", 1, &body);
+
+        // then
+        assert!(
+            !findings.iter().any(|finding| finding.rule == "echo-test"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn classify_test_body_given_unreliable_fragment_suppresses_whole_test_rules() {
+        // given: a fragment whose captured test lacks its closing delimiter
+        let body = lines(&["it('x', () => {", "  dto.name = name;", "});"]);
+
+        // when
+        let findings = classify_test_body_with_reliability("tests/app.test.js", 1, &body, false);
+
+        // then: absence of an assertion is not trustworthy on an incomplete fragment
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "no-assertion" || finding.rule == "echo-test"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_mirrored_expression_reports_mirror_implementation() {
+        // given: the expected value repeats the call's own arithmetic
+        let added = lines(&["assert add(a, b) == a + b"]);
+
+        // when
+        let findings = classify_added_line("tests/test_math.py", &added, 0);
+
+        // then
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "mirror-implementation-test"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_literal_expectation_reports_no_mirror_implementation() {
+        // given: an expected literal is a real oracle, not a restatement
+        let added = lines(&["assert add(a, b) == 3"]);
+
+        // when
+        let findings = classify_added_line("tests/test_math.py", &added, 0);
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "mirror-implementation-test"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_unrelated_call_reports_no_mirror_implementation() {
+        // given: both sides call code, so the expectation is not a mirror of the arguments
+        let added = lines(&["assert parse(a) == render(a)"]);
+
+        // when
+        let findings = classify_added_line("tests/test_math.py", &added, 0);
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "mirror-implementation-test"),
             "{findings:?}"
         );
     }

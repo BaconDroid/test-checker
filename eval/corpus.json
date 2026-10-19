@@ -39,6 +39,21 @@
 
   { "path": "tests/t_test.py", "content": "def test_a():\n    assert add(1, 2) == 3\ndef test_b():\n    # explains the check\n    assert add(1, 2) == 3\n", "expected": "near-duplicate-test" },
 
+  { "path": "tests/test_dto.py", "content": "def test_dto():\n    dto = Dto(name)\n    assert dto.name == name\n", "expected": "echo-test" },
+  { "path": "tests/app.test.js", "content": "it('stores', () => {\n  dto.set_name(name);\n  expect(dto.get_name()).toBe(name);\n});\n", "expected": "echo-test" },
+  { "path": "src/lib_test.rs", "content": "#[test]\nfn stores() {\n    let dto = Dto(name);\n    assert_eq!(dto.name, name);\n}\n", "expected": "echo-test" },
+  { "path": "src/test/java/AppTest.java", "content": "class AppTest {\n  @Test\n  void stores() {\n    Dto dto = new Dto(name);\n    assertEquals(dto.name, name);\n  }\n}\n", "expected": "echo-test" },
+  { "path": "tests/app_test.go", "content": "package app\n\nfunc TestStores(t *testing.T) {\n\tvar dto = Dto{Name: name}\n\tassert.Equal(t, dto.Name, name)\n}\n", "expected": "echo-test" },
+
+  { "path": "tests/test_math.py", "content": "def test_add():\n    assert add(a, b) == a + b\n", "expected": "mirror-implementation-test" },
+  { "path": "tests/app.test.js", "content": "it('multiplies', () => {\n  expect(multiply(a, b)).toBe(a * b);\n});\n", "expected": "mirror-implementation-test" },
+  { "path": "src/lib_test.rs", "content": "#[test]\nfn adds() {\n    assert_eq!(add(a, b), a + b);\n}\n", "expected": "mirror-implementation-test" },
+  { "path": "src/test/java/AppTest.java", "content": "class AppTest {\n  @Test\n  void adds() {\n    assertEquals(add(a, b), a + b);\n  }\n}\n", "expected": "mirror-implementation-test" },
+  { "path": "tests/app_test.go", "content": "package app\n\nfunc TestAdds(t *testing.T) {\n\tassert.Equal(t, add(a, b), a+b)\n}\n", "expected": "mirror-implementation-test" },
+
+  { "path": "tests/test_dto.py", "content": "def test_dto():\n    dto = Dto(name)\n    assert dto.name == expected_name\n", "expected": null },
+  { "path": "tests/test_math.py", "content": "def test_parse():\n    assert parse(a) == render(a)\n", "expected": null },
+
   { "path": "pytest.ini", "content": "[pytest]\naddopts = -q\n", "expected": "harness-edited" },
 
   { "path": "tests/t_test.py", "content": "def test_add():\n    assert add(1, 2) == 3\n", "expected": null },

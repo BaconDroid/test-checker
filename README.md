@@ -174,7 +174,8 @@ that the compiled host grammar exposes (for example, a `<script>` block in HTML)
 `incomplete-assertion`, `unawaited-assertion`, `broad-exception`, `mock-of-sut`, `over-mocking`,
 `duplicate-test`, `expected-copied-from-actual`, `snapshot-regenerated`, `tolerance-broadened`,
 `conditional-assertion`, `retry-added`, `agent-memo-test`, `allow-added`, `gate-weakened`,
-`commented-out-test`, `source-grep-test`, `test-volume`, `harness-edited`, `near-duplicate-test`.
+`commented-out-test`, `source-grep-test`, `test-volume`, `harness-edited`, `near-duplicate-test`,
+`echo-test`, `mirror-implementation-test`.
 
 Confidence policy: `source-grep-test` is `medium`; `harness-edited` is `medium` on sensitive harness
 paths (CI workflows, `.gitlab-ci*`, pytest/tox/conftest, jest/vitest config) and `low` otherwise;
