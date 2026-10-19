@@ -3194,4 +3194,21 @@ mod tests {
             "{findings:?}"
         );
     }
+
+    #[test]
+    fn classify_added_line_given_assertion_quoted_in_a_fixture_string_reports_nothing() {
+        // given: the assertion is data inside a string literal, not code in this test
+        let added = lines(&["let source = \"expect(add(a, b)).toBe(a + b);\";"]);
+
+        // when
+        let findings = classify_added_line("tests/detector.rs", &added, 0);
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "mirror-implementation-test"),
+            "{findings:?}"
+        );
+    }
 }
