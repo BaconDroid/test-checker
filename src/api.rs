@@ -11,6 +11,28 @@ use crate::rules::{self, AddedLine};
 const EXIT_PASS: i32 = 0;
 const EXIT_BLOCK: i32 = 2;
 
+/// The hook tool that produced a change. Claude Code sends `Write`/`Edit`/`MultiEdit`; the
+/// `OpenCode` plugin normalizes to the same names but also forwards `apply_patch`, so matching is
+/// case-insensitive and `apply_patch` behaves like an edit.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolKind {
+    Write,
+    Edit,
+    MultiEdit,
+}
+
+fn classify_tool(name: &str) -> Option<ToolKind> {
+    if name.eq_ignore_ascii_case("write") {
+        Some(ToolKind::Write)
+    } else if name.eq_ignore_ascii_case("edit") || name.eq_ignore_ascii_case("apply_patch") {
+        Some(ToolKind::Edit)
+    } else if name.eq_ignore_ascii_case("multiedit") {
+        Some(ToolKind::MultiEdit)
+    } else {
+        None
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HookCheckResult {
@@ -118,12 +140,9 @@ fn evaluate(
     include_commented_out_tests: bool,
     include_body_tests: bool,
 ) -> HookCheckResult {
-    if !matches!(
-        hook_input.tool_name.as_str(),
-        "Write" | "Edit" | "MultiEdit"
-    ) {
+    let Some(tool) = classify_tool(&hook_input.tool_name) else {
         return skip("Unsupported tool");
-    }
+    };
     let file_path = hook_input.tool_input.file_path.as_str();
     if file_path.is_empty() {
         return skip("No file path provided");
@@ -133,7 +152,7 @@ fn evaluate(
         .unwrap_or_else(|| is_test_path(file_path));
     if !is_test {
         if is_harness_path(file_path) {
-            return harness_result(hook_input, file_path, custom_prompt, min_confidence);
+            return harness_result(tool, hook_input, file_path, custom_prompt, min_confidence);
         }
         if language_for_path(file_path).is_none() {
             return skip("Non-code file");
@@ -144,14 +163,14 @@ fn evaluate(
         return skip("Non-code file");
     }
 
-    let marker_added = marker_added_in_change(hook_input);
-    if !marker_added && file_suppressed(hook_input) {
+    let marker_added = marker_added_in_change(tool, hook_input);
+    if !marker_added && file_suppressed(tool, hook_input) {
         return skip("Suppressed by test-checker: allow");
     }
 
     let detector = TestDetector::new();
-    let mut findings = match hook_input.tool_name.as_str() {
-        "Edit" => {
+    let mut findings = match tool {
+        ToolKind::Edit if hook_input.tool_input.edits.is_empty() => {
             let old_string = hook_input.tool_input.old_string.as_str();
             let new_string = hook_input.tool_input.new_string.as_str();
             if new_string.is_empty() {
@@ -174,30 +193,19 @@ fn evaluate(
                 )
             }
         }
-        "MultiEdit" => {
+        ToolKind::Edit | ToolKind::MultiEdit => {
             if hook_input.tool_input.edits.is_empty() {
                 return skip("No content to check");
             }
-            let mut findings = Vec::new();
-            for edit in &hook_input.tool_input.edits {
-                if edit.new_string.is_empty() {
-                    // A deletion edit has no new content to parse, but it can still remove assertions.
-                    if include_body_tests && !edit.old_string.is_empty() {
-                        findings.extend(rules::diff_findings(&edit.old_string, "", file_path));
-                    }
-                    continue;
-                }
-                findings.extend(detector.detect_edit(
-                    &edit.old_string,
-                    &edit.new_string,
-                    file_path,
-                    include_commented_out_tests,
-                    include_body_tests,
-                ));
-            }
-            findings
+            edits_findings(
+                &detector,
+                &hook_input.tool_input.edits,
+                file_path,
+                include_commented_out_tests,
+                include_body_tests,
+            )
         }
-        _ => {
+        ToolKind::Write => {
             let content = get_content_to_check(hook_input);
             if content.is_empty() {
                 return skip("No content to check");
@@ -224,6 +232,35 @@ fn evaluate(
     gate_and_format(&findings, custom_prompt, min_confidence)
 }
 
+/// Findings for a list of discrete edits: a `MultiEdit`, or an `Edit`/`apply_patch` that attached an
+/// `edits[]` array (the `OpenCode` plugin's shape). A deletion edit has no content to parse, but it can
+/// still remove assertions.
+fn edits_findings(
+    detector: &TestDetector,
+    edits: &[Edit],
+    file_path: &str,
+    include_commented_out_tests: bool,
+    include_body_tests: bool,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for edit in edits {
+        if edit.new_string.is_empty() {
+            if include_body_tests && !edit.old_string.is_empty() {
+                findings.extend(rules::diff_findings(&edit.old_string, "", file_path));
+            }
+            continue;
+        }
+        findings.extend(detector.detect_edit(
+            &edit.old_string,
+            &edit.new_string,
+            file_path,
+            include_commented_out_tests,
+            include_body_tests,
+        ));
+    }
+    findings
+}
+
 /// Apply the filters and the confidence gate, then render: the shared tail of every check path.
 fn gate_and_format(
     findings: &[Finding],
@@ -242,12 +279,13 @@ fn gate_and_format(
 
 /// Score the added lines of a harness/config file (no test-file gate, no tree-sitter needed).
 fn harness_result(
+    tool: ToolKind,
     hook_input: &HookInput,
     file_path: &str,
     custom_prompt: &str,
     min_confidence: Confidence,
 ) -> HookCheckResult {
-    let added = raw_added_lines(hook_input);
+    let added = raw_added_lines(tool, hook_input);
     let mut findings = Vec::new();
     // Any added non-blank line of a harness/config file is itself worth reviewing.
     if let Some((line_number, text)) = added.iter().find(|(_, text)| !text.trim().is_empty()) {
@@ -277,9 +315,9 @@ fn harness_result(
 }
 
 /// Added lines (1-based line number, raw text) for the tool input.
-fn raw_added_lines(hook_input: &HookInput) -> Vec<(usize, String)> {
-    match hook_input.tool_name.as_str() {
-        "Edit" => {
+fn raw_added_lines(tool: ToolKind, hook_input: &HookInput) -> Vec<(usize, String)> {
+    match tool {
+        ToolKind::Edit if hook_input.tool_input.edits.is_empty() => {
             let added = engine::added_lines(
                 &hook_input.tool_input.old_string,
                 &hook_input.tool_input.new_string,
@@ -293,7 +331,7 @@ fn raw_added_lines(hook_input: &HookInput) -> Vec<(usize, String)> {
                 .map(|(index, line)| (index + 1, line.to_string()))
                 .collect()
         }
-        "MultiEdit" => {
+        ToolKind::Edit | ToolKind::MultiEdit => {
             let mut lines = Vec::new();
             for edit in &hook_input.tool_input.edits {
                 let added = engine::added_lines(&edit.old_string, &edit.new_string);
@@ -305,7 +343,7 @@ fn raw_added_lines(hook_input: &HookInput) -> Vec<(usize, String)> {
             }
             lines
         }
-        _ => get_content_to_check(hook_input)
+        ToolKind::Write => get_content_to_check(hook_input)
             .lines()
             .enumerate()
             .map(|(index, line)| (index + 1, line.to_string()))
@@ -367,32 +405,34 @@ fn get_content_to_check(input: &HookInput) -> &str {
 }
 
 /// Whether the suppression marker sits on a line the change added (agent self-suppression).
-fn marker_added_in_change(hook_input: &HookInput) -> bool {
-    match hook_input.tool_name.as_str() {
-        "Edit" => added_line_has_marker(
+fn marker_added_in_change(tool: ToolKind, hook_input: &HookInput) -> bool {
+    match tool {
+        ToolKind::Edit if hook_input.tool_input.edits.is_empty() => added_line_has_marker(
             &hook_input.tool_input.old_string,
             &hook_input.tool_input.new_string,
         ),
-        "MultiEdit" => hook_input
+        ToolKind::Edit | ToolKind::MultiEdit => hook_input
             .tool_input
             .edits
             .iter()
             .any(|edit| added_line_has_marker(&edit.old_string, &edit.new_string)),
-        _ => SuppressionFilter.is_file_suppressed(get_content_to_check(hook_input)),
+        ToolKind::Write => SuppressionFilter.is_file_suppressed(get_content_to_check(hook_input)),
     }
 }
 
 /// Whether the suppression marker is present anywhere in the analyzed text.
-fn file_suppressed(hook_input: &HookInput) -> bool {
+fn file_suppressed(tool: ToolKind, hook_input: &HookInput) -> bool {
     let suppression = SuppressionFilter;
-    match hook_input.tool_name.as_str() {
-        "Edit" => suppression.is_file_suppressed(&hook_input.tool_input.new_string),
-        "MultiEdit" => hook_input
+    match tool {
+        ToolKind::Edit if hook_input.tool_input.edits.is_empty() => {
+            suppression.is_file_suppressed(&hook_input.tool_input.new_string)
+        }
+        ToolKind::Edit | ToolKind::MultiEdit => hook_input
             .tool_input
             .edits
             .iter()
             .any(|edit| suppression.is_file_suppressed(&edit.new_string)),
-        _ => suppression.is_file_suppressed(get_content_to_check(hook_input)),
+        ToolKind::Write => suppression.is_file_suppressed(get_content_to_check(hook_input)),
     }
 }
 
