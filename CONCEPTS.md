@@ -55,6 +55,14 @@ commented-out code, a skip marker) still apply, because they need no context to 
 refines *why* it is reported — it does not gate whether it is. A repo may instead report only the
 kinds it can prove; the choice is a product decision, recorded here so the two hooks do not drift.
 
+For `test-checker`, a `Write` carries no old text, so the diff rules compare the payload against the
+committed baseline (`git show HEAD:<path>`, 150 ms budget). That baseline is a convenience, not a
+proof: it may miss earlier **uncommitted** edits from the same session, so a `Write` that repeats an
+uncommitted change is compared against the last commit, not the working tree. A payload with no `cwd`
+does not request a baseline and runs only the non-diff rules; when a `cwd` is present but git is
+unavailable, the path is unsafe, the file is untracked, or the lookup times out, the diff rules are
+skipped with a visible `Skipping:` line instead of failing silently.
+
 ## Floor
 
 A **floor** is a per-kind minimum on the evaluation corpus, not an aggregate. Precision and recall

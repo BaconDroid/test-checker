@@ -416,6 +416,82 @@ fn check_hook_input_given_edit_with_edits_array_analyzes_deletion() {
     assert!(result.message.contains("gutted-test"));
 }
 
+fn git(dir: &std::path::Path, args: &[&str]) -> std::io::Result<()> {
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .status()?;
+    assert!(status.success(), "git {args:?}");
+    Ok(())
+}
+
+fn baseline_dir(label: &str) -> std::io::Result<std::path::PathBuf> {
+    let dir = std::env::temp_dir().join(format!("tc-baseline-{label}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("tests"))?;
+    Ok(dir)
+}
+
+#[test]
+fn check_hook_input_given_write_with_head_baseline_reports_removed_assertion() -> std::io::Result<()>
+{
+    // given: a committed test file, then a Write that removes the assertion
+    let dir = baseline_dir("head")?;
+    std::fs::write(
+        dir.join("tests/test_app.py"),
+        "def test_a():\n    assert x == 1\n",
+    )?;
+    git(&dir, &["init", "-q"])?;
+    git(&dir, &["add", "."])?;
+    git(&dir, &["commit", "-q", "-m", "init"])?;
+    let input = format!(
+        r#"{{"tool_name":"Write","cwd":{:?},"tool_input":{{"file_path":"tests/test_app.py","content":"def test_a():\n    pass\n"}}}}"#,
+        dir.to_string_lossy()
+    );
+
+    // when
+    let result = check_hook_input(&input, "");
+
+    // then: the diff rules ran against HEAD
+    assert_eq!(result.exit_code, 2, "{}", result.message);
+    assert!(
+        result.message.contains("assertion-removed") || result.message.contains("gutted-test"),
+        "{}",
+        result.message
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+#[test]
+fn check_hook_input_given_write_with_uncommitted_file_shows_visible_skip() -> std::io::Result<()> {
+    // given: a git repo whose test file is not committed
+    let dir = baseline_dir("untracked")?;
+    git(&dir, &["init", "-q"])?;
+    let input = format!(
+        r#"{{"tool_name":"Write","cwd":{:?},"tool_input":{{"file_path":"tests/test_app.py","content":"def test_a():\n    assert x == 1\n"}}}}"#,
+        dir.to_string_lossy()
+    );
+
+    // when
+    let result = check_hook_input(&input, "");
+
+    // then: no diff rules, but the skip is visible
+    assert_eq!(result.exit_code, 0, "{}", result.message);
+    assert!(result.message.contains("Skipping:"), "{}", result.message);
+    assert!(
+        result.message.contains("not committed"),
+        "{}",
+        result.message
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
 /// Options that keep low-confidence findings, so the harness/config rules are observable.
 fn low_confidence_options() -> Options {
     Options {
