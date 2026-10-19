@@ -1,14 +1,45 @@
 # test-checker
 
-A PostToolUse hook for Claude Code / OpenCode that catches **test-weakening** edits before they
-land. It is the test-domain sibling of
-[comment-checker](https://github.com/BaconDroid/comment-checker), built on the same crate layout,
-tree-sitter parsing and filtering architecture.
+A Claude Code / OpenCode hook that keeps AI-written tests lean and honest.
 
-It reads a JSON hook payload on stdin, inspects the **added** lines of the edited file, and reports
-when a change weakens, disables, or hollows out a test. On findings it writes a human warning to
-**stderr** and exits **2**; otherwise it exits **0** and never panics (every failure path degrades to
-no findings).
+## Why this exists
+
+When an agent implements or debugs something, it can read the code, run it and iterate. It
+does not need a pile of tests to understand what is going on, but it tends to leave one
+anyway: probes with no assertions, copies of an existing test, echoes of the
+implementation, tests that grep source files, mocks of the code under test. Worse, when a
+test fails it may weaken, skip or delete the test to get green.
+
+test-checker blocks both, at write time (exit 2, so the agent revises):
+
+- **Integrity**: weakened, hollowed-out, skipped, focused or removed tests.
+- **Bloat**: duplicate, near-duplicate, tautological and other superfluous tests.
+
+It is the building block for a plugin that keeps AI-written test suites small and
+trustworthy.
+
+## Philosophy: scaffolding vs guard
+
+- **Scaffolding (flagged)**: debugging probes, duplicates, tautologies, tests with no
+  assertion, source greps, mocks of the thing under test, bulk dumps of near-identical tests.
+- **Guards (spared)**: tests that pin behavior, regressions of real bugs, boundary and
+  contract tests, with the intent readable from the test name.
+- **Never weaken a test to get green.** If the test is wrong, stop and tell the human.
+- **Lean, not zero**: tests are also the oracle that keeps an agent honest. Fewer tests
+  must never mean weaker checks.
+
+## Removal policy
+
+test-checker reports; it does not delete tests by itself. Removal is meant to happen in a
+cleanup pass driven by the plugin, on a list a human approves.
+
+## Prevent, remove, plug in
+
+| | Status |
+|---|---|
+| Prevent: block weakened and superfluous tests at write time | works today (PostToolUse hook) |
+| Remove: cleanup pass over approved candidates | planned (plugin) |
+| Plug in: one plugin combining this and comment-checker | planned |
 
 ## Setup
 
