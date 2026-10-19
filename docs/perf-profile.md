@@ -99,10 +99,12 @@ Options, in order of leverage:
 1. **Warm-process reuse** (a keep-alive/daemon behind the identical stdin/stdout hook contract).
    Warm small invocation is 0.19–0.38 ms, so this trivially reaches ≤ 10 ms for small files. It is
    an operational/architecture trade-off (wrapper lifecycle, upgrades, crash recovery), not a rule
-   change — needs a product decision.
+   change. **Rejected by product:** the 10 ms figure was a suggestion, the budget stays 15 ms, and a
+   daemon adds lifecycle, security and cross-platform complexity that contradicts the lean goal.
 2. **Behaviour-preserving classification prefilter** for large writes: skip body lines that cannot
-   match any rule before running the full catalogue. Targets the ≈ 45–55 ms classification tail
-   without removing any rule; the parse floor (≈ 7–12 ms) still keeps the largest files above 10 ms.
+   match any rule before running the full catalogue. **Not done** — a safe prefilter would have to
+   encode the triggers of all 29 rules (`src/rules.rs` is ~2.5k lines), far beyond the ~30-line
+   budget set for this option.
 3. **Do not** remove rules, drop the injection query, or shrink query sources: measured savings are
    small and/or change behaviour.
 
@@ -118,3 +120,24 @@ process-start tuning (≤ 2.2 ms at best).
   A refactor would need a temporary before/after findings comparison.
 - `benches/test_checker.rs` runs warm in-process iterations, so it structurally cannot observe
   query-compilation or process-start costs.
+
+## Review follow-up
+
+Checks requested after the first version of this profile:
+
+- **`--version` p95 vs analysis p95:** 3.14 ms vs 16.18 ms (same harness, same box). `--version` is
+  ≈ 19 % of a Python analysis invocation, so the floor is the **query compilation inside the
+  analysis**, not process startup.
+- **Release profile:** already `opt-level = 3`, `lto = "fat"`, `codegen-units = 1` — no obvious
+  profile win left.
+- **Grammar registration:** lazy per language, not all 35 at startup. The pack keeps
+  `static REGISTRY: LazyLock<LanguageRegistry>` and `get_language(name)` looks the language up on
+  demand (pack `lib.rs:96,189-200`).
+- **Large-file prefilter:** skipped (see option 2 above) — not a ~30-line, safely provable change.
+- **The perf gate is relative, not absolute.** `eval/baseline.py` fails when p95 regresses beyond
+  `tolerance_percent` (25 %) against `eval/baseline.json`'s recorded per-profile p95, and fails
+  closed when the baseline/tolerance is missing or invalid; the 15 ms value is a warning only.
+  Caveat: the gate is **not wired into CI** — it runs manually (`python3 eval/baseline.py <binary>`).
+- **Absolute numbers are host-dependent.** The recorded baseline is 18.28 ms; on the reviewer's box
+  p95 ≈ 14.3–14.7 ms is inside the 15 ms target, while this (un-isolated) box measured ≈ 16.2 ms.
+  The relative gate is the one that must pass.
