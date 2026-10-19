@@ -83,7 +83,7 @@ command text does not claim native Windows support.
 
   ```xml
   <findings file="tests/test_app.py">
-  	<finding line-number="7" rule="skip-added" confidence="high">A test/assertion was disabled with a skip/ignore marker.</finding>
+  	<finding line-number="7" rule="skip-added" confidence="high" reason="skip or ignore marker added">A test/assertion was disabled with a skip/ignore marker.</finding>
   </findings>
   ```
 

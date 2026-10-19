@@ -29,9 +29,47 @@ fn push_finding_xml(output: &mut String, finding: &Finding) {
     engine::push_escaped_attribute(output, &finding.rule);
     output.push_str("\" confidence=\"");
     output.push_str(finding.confidence.as_str());
+    output.push_str("\" reason=\"");
+    engine::push_escaped_attribute(output, finding_reason(&finding.rule));
     output.push_str("\">");
     engine::push_escaped_text(output, &finding.message);
     output.push_str("</finding>\n");
+}
+
+/// A short, stable reason for a rule id, so a consumer can branch without parsing the message.
+fn finding_reason(rule: &str) -> &'static str {
+    match rule {
+        "skip-added" => "skip or ignore marker added",
+        "focus-added" => "test focused, disabling the rest",
+        "retry-added" => "retry added around a test",
+        "weakened-assertion" => "assertion weakened",
+        "snapshot-regenerated" => "snapshot regenerated",
+        "tolerance-broadened" => "tolerance broadened",
+        "incomplete-assertion" => "assertion not evaluated",
+        "unawaited-assertion" => "async assertion not awaited",
+        "broad-exception" => "asserted exception too broad",
+        "constant-assertion" => "assertion on a constant",
+        "tautological-assertion" => "tautological assertion",
+        "swallowed-error" => "error swallowed",
+        "conditional-assertion" => "assertion behind a condition",
+        "mock-of-sut" => "mock of the unit under test",
+        "agent-memo-test" => "test name describes the change",
+        "test-volume" => "many tests added at once",
+        "gutted-test" => "test body emptied",
+        "over-mocking" => "too many mocks",
+        "no-assertion" => "test has no assertion",
+        "source-grep-test" => "test greps source text",
+        "assertion-removed" => "assertion removed",
+        "expected-copied-from-actual" => "expected value copied from actual",
+        "harness-edited" => "test harness edited",
+        "gate-weakened" => "test gate weakened",
+        "commented-out-test" => "test commented out",
+        "duplicate-test" => "duplicate test",
+        "near-duplicate-test" => "near-duplicate test",
+        "test-removed" => "test removed",
+        "allow-added" => "opt-out marker added with the finding",
+        _ => "finding",
+    }
 }
 
 #[must_use]

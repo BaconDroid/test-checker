@@ -23,7 +23,7 @@ fn build_findings_xml_given_single_finding_returns_exact_shape() {
     // then
     assert_eq!(
         result,
-        "<findings file=\"tests/test_app.py\">\n\t<finding line-number=\"10\" rule=\"skip-added\" confidence=\"high\">A test skip marker was added.</finding>\n</findings>",
+        "<findings file=\"tests/test_app.py\">\n\t<finding line-number=\"10\" rule=\"skip-added\" confidence=\"high\" reason=\"skip or ignore marker added\">A test skip marker was added.</finding>\n</findings>",
     );
 }
 
@@ -57,7 +57,7 @@ fn build_findings_xml_given_special_characters_escapes_text_and_attributes() {
     // then
     assert_eq!(
         result,
-        "<findings file=\"tests/a&amp;b.py\">\n\t<finding line-number=\"1\" rule=\"tautological-assertion\" confidence=\"high\">assert 1 &lt; 2 &amp;&amp; 3 &gt; 2</finding>\n</findings>",
+        "<findings file=\"tests/a&amp;b.py\">\n\t<finding line-number=\"1\" rule=\"tautological-assertion\" confidence=\"high\" reason=\"tautological assertion\">assert 1 &lt; 2 &amp;&amp; 3 &gt; 2</finding>\n</findings>",
     );
 }
 
