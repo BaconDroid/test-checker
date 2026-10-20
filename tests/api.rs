@@ -424,19 +424,21 @@ fn check_hook_input_from_reader_given_sensitive_harness_edit_reports_harness_edi
 }
 
 #[test]
-fn check_hook_input_given_source_grep_test_blocks_at_the_default_gate() {
-    // given: a test that reads a source file and asserts on its text (policy D29: behaviour-changing)
+fn check_hook_input_given_source_grep_test_is_low_telemetry() {
+    // given: a test that reads a source file and asserts on its text
     let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/test_app.py","content":"def test_reads_source():\n    text = Path(\"src/app.py\").read_text()\n    assert \"def \" in text\n"}}"#;
 
-    // when: only the default medium gate applies
-    let result = check_hook_input(input, "");
+    // when: the default medium gate keeps only medium+ findings; the low band keeps all
+    let default = check_hook_input(input, "");
+    let low = check_hook_input_from_reader(input.as_bytes(), &low_confidence_options());
 
-    // then: source-grep-test is medium and blocks instead of being low telemetry
-    assert_eq!(result.exit_code, 2);
+    // then: source-grep-test is low telemetry and does not block at the default gate
+    assert_eq!(default.exit_code, 0);
+    assert_eq!(low.exit_code, 2);
     assert!(
-        result.message.contains("source-grep-test"),
+        low.message.contains("source-grep-test"),
         "message: {}",
-        result.message
+        low.message
     );
 }
 

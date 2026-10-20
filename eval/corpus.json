@@ -35,6 +35,13 @@
   { "path": "tests/t_test.py", "content": "def test_reads_source():\n    text = Path(\"analysis/plot.r\").read_text()\n    assert \"plot\" in text\n", "expected": "source-grep-test" },
   { "path": "tests/t_test.py", "content": "def test_reads_source():\n    text = Path(\"src/app.hs\").read_text()\n    assert \"main\" in text\n", "expected": "source-grep-test" },
 
+  { "path": "tests/app.test.js", "content": "it('reads', () => {\n  const text = fs.readFileSync('src/app.js', 'utf8');\n  expect(text).toContain('function');\n});\n", "expected": "source-grep-test" },
+  { "path": "tests/app.test.ts", "content": "it('reads', () => {\n  const text = fs.readFileSync('src/app.ts', 'utf8');\n  expect(text).toMatch(/export default/);\n});\n", "expected": "source-grep-test" },
+  { "path": "src/lib_test.rs", "content": "#[test]\nfn reads() {\n    let text = std::fs::read_to_string(\"src/lib.rs\").unwrap();\n    assert!(text.contains(\"pub fn\"));\n}\n", "expected": "source-grep-test" },
+  { "path": "tests/app_test.go", "content": "package app\n\nfunc TestReads(t *testing.T) {\n\tdata, err := os.ReadFile(\"main.go\")\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\tif !strings.Contains(string(data), \"func main\") {\n\t\tt.Errorf(\"missing\")\n\t}\n}\n", "expected": "source-grep-test" },
+
+  { "path": "tests/app.test.js", "content": "it('parses the fixture', () => {\n  const raw = fs.readFileSync('tests/fixtures/sample.ts', 'utf8');\n  const parsed = JSON.parse(raw);\n  expect(parsed.name).toBe('x');\n});\n", "expected": null },
+
   { "path": "tests/t_test.py", "content": "def test_0():\n    assert value(0) == 0\ndef test_1():\n    assert value(1) == 1\ndef test_2():\n    assert value(2) == 2\ndef test_3():\n    assert value(3) == 3\ndef test_4():\n    assert value(4) == 4\ndef test_5():\n    assert value(5) == 5\ndef test_6():\n    assert value(6) == 6\ndef test_7():\n    assert value(7) == 7\ndef test_8():\n    assert value(8) == 8\ndef test_9():\n    assert value(9) == 9\ndef test_10():\n    assert value(10) == 10\n", "expected": "test-volume" },
 
   { "path": "tests/t_test.py", "content": "def test_a():\n    assert add(1, 2) == 3\ndef test_b():\n    # explains the check\n    assert add(1, 2) == 3\n", "expected": "near-duplicate-test" },

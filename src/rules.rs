@@ -191,18 +191,82 @@ const NESTED_TEST_MARKERS: &[&str] = &[
 /// supported grammar's file extension, including the alternate `haskell` spelling alongside `hs`.
 const SOURCE_FILE_EXTENSIONS: &[&str] = &[
     "py", "js", "ts", "tsx", "jsx", "rs", "go", "java", "rb", "php", "c", "cpp", "h", "hpp", "cs",
-    "kt", "swift", "scala", "lua", "ex", "exs", "hs", "haskell", "dart", "r", "zig",
+    "kt", "swift", "scala", "lua", "ex", "exs", "hs", "haskell", "dart", "r", "zig", "groovy",
+    "ml", "mli", "sh", "bash", "bats", "elm",
 ];
 
-/// Callee substrings that mark a file-read call; the string literal after one names the file.
+/// Callee substrings that mark a file-read call; a source-file literal on the same line names
+/// the file. The list covers the read-text API of each test language the rule applies to.
 const SOURCE_READ_CALLEES: &[&str] = &[
     "read_to_string",
     "read_text",
+    "readText",
     "readFileSync",
     "readFile",
+    "ReadFile",
+    "ReadAllText",
+    "readString",
+    "read_file",
+    "file_get_contents",
     "include_str!",
     "fs::read",
     "File::open",
+    "File.read",
+    "contentsOfFile",
+    "fromFile",
+    "io.open",
+    "getText",
+    "ifstream",
+    "File.read!",
+    "$(cat ",
+];
+
+/// Operations that inspect the *text* of a value (substring, regex, snapshot). A read of a
+/// source file is only a `source-grep-test` when one of these consumes the read text.
+const SOURCE_TEXT_MARKERS: &[&str] = &[
+    " in ",
+    " not in ",
+    ".includes(",
+    ".contains(",
+    ".startsWith(",
+    ".endsWith(",
+    ".startswith(",
+    ".endswith(",
+    ".match(",
+    ".matches(",
+    ".toMatch(",
+    ".toContain(",
+    ".toMatchSnapshot(",
+    ".toMatchInlineSnapshot(",
+    ".toMatchFileSnapshot(",
+    ".include?",
+    ".start_with?",
+    ".end_with?",
+    "include?(",
+    "assert_includes",
+    "assertIn(",
+    "assertContains(",
+    "assertStringContainsString(",
+    "Assert.Contains(",
+    "assertThat(",
+    "HasSubstr(",
+    "str_contains(",
+    "strstr(",
+    "preg_match(",
+    "strings.Contains(",
+    "String.contains?(",
+    ":find(",
+    "string.find(",
+    ".find(",
+    ".search(",
+    "re.search(",
+    "re.match(",
+    "re.findall(",
+    ".test(",
+    "string_match",
+    "=~",
+    "to include(",
+    "[[",
 ];
 
 /// Config / CI markers that weaken or bypass a test gate.
@@ -992,26 +1056,96 @@ fn is_source_file_name(value: &str) -> bool {
         .any(|candidate| extension.eq_ignore_ascii_case(candidate))
 }
 
-/// The first string literal appearing at or after `offset` in `text`, if any.
-fn literal_after(text: &str, offset: usize) -> Option<String> {
-    quoted_strings(&text[offset..]).into_iter().next()
+/// Whether `text` reads a source file: a read callee paired with a literal naming source code.
+fn reads_source_file(text: &str) -> bool {
+    SOURCE_READ_CALLEES
+        .iter()
+        .any(|callee| text.contains(callee))
+        && quoted_strings(text)
+            .iter()
+            .any(|literal| is_source_file_name(literal))
 }
 
-/// Whether `text` reads a source file: a read callee whose string argument names source code.
-fn reads_source_file(text: &str) -> bool {
-    if SOURCE_READ_CALLEES.iter().any(|callee| {
-        text.find(callee).is_some_and(|index| {
-            literal_after(text, index + callee.len())
-                .is_some_and(|literal| is_source_file_name(&literal))
-        })
-    }) {
-        return true;
+/// Whether `text` inspects the text of a value rather than the value itself.
+fn inspects_text(text: &str) -> bool {
+    SOURCE_TEXT_MARKERS
+        .iter()
+        .any(|marker| text.contains(marker))
+}
+
+/// The variable that holds the text of a source-file read, if the line is such an assignment.
+fn source_text_binding(text: &str) -> Option<String> {
+    if is_comment_line(text) {
+        return None;
     }
-    // `Path("…").read_text()`: the literal precedes the `.read_text` callee.
-    text.find("Path(").is_some_and(|index| {
-        text.contains(".read_text")
-            && literal_after(text, index + "Path(".len())
-                .is_some_and(|literal| is_source_file_name(&literal))
+    let (left, right) = split_assignment(text)?;
+    if !reads_source_file(right) {
+        return None;
+    }
+    assigned_name(left)
+}
+
+/// Split `<left> = <right>` (or `<left> := <right>`), ignoring comparison operators.
+fn split_assignment(text: &str) -> Option<(&str, &str)> {
+    if let Some(index) = text.find(":=") {
+        return Some((&text[..index], &text[index + 2..]));
+    }
+    let bytes = text.as_bytes();
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte != b'=' {
+            continue;
+        }
+        let previous = index.checked_sub(1).map(|offset| bytes[offset]);
+        let next = bytes.get(index + 1).copied();
+        if matches!(previous, Some(b'=' | b'!' | b'<' | b'>' | b'+' | b'-'))
+            || matches!(next, Some(b'=' | b'>'))
+        {
+            continue;
+        }
+        return Some((&text[..index], &text[index + 1..]));
+    }
+    None
+}
+
+/// The name on the left of an assignment: the last identifier before a type annotation, or the
+/// first of a Go-style `value, err :=` pair.
+fn assigned_name(left: &str) -> Option<String> {
+    let without_path_separator = left.replace("::", "");
+    let head = without_path_separator
+        .split(':')
+        .next()
+        .unwrap_or(&without_path_separator);
+    let tokens: Vec<&str> = head
+        .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .filter(|token| !token.is_empty())
+        .collect();
+    let name = if head.contains(',') {
+        *tokens.first()?
+    } else {
+        *tokens.last()?
+    };
+    (!matches!(
+        name,
+        "let" | "const" | "var" | "val" | "def" | "local" | "mut"
+    ))
+    .then(|| name.to_string())
+}
+
+/// The assertion line that greps the text of a source file read in this test body.
+fn source_grep_line<'a, 'b>(body: &'a [AddedLine<'b>]) -> Option<&'a AddedLine<'b>> {
+    let bindings: Vec<String> = body
+        .iter()
+        .filter_map(|line| source_text_binding(line.text.trim()))
+        .collect();
+    body.iter().find(|line| {
+        let text = line.text.trim();
+        if is_comment_line(text) || !inspects_text(text) {
+            return false;
+        }
+        reads_source_file(text)
+            || bindings
+                .iter()
+                .any(|binding| has_word(text, binding.as_str()))
     })
 }
 
@@ -1094,14 +1228,12 @@ pub fn classify_test_body(
             file_path,
         ));
     }
-    if has_assertion
-        && let Some(read_line) = body.iter().find(|line| reads_source_file(line.text.trim()))
-    {
+    if has_assertion && let Some(grep_line) = source_grep_line(body) {
         findings.push(finish(
             "source-grep-test",
-            Confidence::Medium,
+            Confidence::Low,
             "This test reads a source file and asserts on its text; test behaviour, not source text.",
-            read_line,
+            grep_line,
             file_path,
         ));
     }
