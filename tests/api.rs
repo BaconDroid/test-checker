@@ -474,3 +474,16 @@ fn check_hook_input_from_reader_given_non_harness_edit_does_not_report_harness_e
         result.message
     );
 }
+
+#[test]
+fn check_hook_input_given_linter_directive_next_to_skip_still_reports_skip() {
+    // given: a skip marker and a linter directive on the same line
+    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/test_app.py","content":"def test_a():\n    @pytest.mark.skip  # noqa\n    assert x == 1\n"}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then: the directive does not silence the skip finding
+    assert_eq!(result.exit_code, 2);
+    assert!(result.message.contains("skip-added"));
+}
