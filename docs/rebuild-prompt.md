@@ -100,7 +100,7 @@ Reproduce every one of the capabilities above, in the test domain:
 | Gates on file extension | Gates on extension **and** test identity (`is_test_file` from the payload, else test-path globs) |
 | Drops allowed comments (BDD/directive/shebang) via filters | Drops test suppressions/opt-outs via the same filter architecture |
 | `<comments file="…"><comment line-number="…">…` | `<findings file="…"><finding line-number="…" rule="…" confidence="…">…` |
-| Exit 2 on findings, 0 otherwise; never panics; fail-open | Identical (exit 2/0, fail-open, no panic) |
+| Exit 2 on findings, 0 on clean/skip, 1 on internal failure; never panics; fail-open | Identical |
 | `detect_comments_json` library API | `detect_findings_json` library API |
 
 Everything else — stdin contract, `--prompt`/placeholder, message prefix `[test-checker]`, JSON API,
@@ -246,8 +246,9 @@ README.md, AGENTS.md, LICENSE, .gitignore, .cargo/config.toml (TSLP_LANGUAGES), 
   `tempfile`, or any napi/wasm bindings. Do **not** use dynamic `serde_json::Value` modeling,
   `TreeCursor` walks, or the pack's `get_parser`/`process`/runtime download.
 - **CLI:** hand-rolled `std::env::args`; `--prompt` + `{{findings}}`; ignore unknown args.
-- **Hook contract:** JSON on stdin; **stderr** message; exit **2** on findings, **0** otherwise; never
-  panics; every failure path degrades to no findings (**fail-open**). Message prefix `[test-checker]`.
+- **Hook contract:** JSON on stdin; **stderr** message; exit **2** on findings, **0** on clean/skip,
+  **1** on internal failure; never panics; unreadable payloads fail open with a visible skip. Message
+  prefix `[test-checker]`.
 - **Model:** typed `serde` derive with camelCase `alias`es + null tolerance + `skip_serializing_if`;
   `Serialize` **and** `Deserialize`.
 - **Engine:** tree-sitter queries for capture; per-language `Runtime` + per-thread `Parser` caches
