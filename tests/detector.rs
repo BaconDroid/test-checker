@@ -620,13 +620,154 @@ fn detect_given_test_reading_a_source_file_reports_source_grep_test() {
     // when
     let findings = detector.detect(source, "tests/test_app.py", true, true);
 
-    // then: the rule fires at medium confidence (policy D29: it is meant to change behaviour), so
-    // it reaches the default `--min-confidence medium` gate
+    // then: the rule is low-confidence telemetry, visible only below the default gate
     assert!(
         findings
             .iter()
             .any(|finding| finding.rule == "source-grep-test"
-                && finding.confidence == Confidence::Medium),
+                && finding.confidence == Confidence::Low),
+        "findings: {findings:?}"
+    );
+}
+
+/// One source-text read plus an assertion on that text, per test language the rule applies to.
+/// Elm is absent: its tests cannot read files at runtime.
+const SOURCE_GREP_CASES: [(&str, &str); 20] = [
+    (
+        "tests/test_app.py",
+        "def test_reads():\n    text = Path(\"src/app.py\").read_text()\n    assert \"def \" in text\n",
+    ),
+    (
+        "tests/app.test.js",
+        "it('reads', () => {\n  const text = fs.readFileSync('src/app.js', 'utf8');\n  expect(text).toContain('function');\n});\n",
+    ),
+    (
+        "tests/app.test.ts",
+        "it('reads', () => {\n  const text = fs.readFileSync('src/app.ts', 'utf8');\n  expect(text).toContain('export');\n});\n",
+    ),
+    (
+        "tests/app.test.tsx",
+        "it('reads', () => {\n  const text = fs.readFileSync('src/App.tsx', 'utf8');\n  expect(text).toMatch(/export default/);\n});\n",
+    ),
+    (
+        "tests/app_test.go",
+        "package app\n\nfunc TestReads(t *testing.T) {\n\tdata, err := os.ReadFile(\"main.go\")\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\tif !strings.Contains(string(data), \"func main\") {\n\t\tt.Errorf(\"missing\")\n\t}\n}\n",
+    ),
+    (
+        "src/lib_test.rs",
+        "#[test]\nfn reads() {\n    let text = std::fs::read_to_string(\"src/lib.rs\").unwrap();\n    assert!(text.contains(\"pub fn\"));\n}\n",
+    ),
+    (
+        "test/app_test.rb",
+        "def test_reads\n  text = File.read(\"src/app.rb\")\n  assert_includes text, \"def \"\nend\n",
+    ),
+    (
+        "src/test/java/AppTest.java",
+        "class AppTest {\n  @Test\n  void reads() {\n    String text = Files.readString(Path.of(\"src/App.java\"));\n    assertTrue(text.contains(\"class \"));\n  }\n}\n",
+    ),
+    (
+        "tests/AppTest.cs",
+        "class AppTest {\n  [Fact]\n  public void Reads() {\n    var text = File.ReadAllText(\"src/App.cs\");\n    Assert.Contains(\"class \", text);\n  }\n}\n",
+    ),
+    (
+        "tests/AppTest.php",
+        "<?php\nclass AppTest {\n  public function testReads() {\n    $text = file_get_contents('src/app.php');\n    $this->assertStringContainsString('<?php', $text);\n  }\n}\n",
+    ),
+    (
+        "src/test/kotlin/AppTest.kt",
+        "class AppTest {\n  @Test\n  fun reads() {\n    val text = File(\"src/App.kt\").readText()\n    assertTrue(text.contains(\"class \"))\n  }\n}\n",
+    ),
+    (
+        "Tests/AppTests.swift",
+        "func testReads() throws {\n  let text = try String(contentsOfFile: \"src/App.swift\", encoding: .utf8)\n  XCTAssertTrue(text.contains(\"class \"))\n}\n",
+    ),
+    (
+        "src/test/scala/AppSpec.scala",
+        "class AppSpec {\n  it(\"reads\") {\n    val text = Source.fromFile(\"src/App.scala\").mkString\n    assert(text.contains(\"class \"))\n  }\n}\n",
+    ),
+    (
+        "test/sums_test.exs",
+        "defmodule SumsTest do\n  test \"reads\" do\n    text = File.read!(\"src/app.ex\")\n    assert text =~ \"defmodule\"\n  end\nend\n",
+    ),
+    (
+        "spec/sums_spec.lua",
+        "describe(\"reads\", function()\n  it(\"reads\", function()\n    local text = io.open(\"src/app.lua\"):read(\"*a\")\n    assert(text:find(\"function\"))\n  end)\nend)\n",
+    ),
+    (
+        "tests/math_test.c",
+        "TEST(Math, Reads) {\n  char *text = read_file(\"src/app.c\");\n  ASSERT_NE(strstr(text, \"int main\"), NULL);\n}\n",
+    ),
+    (
+        "tests/math_test.cpp",
+        "TEST(Math, Reads) {\n  std::string text = read_file(\"src/app.cpp\");\n  EXPECT_NE(text.find(\"int main\"), std::string::npos);\n}\n",
+    ),
+    (
+        "test/Spec.groovy",
+        "class Spec extends Specification {\n  def \"reads\"() {\n    def text = new File(\"src/App.groovy\").getText()\n    assert text.contains(\"class \")\n  }\n}\n",
+    ),
+    (
+        "test/test_math.ml",
+        "let test_reads () =\n  let text = read_file \"src/app.ml\" in\n  Alcotest.(check bool) \"reads\" true (Str.string_match (Str.regexp \"let \") text 0)\n",
+    ),
+    (
+        "tests/math.bats",
+        "@test \"reads\" {\n  content=$(cat \"src/app.sh\")\n  [[ \"$content\" == *\"echo\"* ]]\n  assert_success\n}\n",
+    ),
+];
+
+#[test]
+fn detect_given_source_text_assertion_in_each_language_reports_source_grep_test() {
+    // given: one read-text assertion per test language the rule applies to
+    let detector = TestDetector::new();
+    let mut failures = Vec::new();
+
+    // when
+    for (path, source) in SOURCE_GREP_CASES {
+        let findings = detector.detect(source, path, true, true);
+        if !findings
+            .iter()
+            .any(|finding| finding.rule == "source-grep-test")
+        {
+            failures.push(format!("{path}: no source-grep-test in {findings:?}"));
+        }
+    }
+
+    // then
+    assert!(failures.is_empty(), "coverage failures: {failures:#?}");
+}
+
+#[test]
+fn detect_given_missing_file_read_reports_no_source_grep_test() {
+    // given: the opencode-comments-plugin `readFileIfExists` missing-file test
+    let detector = TestDetector::new();
+    let source = "test(\"readFileIfExists returns undefined for a missing file\", () => {\n  expect(readFileIfExists(join(tmpdir(), \"does-not-exist-guard-xyz.ts\"))).toBeUndefined()\n})\n";
+
+    // when
+    let findings = detector.detect(source, "src/core/diff.test.ts", true, true);
+
+    // then: reading a path that does not exist asserts on the return value, not on source text
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "source-grep-test"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_given_parsed_fixture_property_reports_no_source_grep_test() {
+    // given: a source-named fixture is read, parsed, and a property of the parsed value is asserted
+    let detector = TestDetector::new();
+    let source = "it('parses the fixture', () => {\n  const raw = fs.readFileSync('tests/fixtures/sample.ts', 'utf8');\n  const parsed = JSON.parse(raw);\n  expect(parsed.name).toBe('x');\n});\n";
+
+    // when
+    let findings = detector.detect(source, "tests/app.test.js", true, true);
+
+    // then: the assertion operates on the parsed value, not on the read text
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "source-grep-test"),
         "findings: {findings:?}"
     );
 }

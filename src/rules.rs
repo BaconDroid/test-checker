@@ -199,18 +199,82 @@ const NESTED_TEST_MARKERS: &[&str] = &[
 /// supported grammar's file extension, including the alternate `haskell` spelling alongside `hs`.
 const SOURCE_FILE_EXTENSIONS: &[&str] = &[
     "py", "js", "ts", "tsx", "jsx", "rs", "go", "java", "rb", "php", "c", "cpp", "h", "hpp", "cs",
-    "kt", "swift", "scala", "lua", "ex", "exs", "hs", "haskell", "dart", "r", "zig",
+    "kt", "swift", "scala", "lua", "ex", "exs", "hs", "haskell", "dart", "r", "zig", "groovy",
+    "ml", "mli", "sh", "bash", "bats", "elm",
 ];
 
-/// Callee substrings that mark a file-read call; the string literal after one names the file.
+/// Callee substrings that mark a file-read call; a source-file literal on the same line names
+/// the file. The list covers the read-text API of each test language the rule applies to.
 const SOURCE_READ_CALLEES: &[&str] = &[
     "read_to_string",
     "read_text",
+    "readText",
     "readFileSync",
     "readFile",
+    "ReadFile",
+    "ReadAllText",
+    "readString",
+    "read_file",
+    "file_get_contents",
     "include_str!",
     "fs::read",
     "File::open",
+    "File.read",
+    "contentsOfFile",
+    "fromFile",
+    "io.open",
+    "getText",
+    "ifstream",
+    "File.read!",
+    "$(cat ",
+];
+
+/// Operations that inspect the *text* of a value (substring, regex, snapshot). A read of a
+/// source file is only a `source-grep-test` when one of these consumes the read text.
+const SOURCE_TEXT_MARKERS: &[&str] = &[
+    " in ",
+    " not in ",
+    ".includes(",
+    ".contains(",
+    ".startsWith(",
+    ".endsWith(",
+    ".startswith(",
+    ".endswith(",
+    ".match(",
+    ".matches(",
+    ".toMatch(",
+    ".toContain(",
+    ".toMatchSnapshot(",
+    ".toMatchInlineSnapshot(",
+    ".toMatchFileSnapshot(",
+    ".include?",
+    ".start_with?",
+    ".end_with?",
+    "include?(",
+    "assert_includes",
+    "assertIn(",
+    "assertContains(",
+    "assertStringContainsString(",
+    "Assert.Contains(",
+    "assertThat(",
+    "HasSubstr(",
+    "str_contains(",
+    "strstr(",
+    "preg_match(",
+    "strings.Contains(",
+    "String.contains?(",
+    ":find(",
+    "string.find(",
+    ".find(",
+    ".search(",
+    "re.search(",
+    "re.match(",
+    "re.findall(",
+    ".test(",
+    "string_match",
+    "=~",
+    "to include(",
+    "[[",
 ];
 
 /// Config / CI markers that weaken or bypass a test gate.
@@ -1653,27 +1717,119 @@ fn is_source_file_name(value: &str) -> bool {
         .any(|candidate| extension.eq_ignore_ascii_case(candidate))
 }
 
-/// The first string literal appearing at or after `offset` in `text`, if any.
-fn literal_after(text: &str, offset: usize) -> Option<String> {
-    quoted_strings(&text[offset..]).into_iter().next()
+/// Whether the line reads a source file: a read callee is code (masked `view`) and a literal in
+/// `original` names source code. The callee and the literal may be ordered either way, so
+/// `Path("…").read_text()`, `File("…").readText()`, and `read_file("…")` all count.
+fn reads_source_file_views(view: &str, original: &str) -> bool {
+    SOURCE_READ_CALLEES
+        .iter()
+        .any(|callee| view.contains(callee))
+        && quoted_strings(original)
+            .iter()
+            .any(|literal| is_source_file_name(literal))
 }
 
-/// Whether the line reads a source file: the read callee is code (masked `view`) and the literal
-/// it opens is read from the `original` text at the same byte offset.
-fn reads_source_file_views(view: &str, original: &str) -> bool {
-    if SOURCE_READ_CALLEES.iter().any(|callee| {
-        view.find(callee).is_some_and(|index| {
-            literal_after(original, index + callee.len())
-                .is_some_and(|literal| is_source_file_name(&literal))
-        })
-    }) {
-        return true;
+/// Whether the masked `view` inspects the text of a value rather than the value itself. The
+/// markers are code, so a marker that only appears inside a string literal is blanked away.
+fn inspects_text(view: &str) -> bool {
+    SOURCE_TEXT_MARKERS
+        .iter()
+        .any(|marker| view.contains(marker))
+}
+
+/// The variable that holds the text of a source-file read, if the line is such an assignment.
+///
+/// The structure comes from the masked `view` (so a string containing `=`, a read callee, or a
+/// file name cannot fake an assignment); the file-name literal comes from `original`.
+fn source_text_binding(view: &str, original: &str) -> Option<String> {
+    if is_comment_line(view) {
+        return None;
     }
-    // `Path("…").read_text()`: the literal precedes the `.read_text` callee.
-    view.find("Path(").is_some_and(|index| {
-        view.contains(".read_text")
-            && literal_after(original, index + "Path(".len())
-                .is_some_and(|literal| is_source_file_name(&literal))
+    let (left, right) = split_assignment_spans(view)?;
+    let right_view = view.get(right.0..right.1)?;
+    let right_original = original.get(right.0..right.1)?;
+    if !reads_source_file_views(right_view, right_original) {
+        return None;
+    }
+    assigned_name(view.get(left.0..left.1)?)
+}
+
+/// Split `<left> = <right>` (or `<left> := <right>`), ignoring comparison operators, as byte
+/// spans into `text`.
+fn split_assignment_spans(text: &str) -> Option<(Span, Span)> {
+    let (left_end, right_start) = if let Some(index) = text.find(":=") {
+        (index, index + 2)
+    } else {
+        let bytes = text.as_bytes();
+        let mut found = None;
+        for (index, byte) in bytes.iter().enumerate() {
+            if *byte != b'=' {
+                continue;
+            }
+            let previous = index.checked_sub(1).map(|offset| bytes[offset]);
+            let next = bytes.get(index + 1).copied();
+            if matches!(previous, Some(b'=' | b'!' | b'<' | b'>' | b'+' | b'-'))
+                || matches!(next, Some(b'=' | b'>'))
+            {
+                continue;
+            }
+            found = Some((index, index + 1));
+            break;
+        }
+        found?
+    };
+    Some(((0, left_end), (right_start, text.len())))
+}
+
+/// The name on the left of an assignment: the last identifier before a type annotation, or the
+/// first of a Go-style `value, err :=` pair.
+fn assigned_name(left: &str) -> Option<String> {
+    let without_path_separator = left.replace("::", "");
+    let head = without_path_separator
+        .split(':')
+        .next()
+        .unwrap_or(&without_path_separator);
+    let tokens: Vec<&str> = head
+        .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .filter(|token| !token.is_empty())
+        .collect();
+    let name = if head.contains(',') {
+        *tokens.first()?
+    } else {
+        *tokens.last()?
+    };
+    (!matches!(
+        name,
+        "let" | "const" | "var" | "val" | "def" | "local" | "mut"
+    ))
+    .then(|| name.to_string())
+}
+
+/// The assertion line that greps the text of a source file read in this test body.
+///
+/// `view` is the masked body and `original` the same lines before masking, so the structure
+/// (callees, matchers) comes from the view while the read file name and a variable interpolated
+/// into a string still come from the original text.
+fn source_grep_line<'a, 'b>(
+    view: &'a [AddedLine<'b>],
+    original: &'a [AddedLine<'b>],
+) -> Option<&'a AddedLine<'b>> {
+    let bindings: Vec<String> = view
+        .iter()
+        .zip(original)
+        .filter_map(|(line, source)| source_text_binding(line.text.trim(), source.text.trim()))
+        .collect();
+    view.iter().zip(original).find_map(|(line, source)| {
+        let text = line.text.trim();
+        let original_text = source.text.trim();
+        if is_comment_line(text) || !inspects_text(text) {
+            return None;
+        }
+        (reads_source_file_views(text, original_text)
+            || bindings.iter().any(|binding| {
+                has_word(text, binding.as_str()) || has_word(original_text, binding.as_str())
+            }))
+        .then_some(source)
     })
 }
 
@@ -1787,16 +1943,12 @@ pub(crate) fn classify_test_body_with_original(
     if reliable && let Some(finding) = classify_echo(file_path, original_body, None) {
         findings.push(finding);
     }
-    if has_assertion
-        && let Some(read_line) = body.iter().zip(original_body).find_map(|(view, original)| {
-            reads_source_file_views(view.text.trim(), original.text.trim()).then_some(original)
-        })
-    {
+    if has_assertion && let Some(grep_line) = source_grep_line(body, original_body) {
         findings.push(finish(
             "source-grep-test",
-            Confidence::Medium,
+            Confidence::Low,
             "This test reads a source file and asserts on its text; test behaviour, not source text.",
-            read_line,
+            grep_line,
             file_path,
         ));
     }
