@@ -176,9 +176,11 @@ that the compiled host grammar exposes (for example, a `<script>` block in HTML)
 `conditional-assertion`, `retry-added`, `agent-memo-test`, `allow-added`, `gate-weakened`,
 `commented-out-test`, `source-grep-test`, `test-volume`, `harness-edited`, `near-duplicate-test`.
 
-Confidence policy: `source-grep-test` is `medium`; `harness-edited` is `medium` on sensitive harness
-paths (CI workflows, `.gitlab-ci*`, pytest/tox/conftest, jest/vitest config) and `low` otherwise;
-`test-volume` and
+Confidence policy: `source-grep-test` is `low` telemetry and fires only when an assertion inspects
+the **text** of a read source file (substring/`includes`, regex/`toMatch`, or snapshot); reading a
+missing file or asserting a parsed property does not fire. `harness-edited` is `medium` on sensitive
+harness paths (CI workflows, `.gitlab-ci*`, pytest/tox/conftest, jest/vitest config) and `low`
+otherwise; `test-volume` and
 `near-duplicate-test` are `low` telemetry, so the default `medium` gate hides them. Use
 `--min-confidence low` to see them and block on them.
 
