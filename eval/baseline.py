@@ -77,6 +77,26 @@ def measure_once(binary: Path, payload: str) -> tuple[float, float]:
     return statistics.median(samples), samples[int(len(samples) * 0.95)]
 
 
+CLEAN_FIXTURE = ROOT / "eval" / "fixtures" / "clean_test.py"
+if CLEAN_FIXTURE.is_file():
+    CASES.append(
+        (
+            "write-with-cwd",
+            json.dumps(
+                {
+                    "tool_name": "Write",
+                    "cwd": str(ROOT),
+                    "tool_input": {
+                        "file_path": "eval/fixtures/clean_test.py",
+                        "content": CLEAN_FIXTURE.read_text(encoding="utf-8"),
+                    },
+                }
+            ),
+            0,
+        )
+    )
+
+
 def main() -> int:
     binary = (
         Path(sys.argv[1])
