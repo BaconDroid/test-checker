@@ -272,7 +272,13 @@ fn evaluate(
             if content.is_empty() {
                 return skip("No content to check");
             }
-            match head_content(&hook_input.cwd, file_path) {
+            // Only a test file in a supported language has diff rules to compare with HEAD.
+            let baseline = if is_test_path(file_path) && language_for_path(file_path).is_some() {
+                head_content(&hook_input.cwd, file_path)
+            } else {
+                Baseline::NotRequested
+            };
+            match baseline {
                 Baseline::Head(head) => detector.detect_edit_checked(
                     &head,
                     content,
