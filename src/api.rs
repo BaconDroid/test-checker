@@ -327,11 +327,40 @@ fn evaluate(
 }
 
 /// The baseline a `Write` should compare against: HEAD only for test files in supported languages.
+/// The baseline is opt-in (`TEST_CHECKER_WRITE_BASELINE`) and only runs for a test file in a
+/// supported language inside a git work tree (checked without spawning).
 fn write_baseline(hook_input: &HookInput, file_path: &str) -> Baseline {
-    if is_test_path(file_path) && language_for_path(file_path).is_some() {
-        head_content(&hook_input.cwd, file_path)
-    } else {
-        Baseline::NotRequested
+    if !baseline_enabled()
+        || !is_test_path(file_path)
+        || language_for_path(file_path).is_none()
+        || hook_input.cwd.is_empty()
+        || !has_git_ancestor(&hook_input.cwd)
+    {
+        return Baseline::NotRequested;
+    }
+    head_content(&hook_input.cwd, file_path)
+}
+
+fn baseline_enabled() -> bool {
+    std::env::var("TEST_CHECKER_WRITE_BASELINE").is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+/// Whether `cwd` is inside a git work tree. Walks up looking for `.git`; no process spawn.
+fn has_git_ancestor(cwd: &str) -> bool {
+    let mut dir = std::path::Path::new(cwd);
+    loop {
+        if dir.join(".git").exists() {
+            return true;
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => return false,
+        }
     }
 }
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import statistics
 import subprocess
 import sys
@@ -53,11 +54,13 @@ def load_baseline() -> dict:
         raise RuntimeError(f"cannot load baseline {BASELINE_FILE}") from error
 
 
-def run(binary: Path, payload: str) -> subprocess.CompletedProcess[bytes]:
+def run(
+    binary: Path, payload: str, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[bytes]:
     # `binary` is this harness's own argument (a locally built executable), never untrusted input,
     # so invoking it is the tool's purpose rather than a command-injection sink.
     return subprocess.run(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
-        [str(binary)], input=payload.encode(), capture_output=True, check=False
+        [str(binary)], input=payload.encode(), capture_output=True, check=False, env=env
     )
 
 
@@ -65,13 +68,18 @@ RUN_INVOCATIONS = 210
 DISCARD_FIRST = 10
 
 
-def measure_once(binary: Path, payload: str) -> tuple[float, float]:
-    """One run: RUN_INVOCATIONS calls, discard the first DISCARD_FIRST, return (median, p95) ms."""
+def measure_once(
+    binary: Path, timed: list[tuple[str, dict[str, str] | None]]
+) -> tuple[float, float]:
+    """One run: worst invocation of the timed cases, median and p95 over the samples (ms)."""
     samples = []
     for _ in range(RUN_INVOCATIONS):
-        start = time.perf_counter()
-        run(binary, payload)
-        samples.append((time.perf_counter() - start) * 1000.0)
+        worst = 0.0
+        for payload, env in timed:
+            start = time.perf_counter()
+            run(binary, payload, env)
+            worst = max(worst, (time.perf_counter() - start) * 1000.0)
+        samples.append(worst)
     samples = samples[DISCARD_FIRST:]
     samples.sort()
     return statistics.median(samples), samples[int(len(samples) * 0.95)]
@@ -118,7 +126,11 @@ def main() -> int:
     trigger = next(payload for name, payload, _ in CASES if name.startswith("trigger"))
     profile = "debug" if "debug" in binary.parts else "release"
     # Three runs; take the run with the lowest p95 to cut noise.
-    p50, p95 = min((measure_once(binary, trigger) for _ in range(3)), key=lambda pair: pair[1])
+    timed: list[tuple[str, dict[str, str] | None]] = [(trigger, None)]
+    cwd_case = next((payload for name, payload, _ in CASES if name == "write-with-cwd"), None)
+    if cwd_case is not None:
+        timed.append((cwd_case, {**os.environ, "TEST_CHECKER_WRITE_BASELINE": "1"}))
+    p50, p95 = min((measure_once(binary, timed) for _ in range(3)), key=lambda pair: pair[1])
 
     if "--record" in sys.argv:
         baseline = load_baseline()

@@ -416,6 +416,24 @@ fn check_hook_input_given_edit_with_edits_array_analyzes_deletion() {
     assert!(result.message.contains("gutted-test"));
 }
 
+fn run_binary(payload: &str, baseline: bool) -> std::io::Result<std::process::Output> {
+    use std::io::Write;
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_test-checker"))
+        .env(
+            "TEST_CHECKER_WRITE_BASELINE",
+            if baseline { "1" } else { "0" },
+        )
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    let Some(stdin) = child.stdin.as_mut() else {
+        return Err(std::io::Error::other("checker stdin unavailable"));
+    };
+    stdin.write_all(payload.as_bytes())?;
+    child.wait_with_output()
+}
+
 fn git(dir: &std::path::Path, args: &[&str]) -> std::io::Result<()> {
     let status = std::process::Command::new("git")
         .arg("-C")
@@ -454,15 +472,15 @@ fn check_hook_input_given_write_with_head_baseline_reports_removed_assertion() -
         dir.to_string_lossy()
     );
 
-    // when
-    let result = check_hook_input(&input, "");
+    // when: the opt-in baseline is enabled for this invocation
+    let output = run_binary(&input, true)?;
 
     // then: the diff rules ran against HEAD
-    assert_eq!(result.exit_code, 2, "{}", result.message);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "stderr: {stderr}");
     assert!(
-        result.message.contains("assertion-removed") || result.message.contains("gutted-test"),
-        "{}",
-        result.message
+        stderr.contains("assertion-removed") || stderr.contains("gutted-test"),
+        "stderr: {stderr}"
     );
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
@@ -478,17 +496,14 @@ fn check_hook_input_given_write_with_uncommitted_file_shows_visible_skip() -> st
         dir.to_string_lossy()
     );
 
-    // when
-    let result = check_hook_input(&input, "");
+    // when: the opt-in baseline is enabled for this invocation
+    let output = run_binary(&input, true)?;
 
     // then: no diff rules, but the skip is visible
-    assert_eq!(result.exit_code, 0, "{}", result.message);
-    assert!(result.message.contains("Skipping:"), "{}", result.message);
-    assert!(
-        result.message.contains("not committed"),
-        "{}",
-        result.message
-    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
+    assert!(stderr.contains("Skipping:"), "stderr: {stderr}");
+    assert!(stderr.contains("not committed"), "stderr: {stderr}");
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
