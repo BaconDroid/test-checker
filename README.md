@@ -134,6 +134,10 @@ command text does not claim native Windows support.
 - `--version` prints `test-checker <version>` and exits `0`.
 - `--strip` is accepted for forward compatibility but is **inert**: a notice is printed to stderr and
   the file is never rewritten.
+- **Write baseline (opt-in, off by default)**: set `TEST_CHECKER_WRITE_BASELINE=1` in the `env` block
+  of `.claude/settings.json` (or the hook's environment) to let a whole-file `Write` diff against
+  `git show HEAD:<path>`. Enabling it adds about **7 ms p95** to a `Write`; nothing is spawned when it
+  is off.
 
 Clean runs print `[test-checker] Success: No problematic tests found`; skipped runs print
 `[test-checker] Skipping: <reason>`.
