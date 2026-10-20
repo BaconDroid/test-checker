@@ -26,6 +26,12 @@ static RUNTIMES: LazyLock<Mutex<HashMap<String, Arc<Runtime>>>> =
 pub(crate) static FORCE_INTERNAL_FAILURE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Unit-test seam for the parse-budget path. Like [`FORCE_INTERNAL_FAILURE`], it exists only in the
+/// crate's unit tests and is unreachable from any binary, environment variable, or flag.
+#[cfg(test)]
+pub(crate) static FORCE_BUDGET_EXCEEDED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Why a detection run produced no findings to judge.
 ///
 /// A `BudgetExceeded` is a deliberate fail-open skip; an `Internal` failure means the check never
@@ -331,17 +337,28 @@ fn runtime_by_name(name: &str) -> Result<Arc<Runtime>, DetectError> {
 ///
 /// `engine::parse_cached` returns `None` both when the per-parse time budget aborts and when the
 /// parser cannot be configured, and it exposes no flag distinguishing the two. A precise abort flag
-/// would change `engine.rs` (shared byte-for-byte with `comment-checker`), so a `None` that consumed
-/// the whole budget is read as a budget abort and a faster `None` as an internal parse failure.
+/// would change `engine.rs` (shared byte-for-byte with `comment-checker`).
+///
+/// Ambiguity resolves toward skipping: only a `None` that arrives **before half** the budget is
+/// provably a fast failure, because a budget abort needs the progress callback to fire and the
+/// engine only stops once it observes `elapsed > PARSE_TIME_BUDGET`. A `None` at or after half the
+/// budget could be either a late hard failure or an abort observed on an earlier tick, so it is
+/// reported as `BudgetExceeded` (visible exit 0) instead of `Internal` (exit 1).
 fn parse_with_runtime(
     runtime: &Runtime,
     source: &[u8],
     file_path: &str,
 ) -> Result<tree_sitter::Tree, DetectError> {
+    #[cfg(test)]
+    if FORCE_BUDGET_EXCEEDED.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(DetectError::BudgetExceeded);
+    }
     let started = Instant::now();
     match engine::parse_cached(&runtime.name, &runtime.language, source) {
         Some(tree) => Ok(tree),
-        None if started.elapsed() >= engine::PARSE_TIME_BUDGET => Err(DetectError::BudgetExceeded),
+        None if started.elapsed() >= engine::PARSE_TIME_BUDGET / 2 => {
+            Err(DetectError::BudgetExceeded)
+        }
         None => Err(DetectError::Internal(format!("parse failed: {file_path}"))),
     }
 }

@@ -536,9 +536,18 @@ fn skip(reason: &str) -> HookOutcome {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::Ordering;
+    use std::sync::{Mutex, MutexGuard, PoisonError};
 
     use super::check_hook_input;
-    use crate::detector::FORCE_INTERNAL_FAILURE;
+    use crate::detector::{FORCE_BUDGET_EXCEEDED, FORCE_INTERNAL_FAILURE};
+
+    /// The seams are process-wide, so the tests that flip them must not run concurrently: one test
+    /// enabling a seam would otherwise force the other test's check down that same path.
+    static SEAM_LOCK: Mutex<()> = Mutex::new(());
+
+    fn seam_guard() -> MutexGuard<'static, ()> {
+        SEAM_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 
     /// Clears the seam on drop so a failed assertion cannot leak the forced failure into another
     /// unit test in the same process.
@@ -550,9 +559,19 @@ mod tests {
         }
     }
 
+    /// Clears the parse-budget seam on drop, for the same reason.
+    struct ResetBudget;
+
+    impl Drop for ResetBudget {
+        fn drop(&mut self) {
+            FORCE_BUDGET_EXCEEDED.store(false, Ordering::SeqCst);
+        }
+    }
+
     #[test]
     fn check_hook_input_given_internal_failure_exits_one_with_the_did_not_run_message() {
         // given: the runtime seam makes the detector report an internal failure
+        let _seam = seam_guard();
         let _reset = ResetFailure;
         FORCE_INTERNAL_FAILURE.store(true, Ordering::SeqCst);
         let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/test_app.py","content":"def test_sums():\n    assert add(1, 2) == 3\n"}}"#;
@@ -566,5 +585,25 @@ mod tests {
             result.message,
             "[test-checker] did not run — nothing checked this write.\nforced internal failure\n"
         );
+    }
+
+    #[test]
+    fn check_hook_input_given_budget_exceeded_skips_without_the_did_not_run_message() {
+        // given: the parse seam makes the detector report a budget abort on a valid test payload
+        let _seam = seam_guard();
+        let _reset = ResetBudget;
+        FORCE_BUDGET_EXCEEDED.store(true, Ordering::SeqCst);
+        let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/test_app.py","content":"def test_sums():\n    assert add(1, 2) == 3\n"}}"#;
+
+        // when
+        let result = check_hook_input(input, "");
+
+        // then: a budget abort is a visible skip, not a failure
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.message,
+            "[test-checker] Skipping: Parse budget exceeded\n"
+        );
+        assert!(!result.message.contains("did not run"));
     }
 }
