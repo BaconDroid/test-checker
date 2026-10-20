@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::detector::TestDetector;
+use crate::detector::{DetectError, DetectResult, TestDetector};
 use crate::engine::{self, null_default};
 use crate::filters::{SuppressionFilter, apply_filters, is_line_suppressed};
 use crate::language::{is_harness_path, is_test_path, language_for_path};
@@ -9,7 +9,11 @@ use crate::output::format_hook_message;
 use crate::rules::{self, AddedLine};
 
 const EXIT_PASS: i32 = 0;
+const EXIT_INTERNAL_FAILURE: i32 = 1;
 const EXIT_BLOCK: i32 = 2;
+
+/// Content above this size is skipped rather than parsed, so a huge write cannot hang the hook.
+const MAX_CONTENT_BYTES: usize = 2 * 1024 * 1024;
 
 /// The hook tool that produced a change. Claude Code sends `Write`/`Edit`/`MultiEdit`; the
 /// `OpenCode` plugin normalizes to the same names but also forwards `apply_patch`, so matching is
@@ -58,6 +62,56 @@ impl HookCheckResult {
     }
 }
 
+/// The explicit outcome of one hook check, before it becomes a [`HookCheckResult`].
+///
+/// `Clean` and `Skipped` exit 0, `Findings` exits 2, and `Failed` exits 1: a check that could not
+/// run is never reported as a pass.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum HookOutcome {
+    /// The check ran and found nothing.
+    Clean,
+    /// The check ran and found weakening; the payload is the rendered block message.
+    Findings(String),
+    /// The check did not apply to this write (unsupported language, non-edit tool, bad input).
+    Skipped(String),
+    /// The check could not run at all; `reason` explains what broke.
+    Failed(String),
+}
+
+impl HookOutcome {
+    /// The process exit code this outcome maps to.
+    #[must_use]
+    pub(crate) const fn exit_code(&self) -> i32 {
+        match self {
+            Self::Clean | Self::Skipped(_) => EXIT_PASS,
+            Self::Findings(_) => EXIT_BLOCK,
+            Self::Failed(_) => EXIT_INTERNAL_FAILURE,
+        }
+    }
+
+    /// The hook's stderr message, including its trailing newline.
+    #[must_use]
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::Clean => "[test-checker] Success: No problematic tests found\n".to_owned(),
+            Self::Findings(message) => message.clone(),
+            Self::Skipped(reason) => format!("[test-checker] Skipping: {reason}\n"),
+            Self::Failed(reason) => {
+                format!("[test-checker] did not run — nothing checked this write.\n{reason}\n")
+            }
+        }
+    }
+
+    /// The wire result `src/cli.rs` reads.
+    #[must_use]
+    pub(crate) fn into_result(self) -> HookCheckResult {
+        HookCheckResult {
+            exit_code: self.exit_code(),
+            message: self.message(),
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct ToolInput {
     #[serde(default, alias = "filePath", deserialize_with = "null_default")]
@@ -97,11 +151,11 @@ pub fn check_hook_input_with_options(
     include_body_tests: bool,
 ) -> HookCheckResult {
     if input.is_empty() {
-        return skip("No input provided");
+        return skip("No input provided").into_result();
     }
 
     serde_json::from_str::<HookInput>(input).map_or_else(
-        |_| skip("Invalid input format"),
+        |_| skip("Invalid input format").into_result(),
         |hook_input| {
             evaluate(
                 &hook_input,
@@ -110,6 +164,7 @@ pub fn check_hook_input_with_options(
                 include_commented_out_tests,
                 include_body_tests,
             )
+            .into_result()
         },
     )
 }
@@ -120,7 +175,7 @@ pub fn check_hook_input_from_reader<R: std::io::Read>(
     options: &crate::engine::Options,
 ) -> HookCheckResult {
     serde_json::from_reader::<R, HookInput>(reader).map_or_else(
-        |_| skip("Invalid input format"),
+        |_| skip("Invalid input format").into_result(),
         |hook_input| {
             evaluate(
                 &hook_input,
@@ -129,6 +184,7 @@ pub fn check_hook_input_from_reader<R: std::io::Read>(
                 true,
                 true,
             )
+            .into_result()
         },
     )
 }
@@ -139,7 +195,7 @@ fn evaluate(
     min_confidence: Confidence,
     include_commented_out_tests: bool,
     include_body_tests: bool,
-) -> HookCheckResult {
+) -> HookOutcome {
     let Some(tool) = classify_tool(&hook_input.tool_name) else {
         return skip("Unsupported tool");
     };
@@ -162,6 +218,9 @@ fn evaluate(
     if language_for_path(file_path).is_none() {
         return skip("Non-code file");
     }
+    if exceeds_content_limit(tool, hook_input) {
+        return skip("File too large");
+    }
 
     let marker_added = marker_added_in_change(tool, hook_input);
     if !marker_added && file_suppressed(tool, hook_input) {
@@ -169,7 +228,7 @@ fn evaluate(
     }
 
     let detector = TestDetector::new();
-    let mut findings = match tool {
+    let detection: DetectResult = match tool {
         ToolKind::Edit if hook_input.tool_input.edits.is_empty() => {
             let old_string = hook_input.tool_input.old_string.as_str();
             let new_string = hook_input.tool_input.new_string.as_str();
@@ -178,13 +237,13 @@ fn evaluate(
                     return skip("No content to check");
                 }
                 // A deletion edit has no new content to parse, but it can still remove assertions.
-                if include_body_tests {
+                Ok(if include_body_tests {
                     rules::diff_findings(old_string, "", file_path)
                 } else {
                     Vec::new()
-                }
+                })
             } else {
-                detector.detect_edit(
+                detector.detect_edit_checked(
                     old_string,
                     new_string,
                     file_path,
@@ -210,13 +269,18 @@ fn evaluate(
             if content.is_empty() {
                 return skip("No content to check");
             }
-            detector.detect(
+            detector.detect_checked(
                 content,
                 file_path,
                 include_commented_out_tests,
                 include_body_tests,
             )
         }
+    };
+    let mut findings = match detection {
+        Ok(findings) => findings,
+        Err(DetectError::BudgetExceeded) => return skip("Parse budget exceeded"),
+        Err(DetectError::Internal(reason)) => return HookOutcome::Failed(reason),
     };
 
     if marker_added {
@@ -232,6 +296,21 @@ fn evaluate(
     gate_and_format(&findings, custom_prompt, min_confidence)
 }
 
+/// Whether any content this call would inspect is over [`MAX_CONTENT_BYTES`].
+fn exceeds_content_limit(tool: ToolKind, hook_input: &HookInput) -> bool {
+    match tool {
+        ToolKind::Edit if hook_input.tool_input.edits.is_empty() => {
+            hook_input.tool_input.new_string.len() > MAX_CONTENT_BYTES
+        }
+        ToolKind::Edit | ToolKind::MultiEdit => hook_input
+            .tool_input
+            .edits
+            .iter()
+            .any(|edit| edit.new_string.len() > MAX_CONTENT_BYTES),
+        ToolKind::Write => get_content_to_check(hook_input).len() > MAX_CONTENT_BYTES,
+    }
+}
+
 /// Findings for a list of discrete edits: a `MultiEdit`, or an `Edit`/`apply_patch` that attached an
 /// `edits[]` array (the `OpenCode` plugin's shape). A deletion edit has no content to parse, but it can
 /// still remove assertions.
@@ -241,7 +320,7 @@ fn edits_findings(
     file_path: &str,
     include_commented_out_tests: bool,
     include_body_tests: bool,
-) -> Vec<Finding> {
+) -> DetectResult {
     let mut findings = Vec::new();
     for edit in edits {
         if edit.new_string.is_empty() {
@@ -250,15 +329,15 @@ fn edits_findings(
             }
             continue;
         }
-        findings.extend(detector.detect_edit(
+        findings.extend(detector.detect_edit_checked(
             &edit.old_string,
             &edit.new_string,
             file_path,
             include_commented_out_tests,
             include_body_tests,
-        ));
+        )?);
     }
-    findings
+    Ok(findings)
 }
 
 /// Apply the filters and the confidence gate, then render: the shared tail of every check path.
@@ -266,15 +345,15 @@ fn gate_and_format(
     findings: &[Finding],
     custom_prompt: &str,
     min_confidence: Confidence,
-) -> HookCheckResult {
+) -> HookOutcome {
     let filtered: Vec<Finding> = apply_filters(findings)
         .into_iter()
         .filter(|finding| confidence_rank(finding.confidence) >= confidence_rank(min_confidence))
         .collect();
     if filtered.is_empty() {
-        return success();
+        return HookOutcome::Clean;
     }
-    HookCheckResult::block(format_hook_message(&filtered, custom_prompt))
+    HookOutcome::Findings(format_hook_message(&filtered, custom_prompt))
 }
 
 /// Score the added lines of a harness/config file (no test-file gate, no tree-sitter needed).
@@ -284,7 +363,7 @@ fn harness_result(
     file_path: &str,
     custom_prompt: &str,
     min_confidence: Confidence,
-) -> HookCheckResult {
+) -> HookOutcome {
     let added = raw_added_lines(tool, hook_input);
     let mut findings = Vec::new();
     // Any added non-blank line of a harness/config file is itself worth reviewing.
@@ -384,12 +463,17 @@ pub fn detect_findings_json(
         return "[]".to_string();
     }
     let detector = TestDetector::new();
-    let findings = detector.detect(
+    let findings = match detector.detect_checked(
         content,
         file_path,
         include_commented_out_tests,
         include_body_tests,
-    );
+    ) {
+        Ok(findings) => findings,
+        Err(error) => {
+            return engine::result_json(&HookOutcome::Failed(error.to_string()).into_result());
+        }
+    };
     match serde_json::to_string(&findings) {
         Ok(json) => json,
         Err(error) => engine::fallback_json(&error.to_string()),
@@ -445,10 +529,42 @@ fn added_line_has_marker(old_content: &str, new_content: &str) -> bool {
         .any(|(index, line)| added.contains(&index) && is_line_suppressed(line))
 }
 
-fn skip(reason: &str) -> HookCheckResult {
-    HookCheckResult::pass(format!("[test-checker] Skipping: {reason}\n"))
+fn skip(reason: &str) -> HookOutcome {
+    HookOutcome::Skipped(reason.to_owned())
 }
 
-fn success() -> HookCheckResult {
-    HookCheckResult::pass("[test-checker] Success: No problematic tests found\n")
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+
+    use super::check_hook_input;
+    use crate::detector::FORCE_INTERNAL_FAILURE;
+
+    /// Clears the seam on drop so a failed assertion cannot leak the forced failure into another
+    /// unit test in the same process.
+    struct ResetFailure;
+
+    impl Drop for ResetFailure {
+        fn drop(&mut self) {
+            FORCE_INTERNAL_FAILURE.store(false, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn check_hook_input_given_internal_failure_exits_one_with_the_did_not_run_message() {
+        // given: the runtime seam makes the detector report an internal failure
+        let _reset = ResetFailure;
+        FORCE_INTERNAL_FAILURE.store(true, Ordering::SeqCst);
+        let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/test_app.py","content":"def test_sums():\n    assert add(1, 2) == 3\n"}}"#;
+
+        // when
+        let result = check_hook_input(input, "");
+
+        // then
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(
+            result.message,
+            "[test-checker] did not run — nothing checked this write.\nforced internal failure\n"
+        );
+    }
 }

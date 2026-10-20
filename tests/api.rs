@@ -286,6 +286,24 @@ fn check_hook_input_given_no_file_path_skips_with_the_exact_reason() {
 }
 
 #[test]
+fn check_hook_input_given_oversize_write_skips_as_file_too_large() {
+    // given: a test file whose content exceeds the 2 MiB parse limit
+    let content = "assert x == 1\n".repeat(150_000);
+    let payload = serde_json::json!({
+        "tool_name": "Write",
+        "tool_input": { "file_path": "tests/test_app.py", "content": content },
+    })
+    .to_string();
+
+    // when
+    let result = check_hook_input(&payload, "");
+
+    // then: the file is skipped visibly rather than reported clean
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.message, "[test-checker] Skipping: File too large\n");
+}
+
+#[test]
 fn check_hook_input_given_unsupported_language_fails_open() {
     // given
     let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/notes.xyz","content":"anything"}}"#;
