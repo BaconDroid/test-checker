@@ -218,12 +218,7 @@ fn evaluate(
                 return skip("No content to check");
             }
             // Only a test file in a supported language has diff rules to compare with HEAD.
-            let baseline = if is_test_path(file_path) && language_for_path(file_path).is_some() {
-                head_content(&hook_input.cwd, file_path)
-            } else {
-                Baseline::NotRequested
-            };
-            match baseline {
+            match write_baseline(hook_input, file_path) {
                 Baseline::Head(head) => detector.detect_edit(
                     &head,
                     content,
@@ -269,6 +264,15 @@ fn evaluate(
         result.message = format!("[test-checker] Skipping: {reason}\n{}", result.message);
     }
     result
+}
+
+/// The baseline a `Write` should compare against: HEAD only for test files in supported languages.
+fn write_baseline(hook_input: &HookInput, file_path: &str) -> Baseline {
+    if is_test_path(file_path) && language_for_path(file_path).is_some() {
+        head_content(&hook_input.cwd, file_path)
+    } else {
+        Baseline::NotRequested
+    }
 }
 
 /// The result of looking up a `Write`'s committed baseline.
