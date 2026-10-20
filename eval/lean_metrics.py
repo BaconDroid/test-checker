@@ -30,7 +30,9 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -64,12 +66,21 @@ def count_tests(lines: list[str]) -> int:
     return sum(1 for line in lines if TEST_DECL.search(line))
 
 
+def resolve_executable(value: str) -> str:
+    # The path is operator-supplied (CLI flag), never remote input.
+    candidate = shutil.which(value) or value
+    path = Path(candidate).resolve()
+    if not path.is_file() or not os.access(path, os.X_OK):
+        raise SystemExit(f"lean_metrics: not an executable file: {value}")
+    return str(path)
+
+
 def hook_blocks(binary: str, path: str, content: str) -> bool:
     payload = json.dumps(
         {"tool_name": "Write", "tool_input": {"file_path": path, "content": content}}
     ).encode()
     try:
-        proc = subprocess.run([binary], input=payload, capture_output=True)
+        proc = subprocess.run([binary], input=payload, capture_output=True, shell=False)
     except OSError:
         return False
     return proc.returncode == 2
@@ -81,6 +92,8 @@ def main() -> int:
     parser.add_argument("--cc", default=None, help="comment-checker binary (optional)")
     parser.add_argument("--tc", default=None, help="test-checker binary (optional)")
     args = parser.parse_args()
+    cc = resolve_executable(args.cc) if args.cc else None
+    tc = resolve_executable(args.tc) if args.tc else None
 
     raw = json.loads(Path(args.corpus).read_text(encoding="utf-8"))
     tasks = raw.get("tasks", [])
@@ -100,13 +113,9 @@ def main() -> int:
             revisions += int(item.get("revisions", 0) or 0)
             kept += int(item.get("kept", 0) or 0)
             kept_fp += int(item.get("kept_fp", 0) or 0)
-            if args.cc and hook_blocks(
-                args.cc, str(item.get("path", "a.py")), str(item.get("new", ""))
-            ):
+            if cc and hook_blocks(cc, str(item.get("path", "a.py")), str(item.get("new", ""))):
                 blocked = 1
-            if args.tc and hook_blocks(
-                args.tc, str(item.get("path", "a.py")), str(item.get("new", ""))
-            ):
+            if tc and hook_blocks(tc, str(item.get("path", "a.py")), str(item.get("new", ""))):
                 blocked = 1
         per_task.append(
             {
@@ -114,7 +123,7 @@ def main() -> int:
                 "hook_enabled": enabled,
                 "comments_added": comments,
                 "tests_added": tests,
-                "blocked": bool(blocked) if (args.cc or args.tc) else None,
+                "blocked": bool(blocked) if (cc or tc) else None,
                 "revisions": revisions,
                 "kept": kept,
                 "kept_fp": kept_fp,
@@ -148,7 +157,7 @@ def main() -> int:
             "tasks": group["tasks"],
             "comments_added_per_task": group["comments_added"] / count,
             "tests_added_per_task": group["tests_added"] / count,
-            "block_rate": group["blocked"] / count if (args.cc or args.tc) else None,
+            "block_rate": group["blocked"] / count if (cc or tc) else None,
             "revisions_per_task": group["revisions"] / count,
             "false_positive_rate_on_kept": (
                 group["kept_fp"] / group["kept"] if group["kept"] else None
