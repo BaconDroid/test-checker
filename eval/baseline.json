@@ -2,7 +2,7 @@
   "tolerance_percent": 15.0,
   "profiles": {
     "release": {
-      "p95_ms": 25.98
+      "ratio": 5.7632
     }
   }
 }
