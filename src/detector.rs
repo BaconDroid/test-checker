@@ -5,7 +5,10 @@ use std::time::Instant;
 use tree_sitter::{Query, QueryCursor, StreamingIterator};
 
 use crate::engine;
-use crate::language::{is_test_callee, is_test_function_name, language_for_path, test_query};
+use crate::language::{
+    is_test_callee, is_test_function_name, language_for_path, string_node_kinds,
+    string_query_source, test_query,
+};
 use crate::models::{Confidence, Finding};
 use crate::rules::{self, AddedLine, DiffContext};
 
@@ -15,6 +18,8 @@ struct Runtime {
     comment_query: Query,
     test_query: Option<Query>,
     injection_query: Option<Query>,
+    /// Matches every string-literal node in the grammar (see `language::string_node_kinds`).
+    string_query: Option<Query>,
 }
 
 static RUNTIMES: LazyLock<Mutex<HashMap<String, Arc<Runtime>>>> =
@@ -133,10 +138,12 @@ impl TestDetector {
         if include_body_tests {
             if let Some(query) = &runtime.test_query {
                 let bodies = capture_bodies(&runtime, query, &tree, source);
+                let masked = masked_view(&runtime, &tree, content);
                 findings.extend(analyze_new_bodies(
                     &runtime.name,
                     file_path,
                     content,
+                    masked.as_deref().unwrap_or(content),
                     &bodies,
                 ));
             }
@@ -221,17 +228,26 @@ impl TestDetector {
             findings.extend(commented_out_findings(file_path, &new_comments, &old_texts));
         }
         if include_body_tests {
-            findings.extend(rules::diff_findings(old_string, new_string, file_path));
+            let masked_new = masked_view(&runtime, &tree, new_string);
+            let masked_old = old_tree
+                .as_ref()
+                .and_then(|old_tree| masked_view(&runtime, old_tree, old_string));
+            let new_view = masked_new.as_deref().unwrap_or(new_string);
+            let old_view = masked_old.as_deref().unwrap_or(old_string);
+            findings.extend(rules::diff_findings_on_views(old_view, new_view, file_path));
             if let Some(query) = &runtime.test_query {
                 let bodies = capture_bodies(&runtime, query, &tree, source);
                 let added = engine::added_lines(old_string, new_string);
                 findings.extend(analyze_edited_bodies(
                     &runtime.name,
                     file_path,
-                    old_string,
-                    new_string,
                     &bodies,
                     &added,
+                    Views {
+                        original: new_string,
+                        old: old_view,
+                        masked: new_view,
+                    },
                 ));
                 if let Some(old_tree) = &old_tree {
                     let old_bodies =
@@ -322,12 +338,14 @@ fn runtime_by_name(name: &str) -> Result<Arc<Runtime>, DetectError> {
         Some(source) => Some(Query::new(&language, source).map_err(|_| uncompilable())?),
         None => None,
     };
+    let string_query = string_query(&language, name);
     let runtime = Arc::new(Runtime {
         name: name.to_owned(),
         language,
         comment_query: comment,
         test_query: body,
         injection_query: injection,
+        string_query,
     });
     runtimes.insert(name.to_owned(), Arc::clone(&runtime));
     Ok(runtime)
@@ -361,6 +379,42 @@ fn parse_with_runtime(
         }
         None => Err(DetectError::Internal(format!("parse failed: {file_path}"))),
     }
+}
+
+/// Build the string-literal query for a grammar from the one kind table.
+fn string_query(language: &tree_sitter::Language, name: &str) -> Option<Query> {
+    let kinds = string_node_kinds(name);
+    if kinds.is_empty() {
+        return None;
+    }
+    Query::new(language, &string_query_source(kinds)).ok()
+}
+
+/// A length-preserving copy of `content` where every string literal's content is blanked.
+///
+/// Newlines and every string delimiter character are preserved, so line numbers and byte offsets do
+/// not move; only the bytes between the delimiters become spaces. `None` when the grammar has no
+/// string kinds or the content is not valid UTF-8 (it always is: ASCII spaces replace whole bytes).
+fn masked_view(runtime: &Runtime, tree: &tree_sitter::Tree, content: &str) -> Option<String> {
+    let query = runtime.string_query.as_ref()?;
+    let source = content.as_bytes();
+    let mut bytes = source.to_vec();
+    let mut cursor = QueryCursor::new();
+    let mut captures = cursor.captures(query, tree.root_node(), source);
+    captures.advance();
+    while let Some((query_match, capture_index)) = captures.get() {
+        if let Some(capture) = query_match.captures.get(*capture_index) {
+            if let Some(range) = bytes.get_mut(capture.node.byte_range()) {
+                for byte in range.iter_mut() {
+                    if !matches!(*byte, b'\n' | b'\r' | b'"' | b'\'' | b'`') {
+                        *byte = b' ';
+                    }
+                }
+            }
+        }
+        captures.advance();
+    }
+    String::from_utf8(bytes).ok()
 }
 
 fn collect_comments(
@@ -645,17 +699,20 @@ fn analyze_new_bodies(
     language: &str,
     file_path: &str,
     content: &str,
+    view: &str,
     bodies: &[Body],
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
     let mut seen = DuplicateSignatures::default();
     for body in bodies {
-        let lines = body_added_lines(content, body, language);
-        findings.extend(classify_lines(file_path, &lines));
-        findings.extend(rules::classify_test_body_with_reliability(
+        let lines = body_added_lines(view, body, language);
+        let original_lines = body_added_lines(content, body, language);
+        findings.extend(classify_lines(file_path, &lines, &original_lines));
+        findings.extend(rules::classify_test_body_with_original(
             file_path,
             body.start_row + 1,
             &lines,
+            &original_lines,
             body.reliable,
         ));
         // `duplicate-test` compares the whole body, so adding the same line to two different
@@ -668,7 +725,7 @@ fn analyze_new_bodies(
                 file_path,
                 body.start_row + 1,
                 &exact_lines,
-                &lines,
+                &original_lines,
             )
         {
             findings.push(finding);
@@ -681,30 +738,53 @@ fn analyze_new_bodies(
     findings
 }
 
+/// The original content and its masked view, plus the masked view of the pre-edit content.
+#[derive(Clone, Copy)]
+struct Views<'a> {
+    original: &'a str,
+    old: &'a str,
+    masked: &'a str,
+}
+
 fn analyze_edited_bodies(
     language: &str,
     file_path: &str,
-    old_content: &str,
-    content: &str,
     bodies: &[Body],
     added: &HashSet<usize>,
+    views: Views<'_>,
 ) -> Vec<Finding> {
+    let Views {
+        original: content,
+        old: old_view,
+        masked: view,
+    } = views;
     let mut findings = Vec::new();
     let mut seen = DuplicateSignatures::default();
-    let removed = removed_lines(old_content, content);
+    let removed = removed_lines(old_view, view);
     let diff = DiffContext { removed: &removed };
     for body in bodies {
-        let full = body_added_lines(content, body, language);
+        let full = body_added_lines(view, body, language);
+        let original_lines = body_added_lines(content, body, language);
         let touched: Vec<AddedLine<'_>> = full
+            .iter()
+            .copied()
+            .filter(|line| added.contains(&(line.line_number - 1)))
+            .collect();
+        let touched_original: Vec<AddedLine<'_>> = original_lines
             .iter()
             .copied()
             .filter(|line| added.contains(&(line.line_number - 1)))
             .collect();
         let is_touched = !touched.is_empty();
         if is_touched {
-            findings.extend(classify_diff_lines(file_path, &touched, &diff));
+            findings.extend(classify_diff_lines(
+                file_path,
+                &touched,
+                &touched_original,
+                &diff,
+            ));
             if let Some(finding) =
-                rules::classify_echo_body(file_path, &full, body.reliable, Some(added))
+                rules::classify_echo_body(file_path, &original_lines, body.reliable, Some(added))
             {
                 findings.push(finding);
             }
@@ -720,7 +800,7 @@ fn analyze_edited_bodies(
                 file_path,
                 body.start_row + 1,
                 &exact_lines,
-                &full,
+                &original_lines,
             )
             && is_touched
         {
@@ -863,10 +943,17 @@ fn strip_block_comment<'a>(line: &'a str, in_block_comment: &mut bool) -> Option
     }
 }
 
-fn classify_lines(file_path: &str, lines: &[AddedLine<'_>]) -> Vec<Finding> {
+fn classify_lines(
+    file_path: &str,
+    lines: &[AddedLine<'_>],
+    original_lines: &[AddedLine<'_>],
+) -> Vec<Finding> {
     let mut findings = Vec::new();
     for index in 0..lines.len() {
-        findings.extend(rules::classify_added_line(file_path, lines, index));
+        let original = original_lines.get(index).map_or("", |line| line.text);
+        findings.extend(rules::classify_added_line_with_original(
+            file_path, lines, index, original,
+        ));
     }
     findings
 }
@@ -874,11 +961,15 @@ fn classify_lines(file_path: &str, lines: &[AddedLine<'_>]) -> Vec<Finding> {
 fn classify_diff_lines(
     file_path: &str,
     lines: &[AddedLine<'_>],
+    original_lines: &[AddedLine<'_>],
     diff: &DiffContext<'_>,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
     for index in 0..lines.len() {
-        findings.extend(rules::classify_diff_line(file_path, lines, index, diff));
+        let original = original_lines.get(index).map_or("", |line| line.text);
+        findings.extend(rules::classify_diff_line_with_original(
+            file_path, lines, index, original, diff,
+        ));
     }
     findings
 }

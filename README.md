@@ -199,7 +199,13 @@ telemetry, so the default `medium` gate hides them. Use `--min-confidence low` t
 on them.
 
 Each finding carries a `confidence` of `high`/`medium`/`low`. Line rules classify the added lines of
-the captured test bodies (comments stripped); diff rules compare an edit's old and new content.
+the captured test bodies (comments stripped) against a **masked view**: the content of string
+literals, docstrings, template strings, raw strings and heredocs is replaced by spaces, preserving
+newlines and byte offsets so line numbers do not move. A `@pytest.mark.skip` or `.only` that appears
+only inside a string is therefore data, not a disabled or focused test. The per-language string node
+kinds live in one table (`src/language.rs`), with a fixture per language. Comment-based rules
+(`commented-out-test`, `agent-memo-test`) and the rules that read literal targets (`source-grep-test`,
+`mock-of-sut`) keep reading the original text. Diff rules compare an edit's old and new content.
 
 On an `Edit`/`MultiEdit` fragment, whole-test rules (`gutted-test`, `over-mocking`, `no-assertion`,
 `duplicate-test`, `near-duplicate-test`, `echo-test`) fire only when the fragment contains the

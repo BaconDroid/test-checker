@@ -958,3 +958,353 @@ fn detect_edit_given_incomplete_new_fragment_does_not_report_test_removed() {
         "findings: {findings:?}"
     );
 }
+
+// ---- masked-view precision fixtures ----
+
+fn detect(path: &str, content: &str) -> Vec<String> {
+    TestDetector::new()
+        .detect(content, path, true, true)
+        .into_iter()
+        .map(|finding| finding.rule)
+        .collect()
+}
+
+fn has(rules: &[String], rule: &str) -> bool {
+    rules.iter().any(|candidate| candidate == rule)
+}
+
+#[test]
+fn typescript_marker_inside_string_is_not_a_finding() {
+    // then: `it.only` inside a string literal is data, not a focus marker
+    assert!(!has(
+        &detect(
+            "tests/app.test.ts",
+            "it('sums', () => {\n  const label = \"it.only('x', () => {})\";\n  expect(add(1, 2)).toBe(3);\n});\n"
+        ),
+        "focus-added"
+    ));
+    // but the same marker in code still fires
+    assert!(has(
+        &detect(
+            "tests/app.test.ts",
+            "it.only('sums', () => {\n  expect(add(1, 2)).toBe(3);\n});\n"
+        ),
+        "focus-added"
+    ));
+    // a commented-out test is still a finding
+    assert!(has(
+        &detect(
+            "tests/app.test.ts",
+            "// it('old', () => {\n//   expect(1).toBe(1);\n// });\n"
+        ),
+        "commented-out-test"
+    ));
+    // a JSDoc block carrying a focus marker is documentation
+    assert!(!has(
+        &detect(
+            "tests/app.test.ts",
+            "it('sums', () => {\n  /** it.only('x') */\n  expect(add(1, 2)).toBe(3);\n});\n"
+        ),
+        "focus-added"
+    ));
+}
+
+#[test]
+fn python_marker_inside_string_is_not_a_finding() {
+    // then: the decorator text inside a string is data
+    assert!(!has(
+        &detect(
+            "tests/test_app.py",
+            "def test_sums():\n    label = \"@pytest.mark.skip\"\n    assert add(1, 2) == 3\n"
+        ),
+        "skip-added"
+    ));
+    // the same decorator in code still fires
+    assert!(has(
+        &detect(
+            "tests/test_app.py",
+            "@pytest.mark.skip\ndef test_sums():\n    assert add(1, 2) == 3\n"
+        ),
+        "skip-added"
+    ));
+    // a commented-out test is still a finding
+    assert!(has(
+        &detect(
+            "tests/test_app.py",
+            "# def test_old():\n#     assert x == 1\n"
+        ),
+        "commented-out-test"
+    ));
+    // a docstring carrying a skip marker is documentation
+    assert!(!has(
+        &detect(
+            "tests/test_app.py",
+            "def test_sums():\n    \"\"\"@pytest.mark.skip\"\"\"\n    assert add(1, 2) == 3\n"
+        ),
+        "skip-added"
+    ));
+}
+
+#[test]
+fn go_marker_inside_string_is_not_a_finding() {
+    // then: `t.Skip(` inside a string literal is data
+    assert!(!has(
+        &detect(
+            "tests/app_test.go",
+            "package app\n\nfunc TestSums(t *testing.T) {\n\tlabel := \"t.Skip(\\\"later\\\")\"\n\tif got := add(1, 2); got != 3 {\n\t\tt.Errorf(\"got %d\", got)\n\t}\n}\n"
+        ),
+        "skip-added"
+    ));
+    // the same call in code still fires
+    assert!(has(
+        &detect(
+            "tests/app_test.go",
+            "package app\n\nfunc TestSums(t *testing.T) {\n\tt.Skip(\"later\")\n}\n"
+        ),
+        "skip-added"
+    ));
+    // a commented-out test is still a finding
+    assert!(has(
+        &detect(
+            "tests/app_test.go",
+            "// func TestOld(t *testing.T) {\n// \tt.Skip(\"later\")\n// }\n"
+        ),
+        "commented-out-test"
+    ));
+    // a doc comment carrying a skip call is documentation
+    assert!(!has(
+        &detect(
+            "tests/app_test.go",
+            "// t.Skip(\"documented\")\nfunc TestSums(t *testing.T) {\n\tif got := add(1, 2); got != 3 {\n\t\tt.Errorf(\"got %d\", got)\n\t}\n}\n"
+        ),
+        "skip-added"
+    ));
+}
+
+#[test]
+fn rust_marker_inside_string_is_not_a_finding() {
+    // then: an attribute inside a string literal is data
+    assert!(!has(
+        &detect(
+            "tests/app_test.rs",
+            "#[test]\nfn sums() {\n    let label = \"#[ignore]\";\n    assert_eq!(add(1, 2), 3);\n}\n"
+        ),
+        "skip-added"
+    ));
+    // the same attribute in code still fires
+    assert!(has(
+        &detect(
+            "tests/app_test.rs",
+            "#[test]\n#[ignore]\nfn sums() {\n    assert_eq!(add(1, 2), 3);\n}\n"
+        ),
+        "skip-added"
+    ));
+    // a commented-out test is still a finding
+    assert!(has(
+        &detect(
+            "tests/app_test.rs",
+            "// #[test]\n// fn old() {\n//     assert_eq!(1, 1);\n// }\n"
+        ),
+        "commented-out-test"
+    ));
+    // a doc comment carrying an attribute is documentation
+    assert!(!has(
+        &detect(
+            "tests/app_test.rs",
+            "/// #[ignore]\n#[test]\nfn sums() {\n    assert_eq!(add(1, 2), 3);\n}\n"
+        ),
+        "skip-added"
+    ));
+}
+
+#[test]
+fn java_marker_inside_string_is_not_a_finding() {
+    // then: an annotation inside a string literal is data
+    assert!(!has(
+        &detect(
+            "src/test/java/AppTest.java",
+            "class AppTest {\n  @Test\n  void sums() {\n    String label = \"@Disabled\";\n    assertEquals(3, add(1, 2));\n  }\n}\n"
+        ),
+        "skip-added"
+    ));
+    // the same annotation in code still fires
+    assert!(has(
+        &detect(
+            "src/test/java/AppTest.java",
+            "class AppTest {\n  @Test\n  @Disabled\n  void sums() {\n    assertEquals(3, add(1, 2));\n  }\n}\n"
+        ),
+        "skip-added"
+    ));
+    // a commented-out test is still a finding
+    assert!(has(
+        &detect(
+            "src/test/java/AppTest.java",
+            "// @Test\n// void old() {\n//   assertEquals(1, 1);\n// }\n"
+        ),
+        "commented-out-test"
+    ));
+    // a Javadoc block carrying an annotation is documentation
+    assert!(!has(
+        &detect(
+            "src/test/java/AppTest.java",
+            "class AppTest {\n  /** @Disabled */\n  @Test\n  void sums() {\n    assertEquals(3, add(1, 2));\n  }\n}\n"
+        ),
+        "skip-added"
+    ));
+}
+
+#[test]
+fn masked_view_preserves_line_numbers() {
+    // given: a multi-line string whose content carries a marker, followed by a real skip
+    let content = "def test_sums():\n    text = \"\"\"@pytest.mark.skip\n    assert x == 1\n    \"\"\"\n    @pytest.mark.skip\n    assert add(1, 2) == 3\n";
+
+    // when
+    let findings = TestDetector::new().detect(content, "tests/test_app.py", true, true);
+
+    // then: the real marker is still reported on its original line
+    let skip = findings
+        .iter()
+        .find(|finding| finding.rule == "skip-added" && finding.line_number == 5);
+    assert!(skip.is_some(), "findings: {findings:?}");
+    assert_eq!(
+        findings
+            .iter()
+            .filter(|finding| finding.rule == "skip-added")
+            .count(),
+        1,
+        "the marker inside the docstring must not surface"
+    );
+}
+
+#[test]
+fn agent_memo_reads_the_original_text() {
+    // given: a memo phrase in a test name (a string literal, masked for line rules)
+    let findings = TestDetector::new().detect(
+        "it('now we parse twice', () => {\n  expect(add(1, 2)).toBe(3);\n});\n",
+        "tests/app.test.js",
+        true,
+        true,
+    );
+
+    // then: the comment/text rule still reads the original string
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "agent-memo-test"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn source_grep_reads_the_original_literals() {
+    // given: the read target is only visible in the string literal
+    let findings = TestDetector::new().detect(
+        "def test_reads_source():\n    text = Path(\"src/app.py\").read_text()\n    assert \"def \" in text\n",
+        "tests/test_app.py",
+        true,
+        true,
+    );
+
+    // then: masking the view must not hide the source-grep signal
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "source-grep-test"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn template_raw_and_heredoc_content_is_masked() {
+    // then: a focus marker in a template string is data
+    assert!(!has(
+        &detect(
+            "tests/app.test.ts",
+            "it('sums', () => {\n  const label = `it.only('x')`;\n  expect(add(1, 2)).toBe(3);\n});\n"
+        ),
+        "focus-added"
+    ));
+    // a raw string
+    assert!(!has(
+        &detect(
+            "tests/app_test.rs",
+            "#[test]\nfn sums() {\n    let label = r#\"#[ignore]\"#;\n    assert_eq!(add(1, 2), 3);\n}\n"
+        ),
+        "skip-added"
+    ));
+    // a raw Go string
+    assert!(!has(
+        &detect(
+            "tests/app_test.go",
+            "package app\n\nfunc TestSums(t *testing.T) {\n\tlabel := `t.Skip(\"later\")`\n\tif got := add(1, 2); got != 3 {\n\t\tt.Errorf(\"got %d\", got)\n\t}\n}\n"
+        ),
+        "skip-added"
+    ));
+    // a Ruby heredoc
+    assert!(!has(
+        &detect(
+            "test/app_test.rb",
+            "def test_sums\n  label = <<~EOT\n    it.only('x')\n  EOT\n  assert_equal 3, add(1, 2)\nend\n"
+        ),
+        "focus-added"
+    ));
+}
+
+#[test]
+fn detect_given_payload_markers_in_rust_string_literals_reports_no_line_findings() {
+    // given: the shapes that produced the known false positives in `tests/readme_hook.rs` and
+    // `tests/api.rs` — framework markers and assertion snippets carried as Rust string data
+    let source = r##"#[test]
+fn reads_payloads() {
+    let python = "def test_a():\n    @pytest.mark.skip\n    assert x == 1\n";
+    let js = r#"it.only('x', () => { expect(1).toBeDefined(); });"#;
+    let java = "assertEquals(1, 1)";
+    let json = b"{\"tool_name\":\"Write\",\"tool_input\":{\"content\":\"@pytest.mark.skip\"}}";
+    assert!(python.contains("skip"));
+}
+"##;
+
+    // when
+    let findings = TestDetector::new().detect(source, "tests/readme_hook.rs", true, true);
+
+    // then: the string content is data; only the real assertion on the last line is code
+    for rule in [
+        "skip-added",
+        "focus-added",
+        "weakened-assertion",
+        "constant-assertion",
+        "conditional-assertion",
+        "incomplete-assertion",
+    ] {
+        assert!(
+            !findings.iter().any(|finding| finding.rule == rule),
+            "{rule} leaked from a string literal: {findings:?}"
+        );
+    }
+}
+
+#[test]
+fn detect_given_distinct_literal_operands_does_not_report_tautology() {
+    // given: masking the string content collapses both operands' text
+    let detector = TestDetector::new();
+    let distinct = "def test_a():\n    assert f(\"a\") == f(\"b\")\n";
+    let same = "def test_a():\n    assert f(\"a\") == f(\"a\")\n";
+
+    // when
+    let distinct_findings = detector.detect(distinct, "tests/test_app.py", true, true);
+    let same_findings = detector.detect(same, "tests/test_app.py", true, true);
+
+    // then: only the expression compared with itself is a tautology
+    assert!(
+        !distinct_findings
+            .iter()
+            .any(|finding| finding.rule == "tautological-assertion"),
+        "findings: {distinct_findings:?}"
+    );
+    assert!(
+        same_findings
+            .iter()
+            .any(|finding| finding.rule == "tautological-assertion"),
+        "findings: {same_findings:?}"
+    );
+}

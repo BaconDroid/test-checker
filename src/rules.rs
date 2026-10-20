@@ -727,7 +727,13 @@ pub(crate) fn harness_edited_finding(file_path: &str, line: &AddedLine<'_>) -> F
 /// Classify one added line against the line-oriented rules (presence-only, no diff baseline).
 #[must_use]
 pub fn classify_added_line(file_path: &str, added: &[AddedLine<'_>], index: usize) -> Vec<Finding> {
-    classify_line(file_path, added, index, &DiffContext::default())
+    classify_line(
+        file_path,
+        added,
+        index,
+        &DiffContext::default(),
+        added_text(added, index),
+    )
 }
 
 /// Classify one added line with the removed lines of an edit, so the presence-style rules become
@@ -739,7 +745,35 @@ pub fn classify_diff_line(
     index: usize,
     diff: &DiffContext<'_>,
 ) -> Vec<Finding> {
-    classify_line(file_path, added, index, diff)
+    classify_line(file_path, added, index, diff, added_text(added, index))
+}
+
+/// Classify the line against the masked view while reading `original` for the comment/text rules
+/// (`agent-memo-test` names the strings a test carries, which the masked view has blanked).
+#[must_use]
+pub fn classify_added_line_with_original(
+    file_path: &str,
+    added: &[AddedLine<'_>],
+    index: usize,
+    original: &str,
+) -> Vec<Finding> {
+    classify_line(file_path, added, index, &DiffContext::default(), original)
+}
+
+/// [`classify_added_line_with_original`] with an edit's removed lines, for the diff-aware rules.
+#[must_use]
+pub fn classify_diff_line_with_original(
+    file_path: &str,
+    added: &[AddedLine<'_>],
+    index: usize,
+    original: &str,
+    diff: &DiffContext<'_>,
+) -> Vec<Finding> {
+    classify_line(file_path, added, index, diff, original)
+}
+
+fn added_text<'a>(added: &'a [AddedLine<'a>], index: usize) -> &'a str {
+    added.get(index).map_or("", |line| line.text)
 }
 
 fn classify_line(
@@ -747,6 +781,7 @@ fn classify_line(
     added: &[AddedLine<'_>],
     index: usize,
     diff: &DiffContext<'_>,
+    original: &str,
 ) -> Vec<Finding> {
     let Some(line) = added.get(index).copied() else {
         return Vec::new();
@@ -778,7 +813,7 @@ fn classify_line(
         ));
     }
     findings.extend(classify_weakening(file_path, &line, text, diff));
-    if let Some(finding) = classify_assertion(file_path, &line, text) {
+    if let Some(finding) = classify_assertion(file_path, &line, text, original) {
         findings.push(finding);
     }
     if let Some(finding) = classify_mirror_implementation(file_path, &line, text) {
@@ -790,10 +825,10 @@ fn classify_line(
     if let Some(finding) = classify_conditional_assertion(file_path, added, index, text) {
         findings.push(finding);
     }
-    if let Some(finding) = classify_mock_of_sut(file_path, &line, text) {
+    if let Some(finding) = classify_mock_of_sut(file_path, &line, text, original) {
         findings.push(finding);
     }
-    if let Some(finding) = classify_agent_memo(file_path, &line, text) {
+    if let Some(finding) = classify_agent_memo(file_path, &line, original) {
         findings.push(finding);
     }
     if let Some(finding) = classify_incomplete_assertion(file_path, &line, text) {
@@ -875,7 +910,12 @@ fn classify_broad_exception(file_path: &str, line: &AddedLine<'_>, text: &str) -
     })
 }
 
-fn classify_assertion(file_path: &str, line: &AddedLine<'_>, text: &str) -> Option<Finding> {
+fn classify_assertion(
+    file_path: &str,
+    line: &AddedLine<'_>,
+    text: &str,
+    original: &str,
+) -> Option<Finding> {
     let operands = assertion_operands(text);
     let literal_pair = operands
         .as_ref()
@@ -890,7 +930,11 @@ fn classify_assertion(file_path: &str, line: &AddedLine<'_>, text: &str) -> Opti
         ));
     }
     if let Some((left, right)) = operands {
-        if left == right && !is_literal(&left) {
+        // The masked view blanks string content, so two distinct calls can collapse to the same
+        // text (`f("a")` and `f("b")`). Only call it a tautology when the original agrees.
+        let same_in_original = assertion_operands(original.trim())
+            .is_some_and(|(original_left, original_right)| original_left == original_right);
+        if left == right && !is_literal(&left) && same_in_original {
             return Some(finish(
                 "tautological-assertion",
                 Confidence::High,
@@ -1512,12 +1556,19 @@ fn classify_conditional_assertion(
     })
 }
 
-fn classify_mock_of_sut(file_path: &str, line: &AddedLine<'_>, text: &str) -> Option<Finding> {
+fn classify_mock_of_sut(
+    file_path: &str,
+    line: &AddedLine<'_>,
+    text: &str,
+    original: &str,
+) -> Option<Finding> {
     let stem = subject_stem(file_path);
     if stem.is_empty() || !has_marker(text, MOCK_MARKERS) {
         return None;
     }
-    has_word(text, &stem).then(|| {
+    // The mock callee is code (masked view); the module it targets is a string literal
+    // (original text), so a `mock.patch(` that only appears inside a string cannot fire.
+    has_word(original, &stem).then(|| {
         finish(
             "mock-of-sut",
             Confidence::Medium,
@@ -1568,20 +1619,21 @@ fn literal_after(text: &str, offset: usize) -> Option<String> {
     quoted_strings(&text[offset..]).into_iter().next()
 }
 
-/// Whether `text` reads a source file: a read callee whose string argument names source code.
-fn reads_source_file(text: &str) -> bool {
+/// Whether the line reads a source file: the read callee is code (masked `view`) and the literal
+/// it opens is read from the `original` text at the same byte offset.
+fn reads_source_file_views(view: &str, original: &str) -> bool {
     if SOURCE_READ_CALLEES.iter().any(|callee| {
-        text.find(callee).is_some_and(|index| {
-            literal_after(text, index + callee.len())
+        view.find(callee).is_some_and(|index| {
+            literal_after(original, index + callee.len())
                 .is_some_and(|literal| is_source_file_name(&literal))
         })
     }) {
         return true;
     }
     // `Path("…").read_text()`: the literal precedes the `.read_text` callee.
-    text.find("Path(").is_some_and(|index| {
-        text.contains(".read_text")
-            && literal_after(text, index + "Path(".len())
+    view.find("Path(").is_some_and(|index| {
+        view.contains(".read_text")
+            && literal_after(original, index + "Path(".len())
                 .is_some_and(|literal| is_source_file_name(&literal))
     })
 }
@@ -1612,16 +1664,30 @@ pub fn classify_test_body(
     body_start: usize,
     body: &[AddedLine<'_>],
 ) -> Vec<Finding> {
-    classify_test_body_with_reliability(file_path, body_start, body, true)
+    classify_test_body_with_original(file_path, body_start, body, body, true)
 }
 
 /// Classify a captured test body, suppressing the rules that need the whole test when the parsed
 /// fragment is unreliable (it does not contain the complete test).
 #[must_use]
+#[cfg(test)]
 pub(crate) fn classify_test_body_with_reliability(
     file_path: &str,
     body_start: usize,
     body: &[AddedLine<'_>],
+    reliable: bool,
+) -> Vec<Finding> {
+    classify_test_body_with_original(file_path, body_start, body, body, reliable)
+}
+
+/// [`classify_test_body`] over the masked view, with `original_body` read only by the rules that
+/// depend on literal text (`source-grep-test` names the file a read call opens).
+#[must_use]
+pub(crate) fn classify_test_body_with_original(
+    file_path: &str,
+    body_start: usize,
+    body: &[AddedLine<'_>],
+    original_body: &[AddedLine<'_>],
     reliable: bool,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
@@ -1679,11 +1745,13 @@ pub(crate) fn classify_test_body_with_reliability(
             file_path,
         ));
     }
-    if reliable && let Some(finding) = classify_echo(file_path, body, None) {
+    if reliable && let Some(finding) = classify_echo(file_path, original_body, None) {
         findings.push(finding);
     }
     if has_assertion
-        && let Some(read_line) = body.iter().find(|line| reads_source_file(line.text.trim()))
+        && let Some(read_line) = body.iter().zip(original_body).find_map(|(view, original)| {
+            reads_source_file_views(view.text.trim(), original.text.trim()).then_some(original)
+        })
     {
         findings.push(finish(
             "source-grep-test",
@@ -1717,6 +1785,17 @@ fn is_assertion_code_line(line: &str) -> bool {
 /// Diff-only findings: newly introduced weakening between an edit's old and new content.
 #[must_use]
 pub fn diff_findings(old_content: &str, new_content: &str, file_path: &str) -> Vec<Finding> {
+    diff_findings_on_views(old_content, new_content, file_path)
+}
+
+/// [`diff_findings`] over the masked views. Line numbers come from the view, which is
+/// length-preserving, so they still name the edited lines.
+#[must_use]
+pub fn diff_findings_on_views(
+    old_content: &str,
+    new_content: &str,
+    file_path: &str,
+) -> Vec<Finding> {
     let old_lines: Vec<&str> = old_content.lines().collect();
     let new_lines: Vec<&str> = new_content.lines().collect();
     let mut findings = Vec::new();

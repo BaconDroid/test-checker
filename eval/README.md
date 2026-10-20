@@ -22,3 +22,16 @@ python3 eval/baseline.py path/to/binary
 
 Exit codes are the contract: `0` clean or deliberate skip, `2` findings, `1` did not run (internal
 failure, or the hook wrapper could not run the binary).
+
+## Precision replay
+
+`replay.py` measures a line-rule change on real history instead of hand-written cases:
+
+```bash
+python3 eval/replay.py --before /tmp/test-checker-before --after target/debug/test-checker
+```
+
+It builds 320 payloads from the two repositories' git history (80 test-file changes per repo, each a
+`Write` of the committed content and an `Edit` of parent -> commit), plus a 58-file audit of every
+tracked `.rs`/`.js`/`.py` source file in both repos (`eval/baseline.py` excluded), all at
+`--min-confidence low`. It prints exit-2 and per-rule finding counts for each binary. Read-only.
