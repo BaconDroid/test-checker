@@ -1,8 +1,13 @@
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
-use crate::detector::{DetectError, DetectResult, TestDetector};
+use crate::detector::{DetectError, DetectResult, TestDetector, comment_ranges};
 use crate::engine::{self, null_default};
-use crate::filters::{SuppressionFilter, apply_filters, is_line_suppressed};
+use crate::filters::{
+    SuppressionConfig, SuppressionIndex, apply_filters_without_suppression, has_marker_in_comments,
+    is_config_path,
+};
 use crate::language::{is_harness_path, is_test_path, language_for_path};
 use crate::models::{Confidence, Edit, Finding};
 use crate::output::format_hook_message;
@@ -205,6 +210,17 @@ fn evaluate(
     if file_path.is_empty() {
         return skip("No file path provided");
     }
+    if is_config_path(file_path) {
+        let findings = [Finding::new(
+            "config-edited",
+            Confidence::High,
+            "The test-checker suppression config was edited; keep every suppression narrow and justified.",
+            1,
+            file_path,
+            "",
+        )];
+        return gate_and_format(&findings, custom_prompt, min_confidence);
+    }
     let is_test = hook_input
         .is_test_file
         .unwrap_or_else(|| is_test_path(file_path));
@@ -224,87 +240,28 @@ fn evaluate(
         return skip("File too large");
     }
 
-    let marker_added = marker_added_in_change(tool, hook_input);
-    if !marker_added && file_suppressed(tool, hook_input) {
-        return skip("Suppressed by test-checker: allow");
-    }
-
+    let cwd = Some(hook_input.cwd.as_str()).filter(|value| !value.is_empty());
+    let suppression_config = SuppressionConfig::load(cwd);
     let detector = TestDetector::new();
-    let mut baseline_note: Option<&'static str> = None;
-    let detection: DetectResult = match tool {
-        ToolKind::Edit if hook_input.tool_input.edits.is_empty() => {
-            let old_string = hook_input.tool_input.old_string.as_str();
-            let new_string = hook_input.tool_input.new_string.as_str();
-            if new_string.is_empty() {
-                if old_string.is_empty() {
-                    return skip("No content to check");
-                }
-                // A deletion edit has no new content to parse, but it can still remove assertions.
-                Ok(if include_body_tests {
-                    rules::diff_findings(old_string, "", file_path)
-                } else {
-                    Vec::new()
-                })
-            } else {
-                detector.detect_edit_checked(
-                    old_string,
-                    new_string,
-                    file_path,
-                    include_commented_out_tests,
-                    include_body_tests,
-                )
-            }
-        }
-        ToolKind::Edit | ToolKind::MultiEdit => {
-            if hook_input.tool_input.edits.is_empty() {
-                return skip("No content to check");
-            }
-            edits_findings(
-                &detector,
-                &hook_input.tool_input.edits,
-                file_path,
-                include_commented_out_tests,
-                include_body_tests,
-            )
-        }
-        ToolKind::Write => {
-            let content = get_content_to_check(hook_input);
-            if content.is_empty() {
-                return skip("No content to check");
-            }
-            // Only a test file in a supported language has diff rules to compare with HEAD.
-            match write_baseline(hook_input, file_path) {
-                Baseline::Head(head) => detector.detect_edit_checked(
-                    &head,
-                    content,
-                    file_path,
-                    include_commented_out_tests,
-                    include_body_tests,
-                ),
-                Baseline::Skipped(reason) => {
-                    baseline_note = Some(reason);
-                    detector.detect_checked(
-                        content,
-                        file_path,
-                        include_commented_out_tests,
-                        include_body_tests,
-                    )
-                }
-                Baseline::NotRequested => detector.detect_checked(
-                    content,
-                    file_path,
-                    include_commented_out_tests,
-                    include_body_tests,
-                ),
-            }
-        }
-    };
-    let mut findings = match detection {
-        Ok(findings) => findings,
-        Err(DetectError::BudgetExceeded) => return skip("Parse budget exceeded"),
-        Err(DetectError::Internal(reason)) => return HookOutcome::Failed(reason),
+    let marker_added = marker_added_in_change(tool, hook_input, file_path);
+    let ChangeFindings {
+        mut findings,
+        invalid_markers,
+        baseline_note,
+    } = match analyze_change(
+        tool,
+        hook_input,
+        &detector,
+        file_path,
+        include_commented_out_tests,
+        include_body_tests,
+    ) {
+        Ok(change) => change,
+        Err(skip_result) => return skip_result,
     };
 
+    findings.retain(|finding| !suppression_config.suppresses(file_path, &finding.rule));
+    findings.extend(invalid_markers);
     if marker_added {
         findings.push(Finding::new(
             "allow-added",
@@ -469,33 +426,137 @@ fn exceeds_content_limit(tool: ToolKind, hook_input: &HookInput) -> bool {
     }
 }
 
-/// Findings for a list of discrete edits: a `MultiEdit`, or an `Edit`/`apply_patch` that attached an
-/// `edits[]` array (the `OpenCode` plugin's shape). A deletion edit has no content to parse, but it can
-/// still remove assertions.
-fn edits_findings(
+/// The per-fragment results of one check: findings, invalid-marker findings, and a Write-baseline
+/// skip note that the caller folds into the final outcome.
+struct ChangeFindings {
+    findings: Vec<Finding>,
+    invalid_markers: Vec<Finding>,
+    baseline_note: Option<&'static str>,
+}
+
+/// Detect findings for the tool input and apply the fragment-scoped suppression index.
+fn analyze_change(
+    tool: ToolKind,
+    hook_input: &HookInput,
     detector: &TestDetector,
-    edits: &[Edit],
     file_path: &str,
     include_commented_out_tests: bool,
     include_body_tests: bool,
-) -> DetectResult {
+) -> Result<ChangeFindings, HookOutcome> {
     let mut findings = Vec::new();
-    for edit in edits {
-        if edit.new_string.is_empty() {
-            if include_body_tests && !edit.old_string.is_empty() {
-                findings.extend(rules::diff_findings(&edit.old_string, "", file_path));
+    let mut invalid_markers = Vec::new();
+    let mut baseline_note = None;
+    match tool {
+        ToolKind::Edit if hook_input.tool_input.edits.is_empty() => {
+            let old_string = hook_input.tool_input.old_string.as_str();
+            let new_string = hook_input.tool_input.new_string.as_str();
+            if new_string.is_empty() {
+                if old_string.is_empty() {
+                    return Err(skip("No content to check"));
+                }
+                // A deletion edit has no new content to parse, but it can still remove assertions.
+                if include_body_tests {
+                    findings = rules::diff_findings(old_string, "", file_path);
+                }
+            } else {
+                findings = detect_findings(detector.detect_edit_checked(
+                    old_string,
+                    new_string,
+                    file_path,
+                    include_commented_out_tests,
+                    include_body_tests,
+                ))?;
+                let index = SuppressionIndex::from_content(
+                    new_string,
+                    &engine::added_lines(old_string, new_string),
+                    &comment_ranges(new_string, file_path),
+                );
+                findings.retain(|finding| !index.is_suppressed(finding));
+                invalid_markers = index.invalid_findings(file_path);
             }
-            continue;
         }
-        findings.extend(detector.detect_edit_checked(
-            &edit.old_string,
-            &edit.new_string,
-            file_path,
-            include_commented_out_tests,
-            include_body_tests,
-        )?);
+        ToolKind::Edit | ToolKind::MultiEdit => {
+            if hook_input.tool_input.edits.is_empty() {
+                return Err(skip("No content to check"));
+            }
+            for edit in &hook_input.tool_input.edits {
+                if edit.new_string.is_empty() {
+                    if include_body_tests && !edit.old_string.is_empty() {
+                        findings.extend(rules::diff_findings(&edit.old_string, "", file_path));
+                    }
+                    continue;
+                }
+                let mut detected = detect_findings(detector.detect_edit_checked(
+                    &edit.old_string,
+                    &edit.new_string,
+                    file_path,
+                    include_commented_out_tests,
+                    include_body_tests,
+                ))?;
+                let index = SuppressionIndex::from_content(
+                    &edit.new_string,
+                    &engine::added_lines(&edit.old_string, &edit.new_string),
+                    &comment_ranges(&edit.new_string, file_path),
+                );
+                detected.retain(|finding| !index.is_suppressed(finding));
+                findings.extend(detected);
+                invalid_markers.extend(index.invalid_findings(file_path));
+            }
+        }
+        ToolKind::Write => {
+            let content = get_content_to_check(hook_input);
+            if content.is_empty() {
+                return Err(skip("No content to check"));
+            }
+            // Only a test file in a supported language has diff rules to compare with HEAD.
+            findings = match write_baseline(hook_input, file_path) {
+                Baseline::Head(head) => detect_findings(detector.detect_edit_checked(
+                    &head,
+                    content,
+                    file_path,
+                    include_commented_out_tests,
+                    include_body_tests,
+                ))?,
+                Baseline::Skipped(reason) => {
+                    baseline_note = Some(reason);
+                    detect_findings(detector.detect_checked(
+                        content,
+                        file_path,
+                        include_commented_out_tests,
+                        include_body_tests,
+                    ))?
+                }
+                Baseline::NotRequested => detect_findings(detector.detect_checked(
+                    content,
+                    file_path,
+                    include_commented_out_tests,
+                    include_body_tests,
+                ))?,
+            };
+            let added: HashSet<usize> = (0..content.lines().count()).collect();
+            let index = SuppressionIndex::from_content(
+                content,
+                &added,
+                &comment_ranges(content, file_path),
+            );
+            findings.retain(|finding| !index.is_suppressed(finding));
+            invalid_markers = index.invalid_findings(file_path);
+        }
     }
-    Ok(findings)
+    Ok(ChangeFindings {
+        findings,
+        invalid_markers,
+        baseline_note,
+    })
+}
+
+/// Map a detector failure onto a hook outcome: a parse-budget abort is a visible skip, and any
+/// other detector failure is an internal failure (exit 1), never a clean pass.
+fn detect_findings(detection: DetectResult) -> Result<Vec<Finding>, HookOutcome> {
+    detection.map_err(|error| match error {
+        DetectError::BudgetExceeded => skip("Parse budget exceeded"),
+        DetectError::Internal(reason) => HookOutcome::Failed(reason),
+    })
 }
 
 /// Apply the filters and the confidence gate, then render: the shared tail of every check path.
@@ -504,7 +565,7 @@ fn gate_and_format(
     custom_prompt: &str,
     min_confidence: Confidence,
 ) -> HookOutcome {
-    let filtered: Vec<Finding> = apply_filters(findings)
+    let filtered: Vec<Finding> = apply_filters_without_suppression(findings)
         .into_iter()
         .filter(|finding| confidence_rank(finding.confidence) >= confidence_rank(min_confidence))
         .collect();
@@ -646,10 +707,12 @@ fn get_content_to_check(input: &HookInput) -> &str {
     }
 }
 
-/// Whether the suppression marker sits on a line the change added (agent self-suppression).
-fn marker_added_in_change(tool: ToolKind, hook_input: &HookInput) -> bool {
+/// Whether a suppression marker in a comment sits on a line the change added (agent
+/// self-suppression). Markers inside string literals are invisible.
+fn marker_added_in_change(tool: ToolKind, hook_input: &HookInput, file_path: &str) -> bool {
     match tool {
         ToolKind::Edit if hook_input.tool_input.edits.is_empty() => added_line_has_marker(
+            file_path,
             &hook_input.tool_input.old_string,
             &hook_input.tool_input.new_string,
         ),
@@ -657,34 +720,21 @@ fn marker_added_in_change(tool: ToolKind, hook_input: &HookInput) -> bool {
             .tool_input
             .edits
             .iter()
-            .any(|edit| added_line_has_marker(&edit.old_string, &edit.new_string)),
-        ToolKind::Write => SuppressionFilter.is_file_suppressed(get_content_to_check(hook_input)),
-    }
-}
-
-/// Whether the suppression marker is present anywhere in the analyzed text.
-fn file_suppressed(tool: ToolKind, hook_input: &HookInput) -> bool {
-    let suppression = SuppressionFilter;
-    match tool {
-        ToolKind::Edit if hook_input.tool_input.edits.is_empty() => {
-            suppression.is_file_suppressed(&hook_input.tool_input.new_string)
+            .any(|edit| added_line_has_marker(file_path, &edit.old_string, &edit.new_string)),
+        ToolKind::Write => {
+            let content = get_content_to_check(hook_input);
+            has_marker_in_comments(content, None, &comment_ranges(content, file_path))
         }
-        ToolKind::Edit | ToolKind::MultiEdit => hook_input
-            .tool_input
-            .edits
-            .iter()
-            .any(|edit| suppression.is_file_suppressed(&edit.new_string)),
-        ToolKind::Write => suppression.is_file_suppressed(get_content_to_check(hook_input)),
     }
 }
 
-/// Whether the suppression marker sits on a line the edit added (agent self-suppression).
-fn added_line_has_marker(old_content: &str, new_content: &str) -> bool {
+fn added_line_has_marker(file_path: &str, old_content: &str, new_content: &str) -> bool {
     let added = engine::added_lines(old_content, new_content);
-    new_content
-        .lines()
-        .enumerate()
-        .any(|(index, line)| added.contains(&index) && is_line_suppressed(line))
+    has_marker_in_comments(
+        new_content,
+        Some(&added),
+        &comment_ranges(new_content, file_path),
+    )
 }
 
 fn skip(reason: &str) -> HookOutcome {

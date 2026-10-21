@@ -481,6 +481,42 @@ fn masked_view(runtime: &Runtime, tree: &tree_sitter::Tree, content: &str) -> Op
     String::from_utf8(bytes).ok()
 }
 
+/// Byte ranges of every comment node in `content`, for callers that must distinguish a marker
+/// in a comment from the same text inside a string literal.
+#[must_use]
+pub(crate) fn comment_ranges(content: &str, file_path: &str) -> Vec<(usize, usize)> {
+    let Some(name) = language_for_path(file_path) else {
+        return Vec::new();
+    };
+    let Ok(runtime) = runtime_by_name(name) else {
+        return Vec::new();
+    };
+    let Ok(tree) = parse_with_runtime(&runtime, content.as_bytes(), file_path) else {
+        return Vec::new();
+    };
+    let mut ranges = Vec::new();
+    collect_comment_ranges(&runtime, &tree, content.as_bytes(), &mut ranges);
+    ranges
+}
+
+fn collect_comment_ranges(
+    runtime: &Runtime,
+    tree: &tree_sitter::Tree,
+    source: &[u8],
+    out: &mut Vec<(usize, usize)>,
+) {
+    let mut cursor = QueryCursor::new();
+    cursor.set_byte_range(0..source.len());
+    let mut captures = cursor.captures(&runtime.comment_query, tree.root_node(), source);
+    captures.advance();
+    while let Some((query_match, capture_index)) = captures.get() {
+        if let Some(capture) = query_match.captures.get(*capture_index) {
+            out.push((capture.node.start_byte(), capture.node.end_byte()));
+        }
+        captures.advance();
+    }
+}
+
 fn collect_comments(
     runtime: &Runtime,
     tree: &tree_sitter::Tree,

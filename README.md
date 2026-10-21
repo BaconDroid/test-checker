@@ -188,9 +188,9 @@ that the compiled host grammar exposes (for example, a `<script>` block in HTML)
 `tautological-assertion`, `constant-assertion`, `weakened-assertion`, `swallowed-error`,
 `incomplete-assertion`, `unawaited-assertion`, `broad-exception`, `mock-of-sut`, `over-mocking`,
 `duplicate-test`, `expected-copied-from-actual`, `snapshot-regenerated`, `tolerance-broadened`,
-`conditional-assertion`, `retry-added`, `agent-memo-test`, `allow-added`, `gate-weakened`,
-`commented-out-test`, `source-grep-test`, `test-volume`, `harness-edited`, `near-duplicate-test`,
-`echo-test`, `mirror-implementation-test`.
+`conditional-assertion`, `retry-added`, `agent-memo-test`, `allow-added`, `allow-invalid`,
+`config-edited`, `gate-weakened`, `commented-out-test`, `source-grep-test`, `test-volume`,
+`harness-edited`, `near-duplicate-test`, `echo-test`, `mirror-implementation-test`.
 
 Confidence policy: `source-grep-test` is `low` telemetry and fires only when an assertion inspects
 the **text** of a read source file (substring/`includes`, regex/`toMatch`, or snapshot); reading a
@@ -231,11 +231,21 @@ a brand-new test is not blocked for using a loose matcher.
 - **Directives** (`noqa`, `ts-ignore`, `eslint-disable`, `clippy:`, `allow`, …) are allowed by
   prefix match.
 - **Shebang lines** (`#!…`) are allowed.
-- **Opt-out marker** `test-checker: allow` suppresses findings in the analyzed text: the whole
-  `Write` content, or the edited fragment for `Edit`/`MultiEdit`. It does not read the rest of the
-  file, so a marker elsewhere in the file has no effect on an edit. Adding the marker on an added
-  line is reported as `allow-added` (`medium`, line 1, not suppressed), and a `Write` that contains
-  the marker anywhere always produces `allow-added`.
+- **Scoped opt-out marker.** `test-checker: allow <rule> -- <reason>` suppresses that rule's finding
+  on the marker's line or the line above. The marker is valid only when `<rule>` is a known rule id and
+  the reason after `--` has at least 12 characters. A bare marker, an unknown rule, or a short reason
+  suppresses nothing and is itself reported as `allow-invalid`. A marker added **in the same change**
+  does not suppress it and is reported as `allow-added`.
+- **File-wide suppression.** Commit a `.test-checker.json` at the repo root. Only entries with a glob,
+  at least one rule id, and a non-empty reason suppress anything:
+
+  ```json
+  { "allow": [ { "glob": "tests/**", "rules": ["skip-added"], "reason": "legacy suite, tracked in #123" } ] }
+  ```
+
+  A file whose path matches a glob and whose rule is listed is suppressed. Editing `.test-checker.json`
+  itself is reported as a **high** `config-edited` finding.
+- `scripts/doctor.sh` lists old bare `test-checker: allow` markers that no longer suppress.
 
 `agent-memo-test` findings are additionally summarised under a dedicated banner, pointing at the test
 name/assertion message that describes a change instead of the behavior. `--prompt` replaces that

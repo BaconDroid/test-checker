@@ -68,6 +68,8 @@ fn finding_reason(rule: &str) -> &'static str {
         "near-duplicate-test" => "near-duplicate test",
         "test-removed" => "test removed",
         "allow-added" => "opt-out marker added with the finding",
+        "allow-invalid" => "invalid opt-out marker",
+        "config-edited" => "suppression config edited",
         _ => "finding",
     }
 }

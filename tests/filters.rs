@@ -1,6 +1,6 @@
 use test_checker::filters::{
     BddFilter, DirectiveFilter, ShebangFilter, SuppressionFilter, apply_filters,
-    is_agent_memo_phrase,
+    is_agent_memo_phrase, is_line_suppressed,
 };
 use test_checker::models::{Confidence, Finding};
 
@@ -40,14 +40,40 @@ fn directive_filter_given_directive_returns_true() {
 }
 
 #[test]
-fn suppression_filter_given_marker_returns_true() {
+fn suppression_filter_given_valid_marker_suppresses_only_its_rule() {
+    // given
+    let filter = SuppressionFilter;
+    let text = "@pytest.mark.skip  # test-checker: allow skip-added -- tracked upstream #12";
+
+    // when / then
+    assert!(filter.should_skip(&rule_finding("skip-added", text)));
+    assert!(!filter.should_skip(&rule_finding("no-assertion", text)));
+}
+
+#[test]
+fn suppression_filter_given_invalid_marker_suppresses_nothing() {
     // given
     let filter = SuppressionFilter;
 
-    // when / then
-    assert!(filter.should_skip(&finding("# test-checker: allow")));
-    assert!(filter.is_file_suppressed("x = 1  # test-checker: allow"));
-    assert!(!filter.is_file_suppressed("x = 1"));
+    // when / then: bare, unknown rule, and short reason all suppress nothing
+    for text in [
+        "# test-checker: allow",
+        "# test-checker: allow not-a-rule -- tracked upstream #12",
+        "# test-checker: allow skip-added -- short",
+    ] {
+        assert!(!filter.should_skip(&rule_finding("skip-added", text)));
+        assert!(!filter.should_skip(&rule_finding("commented-out-test", text)));
+    }
+}
+
+#[test]
+fn is_line_suppressed_given_any_marker_returns_true() {
+    // then: the helper only answers "is the marker text here", not "is it valid"
+    assert!(is_line_suppressed("# test-checker: allow"));
+    assert!(is_line_suppressed(
+        "# test-checker: allow skip-added -- tracked upstream #12"
+    ));
+    assert!(!is_line_suppressed("# regular comment"));
 }
 
 #[test]
@@ -62,12 +88,15 @@ fn shebang_filter_given_shebang_returns_true() {
 }
 
 #[test]
-fn apply_filters_given_allowed_and_suppressed_returns_empty() {
+fn apply_filters_given_allowed_and_validly_suppressed_returns_empty() {
     // given
     let findings = vec![
         finding("# given"),
         finding("// @ts-ignore"),
-        finding("# test-checker: allow"),
+        rule_finding(
+            "skip-added",
+            "@pytest.mark.skip  # test-checker: allow skip-added -- tracked upstream #12",
+        ),
         finding("#!/usr/bin/env bats"),
     ];
 
@@ -76,6 +105,18 @@ fn apply_filters_given_allowed_and_suppressed_returns_empty() {
 
     // then
     assert_eq!(result.len(), 0);
+}
+
+#[test]
+fn apply_filters_given_bare_marker_keeps_the_finding() {
+    // given: the old file-wide marker no longer suppresses
+    let findings = vec![rule_finding("skip-added", "# test-checker: allow")];
+
+    // when
+    let result = apply_filters(&findings);
+
+    // then
+    assert_eq!(result.len(), 1);
 }
 
 #[test]
@@ -105,4 +146,8 @@ fn agent_memo_phrase_given_behavioral_text_returns_false() {
     assert!(!is_agent_memo_phrase("adds numbers"));
     assert!(!is_agent_memo_phrase("returns the sum of two numbers"));
     assert!(!is_agent_memo_phrase("rejects invalid input"));
+}
+
+fn rule_finding(rule: &str, text: &str) -> Finding {
+    Finding::new(rule, Confidence::High, "m", 1, "tests/test_app.py", text)
 }

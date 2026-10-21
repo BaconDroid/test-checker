@@ -1,4 +1,5 @@
 use serde_json::Value;
+use std::process::Command;
 use test_checker::api::{
     check_hook_input, check_hook_input_from_reader, check_hook_input_json,
     check_hook_input_with_options, detect_findings_json,
@@ -215,29 +216,114 @@ fn check_hook_input_given_multiedit_deletion_edit_exits_two() {
 }
 
 #[test]
-fn check_hook_input_given_added_suppression_marker_reports_allow_added() {
-    // given: a Write that introduces the opt-out marker
-    let input = r##"{"tool_name":"Write","tool_input":{"file_path":"tests/test_app.py","content":"# test-checker: allow\ndef test_sums():\n    @pytest.mark.skip\n    assert add(1, 2) == 3\n"}}"##;
+fn check_hook_input_given_added_marker_does_not_suppress_the_finding_it_was_added_with() {
+    // given: a Write that introduces a valid scoped marker on the same line as the skip
+    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/test_app.py","content":"def test_sums():\n    @pytest.mark.skip  # test-checker: allow skip-added -- tracked upstream #12\n    assert add(1, 2) == 3\n"}}"#;
 
     // when
     let result = check_hook_input(input, "");
 
-    // then: the marker does not suppress the change that added it
+    // then: the marker is inert for the change that added it, and is itself reported
     assert_eq!(result.exit_code, 2);
-    assert!(result.message.contains("allow-added"));
+    assert!(result.message.contains("allow-added"), "{}", result.message);
+    assert!(result.message.contains("skip-added"), "{}", result.message);
 }
 
 #[test]
-fn check_hook_input_given_preexisting_suppression_marker_skips() {
-    // given: an Edit whose marker already existed (not on an added line)
-    let input = r##"{"tool_name":"Edit","tool_input":{"file_path":"tests/test_app.py","old_string":"# test-checker: allow\ndef test_sums():\n    @pytest.mark.skip\n    assert add(1, 2) == 3\n","new_string":"# test-checker: allow\ndef test_sums():\n    @pytest.mark.skip\n    assert add(2, 2) == 4\n"}}"##;
+fn check_hook_input_given_preexisting_bare_marker_no_longer_suppresses() {
+    // given: an Edit that keeps the old file-wide marker while adding a skip below it
+    let input = r#"{"tool_name":"Edit","tool_input":{"file_path":"tests/test_app.py","old_string":"def test_sums():\n    # test-checker: allow\n    assert add(1, 2) == 3\n","new_string":"def test_sums():\n    # test-checker: allow\n    @pytest.mark.skip\n    assert add(1, 2) == 3\n"}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then: the old marker suppresses nothing, is reported, and names the replacement config once
+    assert_eq!(result.exit_code, 2);
+    assert!(
+        result.message.contains("allow-invalid"),
+        "{}",
+        result.message
+    );
+    assert!(result.message.contains("skip-added"), "{}", result.message);
+    assert_eq!(result.message.matches(".test-checker.json").count(), 1);
+}
+
+#[test]
+fn check_hook_input_given_valid_marker_on_the_same_line_suppresses() {
+    // given: a duplicate-test finding is anchored at the marked test's declaration line, and the
+    // edit touches the body with a blank line (so the body is re-analyzed but the marker is not new)
+    let old = "def helper():\n    return 1\n\ndef test_one():\n    assert helper() == 1\n\ndef test_two():  # test-checker: allow duplicate-test -- duplicates a shared fixture test #42\n    assert helper() == 1\n";
+    let new = "def helper():\n    return 1\n\ndef test_one():\n    assert helper() == 1\n\ndef test_two():  # test-checker: allow duplicate-test -- duplicates a shared fixture test #42\n    \n    assert helper() == 1\n";
+    let input = serde_json::json!({
+        "tool_name": "Edit",
+        "tool_input": { "file_path": "tests/test_app.py", "old_string": old, "new_string": new },
+    })
+    .to_string();
+
+    // when
+    let result = check_hook_input(&input, "");
+
+    // then
+    assert_eq!(result.exit_code, 0, "{}", result.message);
+    assert!(
+        !result.message.contains("duplicate-test"),
+        "{}",
+        result.message
+    );
+}
+
+#[test]
+fn check_hook_input_given_valid_marker_on_the_line_above_suppresses() {
+    // given: an Edit that keeps the marker and adds a skip on the line below it
+    let input = r#"{"tool_name":"Edit","tool_input":{"file_path":"tests/test_app.py","old_string":"def test_sums():\n    # test-checker: allow skip-added -- tracked upstream #12\n    assert add(1, 2) == 3\n","new_string":"def test_sums():\n    # test-checker: allow skip-added -- tracked upstream #12\n    @pytest.mark.skip\n    assert add(1, 2) == 3\n"}}"#;
 
     // when
     let result = check_hook_input(input, "");
 
     // then
-    assert_eq!(result.exit_code, 0);
-    assert!(result.message.contains("Suppressed by test-checker: allow"));
+    assert_eq!(result.exit_code, 0, "{}", result.message);
+}
+
+#[test]
+fn check_hook_input_given_unknown_rule_marker_suppresses_nothing_and_is_reported() {
+    // given
+    let input = r#"{"tool_name":"Edit","tool_input":{"file_path":"tests/test_app.py","old_string":"def test_sums():\n    # test-checker: allow not-a-rule -- tracked upstream #12\n    assert add(1, 2) == 3\n","new_string":"def test_sums():\n    # test-checker: allow not-a-rule -- tracked upstream #12\n    @pytest.mark.skip\n    assert add(1, 2) == 3\n"}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then
+    assert_eq!(result.exit_code, 2);
+    assert!(
+        result.message.contains("allow-invalid"),
+        "{}",
+        result.message
+    );
+    assert!(
+        result.message.contains("unknown rule"),
+        "{}",
+        result.message
+    );
+    assert!(result.message.contains("skip-added"), "{}", result.message);
+}
+
+#[test]
+fn check_hook_input_given_short_reason_marker_suppresses_nothing_and_is_reported() {
+    // given
+    let input = r#"{"tool_name":"Edit","tool_input":{"file_path":"tests/test_app.py","old_string":"def test_sums():\n    # test-checker: allow skip-added -- short\n    assert add(1, 2) == 3\n","new_string":"def test_sums():\n    # test-checker: allow skip-added -- short\n    @pytest.mark.skip\n    assert add(1, 2) == 3\n"}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then
+    assert_eq!(result.exit_code, 2);
+    assert!(
+        result.message.contains("allow-invalid"),
+        "{}",
+        result.message
+    );
+    assert!(result.message.contains("at least 12"), "{}", result.message);
+    assert!(result.message.contains("skip-added"), "{}", result.message);
 }
 
 #[test]
@@ -507,6 +593,33 @@ fn check_hook_input_given_write_with_uncommitted_file_shows_visible_skip() -> st
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
+#[test]
+fn check_hook_input_given_linter_directive_next_to_skip_still_reports_skip() {
+    // given: a skip marker and a linter directive on the same line
+    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/test_app.py","content":"def test_a():\n    @pytest.mark.skip  # noqa\n    assert x == 1\n"}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then: the directive does not silence the skip finding
+    assert_eq!(result.exit_code, 2);
+    assert!(result.message.contains("skip-added"));
+}
+
+#[test]
+fn check_hook_input_given_scoped_marker_added_reports_allow_added() {
+    // given: a valid scoped marker added in the same Write
+    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/test_app.py","content":"def test_a():\n    @pytest.mark.skip  # test-checker: allow skip-added -- tracked upstream #12\n    assert x == 1\n"}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then: the marker itself is reported and does not suppress the finding it accompanied
+    assert_eq!(result.exit_code, 2);
+    assert!(result.message.contains("allow-added"), "{}", result.message);
+    assert!(result.message.contains("skip-added"), "{}", result.message);
+}
+
 /// Options that keep low-confidence findings, so the harness/config rules are observable.
 fn low_confidence_options() -> Options {
     Options {
@@ -586,15 +699,235 @@ fn check_hook_input_from_reader_given_non_harness_edit_does_not_report_harness_e
     );
 }
 
+/// A unique temporary repo directory for a `.test-checker.json` fixture.
+fn temp_repo(label: &str) -> std::io::Result<std::path::PathBuf> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let path = std::env::temp_dir().join(format!(
+        "test-checker-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&path)?;
+    Ok(path)
+}
+
+fn write_payload(cwd: &std::path::Path, file_path: &str, content: &str) -> String {
+    serde_json::json!({
+        "tool_name": "Write",
+        "cwd": cwd.to_string_lossy(),
+        "tool_input": { "file_path": file_path, "content": content },
+    })
+    .to_string()
+}
+
 #[test]
-fn check_hook_input_given_linter_directive_next_to_skip_still_reports_skip() {
-    // given: a skip marker and a linter directive on the same line
-    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/test_app.py","content":"def test_a():\n    @pytest.mark.skip  # noqa\n    assert x == 1\n"}}"#;
+fn check_hook_input_given_committed_config_suppresses_the_listed_rule() -> std::io::Result<()> {
+    // given: a committed config whose glob and rules cover this file
+    let repo = temp_repo("config-suppresses")?;
+    std::fs::write(
+        repo.join(".test-checker.json"),
+        r#"{"allow":[{"glob":"tests/**","rules":["skip-added"],"reason":"legacy suite migration tracked in #42"}]}"#,
+    )?;
+    let content = "def test_a():\n    @pytest.mark.skip\n    assert x == 1\n";
+
+    // when
+    let result = check_hook_input(&write_payload(&repo, "tests/test_app.py", content), "");
+    let _ = std::fs::remove_dir_all(&repo);
+
+    // then
+    assert_eq!(result.exit_code, 0, "{}", result.message);
+    Ok(())
+}
+
+#[test]
+fn check_hook_input_given_config_entry_without_a_reason_suppresses_nothing() -> std::io::Result<()>
+{
+    // given: the same entry, but with an empty reason
+    let repo = temp_repo("config-no-reason")?;
+    std::fs::write(
+        repo.join(".test-checker.json"),
+        r#"{"allow":[{"glob":"tests/**","rules":["skip-added"],"reason":""}]}"#,
+    )?;
+    let content = "def test_a():\n    @pytest.mark.skip\n    assert x == 1\n";
+
+    // when
+    let result = check_hook_input(&write_payload(&repo, "tests/test_app.py", content), "");
+    let _ = std::fs::remove_dir_all(&repo);
+
+    // then
+    assert_eq!(result.exit_code, 2);
+    assert!(result.message.contains("skip-added"), "{}", result.message);
+    Ok(())
+}
+
+#[test]
+fn check_hook_input_given_config_glob_or_rule_mismatch_suppresses_nothing() -> std::io::Result<()> {
+    // given: a config that matches neither the path nor the rule under test
+    let repo = temp_repo("config-mismatch")?;
+    std::fs::write(
+        repo.join(".test-checker.json"),
+        r#"{"allow":[{"glob":"other/**","rules":["focus-added"],"reason":"another suite tracked in #42"}]}"#,
+    )?;
+    let content = "def test_a():\n    @pytest.mark.skip\n    assert x == 1\n";
+
+    // when
+    let result = check_hook_input(&write_payload(&repo, "tests/test_app.py", content), "");
+    let _ = std::fs::remove_dir_all(&repo);
+
+    // then
+    assert_eq!(result.exit_code, 2);
+    assert!(result.message.contains("skip-added"), "{}", result.message);
+    Ok(())
+}
+
+#[test]
+fn check_hook_input_given_config_edit_returns_a_high_finding() {
+    // given: an edit to the committed suppression config itself
+    let input = r#"{"tool_name":"Write","tool_input":{"file_path":".test-checker.json","content":"{\"allow\":[]}\n"}}"#;
 
     // when
     let result = check_hook_input(input, "");
 
-    // then: the directive does not silence the skip finding
+    // then
     assert_eq!(result.exit_code, 2);
-    assert!(result.message.contains("skip-added"));
+    assert!(
+        result.message.contains("config-edited"),
+        "{}",
+        result.message
+    );
+    assert!(
+        result.message.contains("confidence=\"high\""),
+        "{}",
+        result.message
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_lists_old_file_wide_markers() -> Result<(), Box<dyn std::error::Error>> {
+    // given: a repo with the old bare marker and the real binary on PATH
+    let repo = temp_repo("doctor")?;
+    std::fs::write(
+        repo.join("old_test.py"),
+        "def test_a():\n    # test-checker: allow\n    assert x == 1\n",
+    )?;
+
+    let binary = std::env::var("CARGO_BIN_EXE_test-checker")?;
+    let binary_dir = std::path::Path::new(&binary)
+        .parent()
+        .ok_or("binary has no parent directory")?;
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let combined = format!(
+        "{}:{}",
+        binary_dir.to_string_lossy(),
+        path.to_string_lossy()
+    );
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/doctor.sh");
+
+    // when
+    let output = Command::new("bash")
+        .arg(script)
+        .current_dir(&repo)
+        .env("PATH", combined)
+        .output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let _ = std::fs::remove_dir_all(&repo);
+
+    // then: the old marker is listed and the doctor still succeeds
+    assert!(
+        output.status.success(),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("old file-wide marker") && stdout.contains("old_test.py"),
+        "stdout: {stdout}"
+    );
+    Ok(())
+}
+
+#[test]
+fn check_hook_input_given_write_of_api_test_file_reports_no_allow_findings() -> std::io::Result<()>
+{
+    // given: the real tests/api.rs, whose raw-string payloads carry opt-out marker text. Its
+    // skip payloads are data too, so a root config suppresses only that unrelated rule.
+    let repo = temp_repo("api-file")?;
+    std::fs::write(
+        repo.join(".test-checker.json"),
+        r#"{"allow":[{"glob":"tests/api.rs","rules":["skip-added","source-grep-test"],"reason":"payload text is string data in this file"}]}"#,
+    )?;
+
+    // when: a default Write of the whole file
+    let result = check_hook_input(
+        &write_payload(&repo, "tests/api.rs", include_str!("api.rs")),
+        "",
+    );
+    let _ = std::fs::remove_dir_all(&repo);
+
+    // then: markers inside Rust string literals are invisible
+    assert_eq!(result.exit_code, 0, "{}", result.message);
+    assert!(!result.message.contains("allow-"), "{}", result.message);
+    Ok(())
+}
+
+#[test]
+fn check_hook_input_given_marker_inside_a_rust_string_literal_is_invisible() {
+    // given: a Write of a Rust source whose raw string merely contains the marker text
+    let content = "fn payload() {\n    let input = r#\"{\"content\":\"# test-checker: allow \"}\"#;\n    let skip = \"@pytest.mark.skip\";\n}\n";
+    let input = serde_json::json!({
+        "tool_name": "Write",
+        "tool_input": { "file_path": "tests/api.rs", "content": content },
+    })
+    .to_string();
+
+    // when
+    let result = check_hook_input(&input, "");
+
+    // then
+    assert_eq!(result.exit_code, 0, "{}", result.message);
+    assert!(!result.message.contains("allow-"), "{}", result.message);
+}
+
+#[test]
+fn check_hook_input_given_nested_config_does_not_suppress() -> std::io::Result<()> {
+    // given: a config below the root, which is not the committed file the hook reads
+    let repo = temp_repo("nested-config")?;
+    std::fs::create_dir_all(repo.join("tests/nested"))?;
+    std::fs::write(
+        repo.join("tests/nested/.test-checker.json"),
+        r#"{"allow":[{"glob":"tests/**","rules":["skip-added"],"reason":"nested config must not apply"}]}"#,
+    )?;
+    let content = "def test_a():\n    @pytest.mark.skip\n    assert x == 1\n";
+
+    // when
+    let result = check_hook_input(&write_payload(&repo, "tests/test_app.py", content), "");
+    let _ = std::fs::remove_dir_all(&repo);
+
+    // then
+    assert_eq!(result.exit_code, 2);
+    assert!(result.message.contains("skip-added"), "{}", result.message);
+    Ok(())
+}
+
+#[test]
+fn check_hook_input_given_nested_config_edit_returns_a_high_finding() {
+    // given: a config at depth is still the suppression config
+    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/nested/.test-checker.json","content":"{\"allow\":[]}\n"}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then
+    assert_eq!(result.exit_code, 2);
+    assert!(
+        result.message.contains("config-edited"),
+        "{}",
+        result.message
+    );
+    assert!(
+        result.message.contains("confidence=\"high\""),
+        "{}",
+        result.message
+    );
 }

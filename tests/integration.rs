@@ -23,7 +23,7 @@ fn full_pipeline_given_weakening_returns_formatted_message() {
 fn full_pipeline_given_suppression_marker_filters_out() {
     // given
     let detector = TestDetector::new();
-    let code = "def test_sums():\n    assert x == 1\n    # assert x == 2  # test-checker: allow\n";
+    let code = "def test_sums():\n    assert x == 1\n    # assert x == 2  # test-checker: allow commented-out-test -- tracked upstream #12\n";
 
     // when
     let findings = detector.detect(code, "tests/test_app.py", true, true);

@@ -21,8 +21,11 @@ memory. So the target is "lean", not "empty".
   contract). Kept, with its intent readable from its name.
 - **Integrity**: a test must never be weakened, skipped, focused or deleted to get green.
   This holds even when the suite is lean.
-- **Escape hatch**: the `test-checker: allow` marker suppresses findings in the analyzed text (the
-  whole `Write` content, or the edited fragment). A marker added in the same change that triggers the
+- **Escape hatch**: `test-checker: allow <rule> -- <reason>` suppresses that rule's finding on the
+  marker's line or the line above (known rule, reason >= 12 characters). An invalid marker suppresses
+  nothing and is reported (`allow-invalid`). File-wide suppression lives in a committed
+  `.test-checker.json` (`glob`, `rules`, required `reason`), never in the source comment; editing that
+  config is a high `config-edited` finding. A marker added in the same change that triggers the
   finding is itself reported (`allow-added`).
 
 ## Verdict and kind
