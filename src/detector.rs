@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Instant;
 
 use tree_sitter::{Query, QueryCursor, StreamingIterator};
 
@@ -18,6 +19,44 @@ struct Runtime {
 
 static RUNTIMES: LazyLock<Mutex<HashMap<String, Arc<Runtime>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Unit-test seam for the internal-failure path. Compiled only into the crate's unit tests, so no
+/// binary, environment variable, or command-line flag can reach it.
+#[cfg(test)]
+pub(crate) static FORCE_INTERNAL_FAILURE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Unit-test seam for the parse-budget path. Like [`FORCE_INTERNAL_FAILURE`], it exists only in the
+/// crate's unit tests and is unreachable from any binary, environment variable, or flag.
+#[cfg(test)]
+pub(crate) static FORCE_BUDGET_EXCEEDED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Why a detection run produced no findings to judge.
+///
+/// A `BudgetExceeded` is a deliberate fail-open skip; an `Internal` failure means the check never
+/// happened and must not be reported as success.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum DetectError {
+    /// The per-parse time budget aborted parsing.
+    BudgetExceeded,
+    /// The detector could not run: a missing runtime, an uncompilable query, or a failed parse.
+    Internal(String),
+}
+
+/// The detector's findings, or the reason the check could not run.
+pub(crate) type DetectResult = Result<Vec<Finding>, DetectError>;
+
+impl std::fmt::Display for DetectError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BudgetExceeded => formatter.write_str("parse budget exceeded"),
+            Self::Internal(reason) => formatter.write_str(reason),
+        }
+    }
+}
+
+impl std::error::Error for DetectError {}
 
 #[derive(Clone, Debug)]
 struct Body {
@@ -40,6 +79,9 @@ impl TestDetector {
     }
 
     /// Analyze a whole file's content (`Write`): every line is treated as newly added.
+    ///
+    /// This compatibility wrapper returns an empty list when the check cannot run. The hook path
+    /// (`src/api.rs`) calls [`Self::detect_checked`] so a failure is never read as a clean pass.
     #[must_use]
     pub fn detect(
         &self,
@@ -48,24 +90,40 @@ impl TestDetector {
         include_commented_out_tests: bool,
         include_body_tests: bool,
     ) -> Vec<Finding> {
+        self.detect_checked(
+            content,
+            file_path,
+            include_commented_out_tests,
+            include_body_tests,
+        )
+        .unwrap_or_default()
+    }
+
+    /// Analyze a whole file, reporting a failed check instead of degrading it to no findings.
+    ///
+    /// The detector is stateless, so `self` is only here to mirror the public method.
+    #[allow(clippy::unused_self)]
+    pub(crate) fn detect_checked(
+        &self,
+        content: &str,
+        file_path: &str,
+        include_commented_out_tests: bool,
+        include_body_tests: bool,
+    ) -> DetectResult {
         if !(include_commented_out_tests || include_body_tests) {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let Some(name) = language_for_path(file_path) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        let Some(runtime) = runtime_by_name(name) else {
-            return Vec::new();
-        };
+        let runtime = runtime_by_name(name)?;
         let source = content.as_bytes();
-        let Some(tree) = parse_with_runtime(&runtime, source) else {
-            return Vec::new();
-        };
+        let tree = parse_with_runtime(&runtime, source, file_path)?;
 
         let mut findings = Vec::new();
         if include_commented_out_tests {
             let mut comments = Vec::new();
-            collect_comments(&runtime, &tree, content, 0, &mut comments);
+            collect_comments(&runtime, &tree, content, 0, file_path, &mut comments)?;
             findings.extend(commented_out_findings(
                 file_path,
                 &comments,
@@ -83,10 +141,13 @@ impl TestDetector {
                 ));
             }
         }
-        dedupe(findings)
+        Ok(dedupe(findings))
     }
 
     /// Analyze an edit: report only weakening newly introduced by `new_string`.
+    ///
+    /// This compatibility wrapper returns an empty list when the check cannot run. The hook path
+    /// (`src/api.rs`) calls [`Self::detect_edit_checked`] so a failure is never read as a clean pass.
     #[must_use]
     pub fn detect_edit(
         &self,
@@ -96,38 +157,67 @@ impl TestDetector {
         include_commented_out_tests: bool,
         include_body_tests: bool,
     ) -> Vec<Finding> {
+        self.detect_edit_checked(
+            old_string,
+            new_string,
+            file_path,
+            include_commented_out_tests,
+            include_body_tests,
+        )
+        .unwrap_or_default()
+    }
+
+    /// Analyze an edit, reporting a failed check instead of degrading it to no findings.
+    ///
+    /// The detector is stateless, so `self` is only here to mirror the public method.
+    #[allow(clippy::unused_self)]
+    pub(crate) fn detect_edit_checked(
+        &self,
+        old_string: &str,
+        new_string: &str,
+        file_path: &str,
+        include_commented_out_tests: bool,
+        include_body_tests: bool,
+    ) -> DetectResult {
         if !(include_commented_out_tests || include_body_tests) {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let Some(name) = language_for_path(file_path) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        let Some(runtime) = runtime_by_name(name) else {
-            return Vec::new();
-        };
+        let runtime = runtime_by_name(name)?;
         let source = new_string.as_bytes();
-        let Some(tree) = parse_with_runtime(&runtime, source) else {
-            return Vec::new();
-        };
+        let tree = parse_with_runtime(&runtime, source, file_path)?;
         // Parse the old fragment once: it feeds both comment capture and old-body capture.
         let old_tree = if old_string.is_empty() {
             None
         } else {
-            parse_with_runtime(&runtime, old_string.as_bytes())
+            Some(parse_with_runtime(
+                &runtime,
+                old_string.as_bytes(),
+                file_path,
+            )?)
         };
 
         let mut findings = Vec::new();
         if include_commented_out_tests {
             let mut old_comments = Vec::new();
             if let Some(old_tree) = &old_tree {
-                collect_comments(&runtime, old_tree, old_string, 0, &mut old_comments);
+                collect_comments(
+                    &runtime,
+                    old_tree,
+                    old_string,
+                    0,
+                    file_path,
+                    &mut old_comments,
+                )?;
             }
             let old_texts: HashSet<String> = old_comments
                 .iter()
                 .map(|(_, text)| text.trim().to_lowercase())
                 .collect();
             let mut new_comments = Vec::new();
-            collect_comments(&runtime, &tree, new_string, 0, &mut new_comments);
+            collect_comments(&runtime, &tree, new_string, 0, file_path, &mut new_comments)?;
             findings.extend(commented_out_findings(file_path, &new_comments, &old_texts));
         }
         if include_body_tests {
@@ -161,7 +251,7 @@ impl TestDetector {
                 }
             }
         }
-        dedupe(findings)
+        Ok(dedupe(findings))
     }
 }
 
@@ -204,19 +294,34 @@ fn removed_test_findings(
     findings
 }
 
-fn runtime_by_name(name: &str) -> Option<Arc<Runtime>> {
-    let Ok(mut runtimes) = RUNTIMES.lock() else {
-        return None;
-    };
-    if let Some(runtime) = runtimes.get(name) {
-        return Some(Arc::clone(runtime));
+fn runtime_by_name(name: &str) -> Result<Arc<Runtime>, DetectError> {
+    #[cfg(test)]
+    if FORCE_INTERNAL_FAILURE.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(DetectError::Internal("forced internal failure".to_owned()));
     }
 
-    let language = tree_sitter_language_pack::get_language(name).ok()?;
-    let comment = Query::new(&language, engine::comment_query(name)).ok()?;
-    let body = test_query(name).and_then(|source| Query::new(&language, source).ok());
-    let injection = tree_sitter_language_pack::get_injections_query(name)
-        .and_then(|source| Query::new(&language, source).ok());
+    let Ok(mut runtimes) = RUNTIMES.lock() else {
+        return Err(DetectError::Internal(
+            "language runtime unavailable: runtime cache poisoned".to_owned(),
+        ));
+    };
+    if let Some(runtime) = runtimes.get(name) {
+        return Ok(Arc::clone(runtime));
+    }
+
+    let unavailable = || DetectError::Internal(format!("language runtime unavailable: {name}"));
+    let uncompilable = || DetectError::Internal(format!("query compilation failed: {name}"));
+
+    let language = tree_sitter_language_pack::get_language(name).map_err(|_| unavailable())?;
+    let comment = Query::new(&language, engine::comment_query(name)).map_err(|_| uncompilable())?;
+    let body = match test_query(name) {
+        Some(source) => Some(Query::new(&language, source).map_err(|_| uncompilable())?),
+        None => None,
+    };
+    let injection = match tree_sitter_language_pack::get_injections_query(name) {
+        Some(source) => Some(Query::new(&language, source).map_err(|_| uncompilable())?),
+        None => None,
+    };
     let runtime = Arc::new(Runtime {
         name: name.to_owned(),
         language,
@@ -225,11 +330,37 @@ fn runtime_by_name(name: &str) -> Option<Arc<Runtime>> {
         injection_query: injection,
     });
     runtimes.insert(name.to_owned(), Arc::clone(&runtime));
-    Some(runtime)
+    Ok(runtime)
 }
 
-fn parse_with_runtime(runtime: &Runtime, source: &[u8]) -> Option<tree_sitter::Tree> {
-    engine::parse_cached(&runtime.name, &runtime.language, source)
+/// Parse `source`, classifying a failure by how long the attempt took.
+///
+/// `engine::parse_cached` returns `None` both when the per-parse time budget aborts and when the
+/// parser cannot be configured, and it exposes no flag distinguishing the two. A precise abort flag
+/// would change `engine.rs` (shared byte-for-byte with `comment-checker`).
+///
+/// Ambiguity resolves toward skipping: only a `None` that arrives **before half** the budget is
+/// provably a fast failure, because a budget abort needs the progress callback to fire and the
+/// engine only stops once it observes `elapsed > PARSE_TIME_BUDGET`. A `None` at or after half the
+/// budget could be either a late hard failure or an abort observed on an earlier tick, so it is
+/// reported as `BudgetExceeded` (visible exit 0) instead of `Internal` (exit 1).
+fn parse_with_runtime(
+    runtime: &Runtime,
+    source: &[u8],
+    file_path: &str,
+) -> Result<tree_sitter::Tree, DetectError> {
+    #[cfg(test)]
+    if FORCE_BUDGET_EXCEEDED.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(DetectError::BudgetExceeded);
+    }
+    let started = Instant::now();
+    match engine::parse_cached(&runtime.name, &runtime.language, source) {
+        Some(tree) => Ok(tree),
+        None if started.elapsed() >= engine::PARSE_TIME_BUDGET / 2 => {
+            Err(DetectError::BudgetExceeded)
+        }
+        None => Err(DetectError::Internal(format!("parse failed: {file_path}"))),
+    }
 }
 
 fn collect_comments(
@@ -237,14 +368,15 @@ fn collect_comments(
     tree: &tree_sitter::Tree,
     content: &str,
     row_offset: usize,
+    file_path: &str,
     out: &mut Vec<(usize, String)>,
-) {
+) -> Result<(), DetectError> {
     for (row, _kind, text) in
         engine::capture_texts(&runtime.comment_query, tree, content.as_bytes())
     {
         out.push((row + 1 + row_offset, text));
     }
-    collect_injected_comments(runtime, tree, content, row_offset, out);
+    collect_injected_comments(runtime, tree, content, row_offset, file_path, out)
 }
 
 fn collect_injected_comments(
@@ -252,28 +384,39 @@ fn collect_injected_comments(
     tree: &tree_sitter::Tree,
     content: &str,
     row_offset: usize,
+    file_path: &str,
     out: &mut Vec<(usize, String)>,
-) {
+) -> Result<(), DetectError> {
     let Some(query) = &runtime.injection_query else {
-        return;
+        return Ok(());
     };
     for injection in engine::injection_regions(query, tree, content.as_bytes()) {
-        let Some(inner) = runtime_by_name(&injection.language) else {
+        let Some(inner) = injected_runtime(&injection.language)? else {
             continue;
         };
-        let Some(inner_tree) =
-            engine::parse_cached(&inner.name, &inner.language, injection.content.as_bytes())
-        else {
-            continue;
-        };
+        let inner_tree = parse_with_runtime(&inner, injection.content.as_bytes(), file_path)?;
         collect_comments(
             &inner,
             &inner_tree,
             &injection.content,
             injection.row + row_offset,
+            file_path,
             out,
-        );
+        )?;
     }
+    Ok(())
+}
+
+/// The runtime for an inner language an injection query names, or `None` when the pack has no
+/// grammar for it.
+///
+/// Host grammars inject regions as `comment`/`jsdoc`, which the path resolver never selects:
+/// skipping those is not a failure. A supported grammar's own runtime or parse failure is.
+fn injected_runtime(name: &str) -> Result<Option<Arc<Runtime>>, DetectError> {
+    if tree_sitter_language_pack::get_language(name).is_err() {
+        return Ok(None);
+    }
+    runtime_by_name(name).map(Some)
 }
 
 fn commented_out_findings(

@@ -144,7 +144,7 @@ Clean runs print `[test-checker] Success: No problematic tests found`; skipped r
 |------|---------|
 | 0 | pass, or a deliberate skip (skips print a visible `Skipping:` line) |
 | 2 | at least one finding remains after filters and the confidence gate |
-| 1 | **wrapper only**: the binary was missing, so nothing was checked. The binary itself never exits `1` |
+| 1 | did not run - an internal failure, or the wrapper could not run the binary; nothing was checked |
 
 Malformed, empty, unknown-tool, and non-test payloads exit `0` with a `Skipping:` line. A panic is
 not caught: release builds use `panic = "abort"`, so a crash aborts with a non-zero status.

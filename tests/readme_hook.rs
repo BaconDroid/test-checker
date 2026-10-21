@@ -6,8 +6,8 @@
 #![cfg(unix)]
 
 use std::io::Write;
-use std::os::unix::fs::symlink;
-use std::path::Path;
+use std::os::unix::fs::{PermissionsExt, symlink};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -30,8 +30,8 @@ fn readme_command() -> Result<String, Box<dyn std::error::Error>> {
     Ok(rest[..close].to_string())
 }
 
-/// A PATH that cannot resolve the hook binary but still resolves the wrapper's `cat`.
-fn path_without_the_binary() -> Result<String, Box<dyn std::error::Error>> {
+/// A fresh temp dir that resolves the wrapper's `cat`.
+fn path_dir_with_cat() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let cat = std::env::var("PATH")?
         .split(':')
         .map(|dir| Path::new(dir).join("cat"))
@@ -46,6 +46,24 @@ fn path_without_the_binary() -> Result<String, Box<dyn std::error::Error>> {
     let link = dir.join("cat");
     let _ = std::fs::remove_file(&link);
     symlink(&cat, &link)?;
+    Ok(dir)
+}
+
+/// A PATH that cannot resolve the hook binary but still resolves the wrapper's `cat`.
+fn path_without_the_binary() -> Result<String, Box<dyn std::error::Error>> {
+    Ok(path_dir_with_cat()?.to_string_lossy().to_string())
+}
+
+/// A PATH whose `test-checker` is a stub that fails like a broken check: it drains stdin, prints
+/// its own marker to stderr, and exits 1.
+fn path_with_failing_binary(marker: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let dir = path_dir_with_cat()?;
+    let stub = dir.join("test-checker");
+    std::fs::write(
+        &stub,
+        format!("#!/bin/sh\ncat >/dev/null\necho '{marker}' >&2\nexit 1\n"),
+    )?;
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))?;
     Ok(dir.to_string_lossy().to_string())
 }
 
@@ -119,6 +137,28 @@ fn documented_wiring_passes_the_binary_exit_codes_through() -> TestResult {
         Some(2),
         "stderr: {}",
         String::from_utf8_lossy(&trigger.stderr)
+    );
+    Ok(())
+}
+
+/// The wrapper must `exec` the binary when it exists: the binary's own exit 1 and stderr pass
+/// through unchanged, and the wrapper's missing-binary line is not added.
+#[test]
+fn documented_wiring_passes_an_internal_failure_through_unchanged() -> TestResult {
+    // given: a stub binary that reports its own internal failure
+    let marker = "stub-internal-failure-marker-7f3a";
+    let command = readme_command()?;
+
+    // when
+    let output = run(&command, &path_with_failing_binary(marker)?, b"{}")?;
+
+    // then: the stub's exit code and stderr survive, with no wrapper fallback text
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
+    assert!(stderr.contains(marker), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("did not run - nothing checked this write."),
+        "the wrapper's missing-binary line leaked into a present-binary run: {stderr}"
     );
     Ok(())
 }
