@@ -48,6 +48,17 @@ test-checker reports; it does not delete tests by itself. Removal is meant to ha
 cleanup pass driven by the plugin, on a list a human approves. No cleanup or stripping feature is
 implemented in this tree.
 
+## Cleanup candidates
+
+`scripts/cleanup-candidates [root]` feeds each test file to the real binary as a whole-file `Write`
+and aggregates the **file-level** superfluity findings (`duplicate-test`, `near-duplicate-test`,
+`tautological-assertion`, `no-assertion`, `source-grep-test`, `gutted-test`, `echo-test`,
+`mirror-implementation-test`). It prints JSON (`{file, test_name, line, rule, confidence, reason}`)
+sorted by confidence, then a summary on stderr, and always exits 0.
+
+It never modifies files. Removal remains a separate, human-approved step. Diff-based integrity rules
+are not part of the report.
+
 ## install
 
 This fork publishes no npm package or Homebrew formula. Build the current code from source:
