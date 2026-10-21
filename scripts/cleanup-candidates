@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+"""Report test-checker candidates for superfluous tests. Never modifies files.
+
+For each test file this feeds the real `test-checker` binary a Write-style payload with
+`is_test_file: true` and aggregates the file-level findings (duplicate, near-duplicate,
+tautological, no-assertion, source-grep, hollow, echo-test, mirror-implementation-test).
+
+Removal is a separate step, performed by a human-approved cleanup pass. This script only reports;
+it always exits 0 unless the arguments are invalid.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+from xml.etree import ElementTree
+
+SKIP_DIRS = {
+    ".git",
+    "target",
+    "node_modules",
+    "dist",
+    "build",
+    ".venv",
+    "__pycache__",
+    ".next",
+    "coverage",
+}
+TEST_NAME = re.compile(
+    r"(^test_.*\.(py|rb|js|ts|tsx|jsx)$)"
+    r"|(_test\.(py|rb|go)$)"
+    r"|(\.(test|spec)\.(js|ts|tsx|jsx)$)"
+    r"|(^test.*\.(java|kt)$)"
+    r"|(^.*Test\.(java|kt)$)",
+    re.IGNORECASE,
+)
+RANK = {"high": 3, "medium": 2, "low": 1}
+
+# Only file-level superfluity rules. Diff-based integrity rules (skip-added, weakened-assertion,
+# swallowed-error, …) do not describe a superfluous test and are excluded.
+CANDIDATE_RULES = {
+    "duplicate-test",
+    "near-duplicate-test",
+    "tautological-assertion",
+    "no-assertion",
+    "source-grep-test",
+    "gutted-test",
+    "echo-test",
+    "mirror-implementation-test",
+}
+
+
+def is_test_file(path: Path, root: Path) -> bool:
+    if TEST_NAME.search(path.name):
+        return True
+    parts = set(path.relative_to(root).parts[:-1])
+    return bool(parts & {"tests", "test", "__tests__", "spec"})
+
+
+def test_name_at(lines: list[str], line_number: int) -> str:
+    index = min(max(line_number, 1), len(lines)) - 1
+    for i in range(index, -1, -1):
+        text = lines[i]
+        for pattern in (r"\bdef\s+(test\w*)\s*\(", r"\bfunc\s+(Test\w*)\s*\("):
+            match = re.search(pattern, text)
+            if match:
+                return match.group(1)
+        match = re.search(r"\b(?:it|test)\s*\(\s*['\"]([^'\"]+)['\"]", text)
+        if match:
+            return match.group(1)
+        match = re.search(r"\bfn\s+(\w+)\s*\(", text)
+        if match and any(
+            "#[test" in lines[j] or "#[tokio::test" in lines[j]
+            for j in range(max(0, i - 3), i + 1)
+        ):
+            return match.group(1)
+        match = re.search(r"\b(?:void|fun)\s+(\w+)\s*\(", text)
+        if match and any("@Test" in lines[j] for j in range(max(0, i - 3), i + 1)):
+            return match.group(1)
+    return ""
+
+
+def findings_for(binary: str, root: Path, path: Path) -> list[dict[str, object]]:
+    content = path.read_text(encoding="utf-8", errors="replace")
+    payload = json.dumps(
+        {
+            "tool_name": "Write",
+            "is_test_file": True,
+            "tool_input": {"file_path": str(path.relative_to(root)), "content": content},
+        }
+    ).encode()
+    proc = subprocess.run(
+        [binary, "--min-confidence", "low"], input=payload, capture_output=True
+    )
+    stderr = proc.stderr.decode("utf-8", errors="replace")
+    match = re.search(r"<findings\b.*?</findings>", stderr, re.S)
+    if not match:
+        return []
+    try:
+        tree = ElementTree.fromstring(match.group(0))
+    except ElementTree.ParseError:
+        return []
+    found: list[dict[str, object]] = []
+    for element in tree.findall("finding"):
+        rule = element.get("rule", "")
+        if rule not in CANDIDATE_RULES:
+            continue
+        try:
+            line = int(element.get("line-number", "0"))
+        except ValueError:
+            line = 0
+        found.append(
+            {
+                "file": str(path.relative_to(root)),
+                "test_name": "",
+                "line": line,
+                "rule": rule,
+                "confidence": element.get("confidence", ""),
+                "reason": element.get("reason", ""),
+            }
+        )
+    return found
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("root", nargs="?", default=".", help="repository to scan (default: .)")
+    parser.add_argument(
+        "--binary", default="test-checker", help="test-checker binary (default: PATH)"
+    )
+    args = parser.parse_args()
+    root = Path(args.root).resolve()
+    if not root.is_dir():
+        print(f"cleanup-candidates: {root} is not a directory", file=sys.stderr)
+        return 2
+
+    files: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames if name not in SKIP_DIRS]
+        for name in filenames:
+            path = Path(dirpath) / name
+            if is_test_file(path, root):
+                files.append(path)
+    files.sort()
+
+    candidates: list[dict[str, object]] = []
+    for path in files:
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for finding in findings_for(args.binary, root, path):
+            finding["test_name"] = test_name_at(lines, int(finding["line"]))
+            candidates.append(finding)
+
+    candidates.sort(
+        key=lambda f: (
+            -RANK.get(str(f["confidence"]), 0),
+            str(f["file"]),
+            int(f["line"]),
+            str(f["rule"]),
+        )
+    )
+    by_rule: dict[str, int] = {}
+    by_confidence: dict[str, int] = {}
+    for candidate in candidates:
+        rule = str(candidate["rule"])
+        confidence = str(candidate["confidence"])
+        by_rule[rule] = by_rule.get(rule, 0) + 1
+        by_confidence[confidence] = by_confidence.get(confidence, 0) + 1
+
+    report = {
+        "root": str(root),
+        "files_scanned": len(files),
+        "files_with_candidates": len({str(c["file"]) for c in candidates}),
+        "total_candidates": len(candidates),
+        "candidates_by_rule": dict(sorted(by_rule.items())),
+        "candidates_by_confidence": dict(sorted(by_confidence.items())),
+        "candidates": candidates,
+    }
+    print(json.dumps(report, indent=2))
+    print(
+        f"cleanup-candidates: {len(candidates)} candidate(s) in "
+        f"{report['files_with_candidates']}/{len(files)} test file(s).",
+        file=sys.stderr,
+    )
+    for rule, count in sorted(by_rule.items()):
+        print(f"  {rule}: {count}", file=sys.stderr)
+    print(
+        "cleanup-candidates: report only; removal is a separate, human-approved step.",
+        file=sys.stderr,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
