@@ -316,14 +316,25 @@ fn evaluate(
         ));
     }
 
-    let mut result = gate_and_format(&findings, custom_prompt, min_confidence);
-    if let Some(reason) = baseline_note {
-        if result.exit_code == EXIT_PASS {
-            return skip(reason);
+    apply_baseline_note(
+        gate_and_format(&findings, custom_prompt, min_confidence),
+        baseline_note,
+    )
+}
+
+/// Fold the Write-baseline skip note into the outcome: a clean result becomes a visible skip, and a
+/// findings result gets the note prepended.
+fn apply_baseline_note(outcome: HookOutcome, baseline_note: Option<&'static str>) -> HookOutcome {
+    let Some(reason) = baseline_note else {
+        return outcome;
+    };
+    match outcome {
+        HookOutcome::Clean => skip(reason),
+        HookOutcome::Findings(message) => {
+            HookOutcome::Findings(format!("[test-checker] Skipping: {reason}\n{message}"))
         }
-        result.message = format!("[test-checker] Skipping: {reason}\n{}", result.message);
+        other => other,
     }
-    result
 }
 
 /// The baseline a `Write` should compare against: HEAD only for test files in supported languages.
