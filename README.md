@@ -291,6 +291,8 @@ cargo bench -p test-checker --bench test_checker --no-run
 node --test npm/test-checker/*.test.js
 ```
 
+`eval/baseline.py` is a manual perf gate; it is not run in CI. See `eval/README.md`.
+
 ## License
 
 MIT.
