@@ -832,3 +832,129 @@ fn detect_edit_given_added_comment_only_variant_of_unchanged_test_reports_near_d
         "findings: {findings:?}"
     );
 }
+
+#[test]
+fn detect_given_field_round_trip_reports_echo_test() {
+    // given: a DTO is constructed with a value and read back unchanged
+    let detector = TestDetector::new();
+    let source = "def test_dto():\n    dto = Dto(name)\n    assert dto.name == name\n";
+
+    // when
+    let findings = detector.detect(source, "tests/test_dto.py", true, true);
+
+    // then
+    assert!(
+        findings.iter().any(|finding| finding.rule == "echo-test"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_given_mirrored_expression_reports_mirror_implementation_test() {
+    // given: the expected value repeats the call's own arithmetic
+    let detector = TestDetector::new();
+    let source = "it('adds', () => {\n  expect(add(a, b)).toBe(a + b);\n});\n";
+
+    // when
+    let findings = detector.detect(source, "tests/app.test.js", true, true);
+
+    // then
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "mirror-implementation-test"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_edit_given_incomplete_fragment_does_not_report_whole_test_rules() {
+    // given: the new fragment has a captured test but no closing delimiter
+    let detector = TestDetector::new();
+    let old = "it('x', () => {\n  expect(add(1, 2)).toBe(3);\n});\n";
+    let new = "it('x', () => {\n  dto.name = name;\n";
+
+    // when
+    let findings = detector.detect_edit(old, new, "tests/app.test.js", true, true);
+
+    // then: no whole-test rule may fire on an unreliable fragment
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "no-assertion" || finding.rule == "echo-test"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_edit_given_added_echo_line_reports_echo_test() {
+    // given: the edit introduces the write whose value is read back unchanged
+    let detector = TestDetector::new();
+    let old =
+        "it('stores', () => {\n  dto.set_name(other);\n  expect(dto.get_name()).toBe(name);\n});\n";
+    let new =
+        "it('stores', () => {\n  dto.set_name(name);\n  expect(dto.get_name()).toBe(name);\n});\n";
+
+    // when
+    let findings = detector.detect_edit(old, new, "tests/app.test.js", true, true);
+
+    // then
+    assert!(
+        findings.iter().any(|finding| finding.rule == "echo-test"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_edit_given_unchanged_echo_test_does_not_report_echo_test() {
+    // given: an echo pattern exists, but the edit touches an unrelated assertion
+    let detector = TestDetector::new();
+    let old = "it('stores', () => {\n  dto.set_name(name);\n  expect(dto.get_name()).toBe(name);\n  expect(other).toBe(1);\n});\n";
+    let new = "it('stores', () => {\n  dto.set_name(name);\n  expect(dto.get_name()).toBe(name);\n  expect(other).toBe(2);\n});\n";
+
+    // when
+    let findings = detector.detect_edit(old, new, "tests/app.test.js", true, true);
+
+    // then: the edit did not introduce the echo pattern
+    assert!(
+        !findings.iter().any(|finding| finding.rule == "echo-test"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_given_incomplete_test_fragment_does_not_report_no_assertion() {
+    // given: a Write whose test node is incomplete (missing closing delimiters)
+    let detector = TestDetector::new();
+    let source = "it('x', () => {\n  dto.name = name;\n";
+
+    // when
+    let findings = detector.detect(source, "tests/app.test.js", true, true);
+
+    // then
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "no-assertion"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_edit_given_incomplete_new_fragment_does_not_report_test_removed() {
+    // given: the new fragment is a partial test, so absence of the old test proves nothing
+    let detector = TestDetector::new();
+    let old = "it('old', () => {\n  expect(1).toBe(1);\n});\n";
+    let new = "it('new', () => {\n";
+
+    // when
+    let findings = detector.detect_edit(old, new, "tests/app.test.js", true, true);
+
+    // then
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "test-removed"),
+        "findings: {findings:?}"
+    );
+}
