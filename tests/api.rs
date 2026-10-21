@@ -416,6 +416,97 @@ fn check_hook_input_given_edit_with_edits_array_analyzes_deletion() {
     assert!(result.message.contains("gutted-test"));
 }
 
+fn run_binary(payload: &str, baseline: bool) -> std::io::Result<std::process::Output> {
+    use std::io::Write;
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_test-checker"))
+        .env(
+            "TEST_CHECKER_WRITE_BASELINE",
+            if baseline { "1" } else { "0" },
+        )
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    let Some(stdin) = child.stdin.as_mut() else {
+        return Err(std::io::Error::other("checker stdin unavailable"));
+    };
+    stdin.write_all(payload.as_bytes())?;
+    child.wait_with_output()
+}
+
+fn git(dir: &std::path::Path, args: &[&str]) -> std::io::Result<()> {
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .status()?;
+    assert!(status.success(), "git {args:?}");
+    Ok(())
+}
+
+fn baseline_dir(label: &str) -> std::io::Result<std::path::PathBuf> {
+    let dir = std::env::temp_dir().join(format!("tc-baseline-{label}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("tests"))?;
+    Ok(dir)
+}
+
+#[test]
+fn check_hook_input_given_write_with_head_baseline_reports_removed_assertion() -> std::io::Result<()>
+{
+    // given: a committed test file, then a Write that removes the assertion
+    let dir = baseline_dir("head")?;
+    std::fs::write(
+        dir.join("tests/test_app.py"),
+        "def test_a():\n    assert x == 1\n",
+    )?;
+    git(&dir, &["init", "-q"])?;
+    git(&dir, &["add", "."])?;
+    git(&dir, &["commit", "-q", "-m", "init"])?;
+    let input = format!(
+        r#"{{"tool_name":"Write","cwd":{:?},"tool_input":{{"file_path":"tests/test_app.py","content":"def test_a():\n    pass\n"}}}}"#,
+        dir.to_string_lossy()
+    );
+
+    // when: the opt-in baseline is enabled for this invocation
+    let output = run_binary(&input, true)?;
+
+    // then: the diff rules ran against HEAD
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "stderr: {stderr}");
+    assert!(
+        stderr.contains("assertion-removed") || stderr.contains("gutted-test"),
+        "stderr: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+#[test]
+fn check_hook_input_given_write_with_uncommitted_file_shows_visible_skip() -> std::io::Result<()> {
+    // given: a git repo whose test file is not committed
+    let dir = baseline_dir("untracked")?;
+    git(&dir, &["init", "-q"])?;
+    let input = format!(
+        r#"{{"tool_name":"Write","cwd":{:?},"tool_input":{{"file_path":"tests/test_app.py","content":"def test_a():\n    assert x == 1\n"}}}}"#,
+        dir.to_string_lossy()
+    );
+
+    // when: the opt-in baseline is enabled for this invocation
+    let output = run_binary(&input, true)?;
+
+    // then: no diff rules, but the skip is visible
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
+    assert!(stderr.contains("Skipping:"), "stderr: {stderr}");
+    assert!(stderr.contains("not committed"), "stderr: {stderr}");
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
 /// Options that keep low-confidence findings, so the harness/config rules are observable.
 fn low_confidence_options() -> Options {
     Options {

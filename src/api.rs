@@ -134,6 +134,8 @@ struct HookInput {
     tool_input: ToolInput,
     #[serde(default, alias = "isTestFile")]
     is_test_file: Option<bool>,
+    #[serde(default, deserialize_with = "null_default")]
+    cwd: String,
 }
 
 #[must_use]
@@ -228,6 +230,7 @@ fn evaluate(
     }
 
     let detector = TestDetector::new();
+    let mut baseline_note: Option<&'static str> = None;
     let detection: DetectResult = match tool {
         ToolKind::Edit if hook_input.tool_input.edits.is_empty() => {
             let old_string = hook_input.tool_input.old_string.as_str();
@@ -269,12 +272,31 @@ fn evaluate(
             if content.is_empty() {
                 return skip("No content to check");
             }
-            detector.detect_checked(
-                content,
-                file_path,
-                include_commented_out_tests,
-                include_body_tests,
-            )
+            // Only a test file in a supported language has diff rules to compare with HEAD.
+            match write_baseline(hook_input, file_path) {
+                Baseline::Head(head) => detector.detect_edit_checked(
+                    &head,
+                    content,
+                    file_path,
+                    include_commented_out_tests,
+                    include_body_tests,
+                ),
+                Baseline::Skipped(reason) => {
+                    baseline_note = Some(reason);
+                    detector.detect_checked(
+                        content,
+                        file_path,
+                        include_commented_out_tests,
+                        include_body_tests,
+                    )
+                }
+                Baseline::NotRequested => detector.detect_checked(
+                    content,
+                    file_path,
+                    include_commented_out_tests,
+                    include_body_tests,
+                ),
+            }
         }
     };
     let mut findings = match detection {
@@ -293,7 +315,143 @@ fn evaluate(
             "",
         ));
     }
-    gate_and_format(&findings, custom_prompt, min_confidence)
+
+    apply_baseline_note(
+        gate_and_format(&findings, custom_prompt, min_confidence),
+        baseline_note,
+    )
+}
+
+/// Fold the Write-baseline skip note into the outcome: a clean result becomes a visible skip, and a
+/// findings result gets the note prepended.
+fn apply_baseline_note(outcome: HookOutcome, baseline_note: Option<&'static str>) -> HookOutcome {
+    let Some(reason) = baseline_note else {
+        return outcome;
+    };
+    match outcome {
+        HookOutcome::Clean => skip(reason),
+        HookOutcome::Findings(message) => {
+            HookOutcome::Findings(format!("[test-checker] Skipping: {reason}\n{message}"))
+        }
+        other => other,
+    }
+}
+
+/// The baseline a `Write` should compare against: HEAD only for test files in supported languages.
+/// The baseline is opt-in (`TEST_CHECKER_WRITE_BASELINE`) and only runs for a test file in a
+/// supported language inside a git work tree (checked without spawning).
+fn write_baseline(hook_input: &HookInput, file_path: &str) -> Baseline {
+    if !baseline_enabled()
+        || !is_test_path(file_path)
+        || language_for_path(file_path).is_none()
+        || hook_input.cwd.is_empty()
+        || !has_git_ancestor(&hook_input.cwd)
+    {
+        return Baseline::NotRequested;
+    }
+    head_content(&hook_input.cwd, file_path)
+}
+
+fn baseline_enabled() -> bool {
+    std::env::var("TEST_CHECKER_WRITE_BASELINE").is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+/// Whether `cwd` is inside a git work tree. Walks up looking for `.git`; no process spawn.
+fn has_git_ancestor(cwd: &str) -> bool {
+    let mut dir = std::path::Path::new(cwd);
+    loop {
+        if dir.join(".git").exists() {
+            return true;
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => return false,
+        }
+    }
+}
+
+/// The result of looking up a `Write`'s committed baseline.
+enum Baseline {
+    Head(String),
+    Skipped(&'static str),
+    NotRequested,
+}
+
+/// The committed content of `file_path` (`git show HEAD:<path>`), bounded by a 150 ms timeout.
+///
+/// A `Write` carries no old text; HEAD gives the diff rules something to compare. A payload with no
+/// `cwd` did not ask for a baseline (behaviour unchanged). When a `cwd` is present but git is
+/// unavailable, the path is unsafe, the file is untracked, or the lookup times out, the caller skips
+/// the diff rules and shows a visible `Skipping:` line instead of failing silently.
+fn head_content(cwd: &str, file_path: &str) -> Baseline {
+    if cwd.is_empty() {
+        return Baseline::NotRequested;
+    }
+    let path = std::path::Path::new(file_path);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Baseline::Skipped("refusing an unsafe path for the git baseline");
+    }
+    let Ok(mut child) = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .arg("show")
+        .arg(format!("HEAD:{file_path}"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return Baseline::Skipped("git is unavailable");
+    };
+    let Some(mut stdout) = child.stdout.take() else {
+        return Baseline::Skipped("git produced no stdout");
+    };
+    let reader = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stdout, &mut buffer);
+        buffer
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(150);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = reader.join();
+                    return Baseline::Skipped("git timed out");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            Err(_) => {
+                let _ = reader.join();
+                return Baseline::Skipped("git failed");
+            }
+        }
+    }
+    let Ok(status) = child.wait() else {
+        return Baseline::Skipped("git failed");
+    };
+    let Ok(buffer) = reader.join() else {
+        return Baseline::Skipped("git reader failed");
+    };
+    if !status.success() {
+        return Baseline::Skipped("file is not committed in HEAD");
+    }
+    String::from_utf8(buffer).map_or(
+        Baseline::Skipped("HEAD content is not UTF-8"),
+        Baseline::Head,
+    )
 }
 
 /// Whether any content this call would inspect is over [`MAX_CONTENT_BYTES`].

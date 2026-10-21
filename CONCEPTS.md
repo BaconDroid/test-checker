@@ -55,6 +55,18 @@ commented-out code, a skip marker) still apply, because they need no context to 
 refines *why* it is reported — it does not gate whether it is. A repo may instead report only the
 kinds it can prove; the choice is a product decision, recorded here so the two hooks do not drift.
 
+For `test-checker`, a `Write` carries no old text, so the diff rules can compare the payload against
+the committed baseline (`git show HEAD:<path>`, 150 ms budget). The baseline is **opt-in and off by
+default**: set `TEST_CHECKER_WRITE_BASELINE=1` (for example in the `env` block of
+`.claude/settings.json`) to enable it; when enabled it costs about **7 ms p95** per `Write`. Nothing
+is spawned unless the feature is enabled, the path is a test file in a supported language, and a
+`.git` ancestor is found by walking up. The baseline is a convenience, not a proof: it may miss
+earlier **uncommitted** edits from the same session, so a `Write` that repeats an uncommitted change
+is compared against the last commit, not the working tree. A payload with no `cwd` does not request a
+baseline; when enabled and git is unavailable, the path is unsafe, the file is untracked, or the
+lookup times out, the diff rules are skipped with a visible `Skipping:` line instead of failing
+silently.
+
 ## Floor
 
 A **floor** is a per-kind minimum on the evaluation corpus, not an aggregate. Precision and recall
