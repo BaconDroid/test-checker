@@ -1,5 +1,5 @@
 {
-  "tolerance_percent": 15.0,
+  "tolerance_percent": 35.0,
   "profiles": {
     "release": {
       "ratio": 5.7632

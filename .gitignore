@@ -1,3 +1,6 @@
+# Local perf-gate run history
+/eval/baseline-history.json
+
 # Build artifacts
 /test-checker
 target/
@@ -22,3 +25,6 @@ ai-todolist.md
 notepad.md
 evidence/
 plans/
+
+# Python cache
+__pycache__/

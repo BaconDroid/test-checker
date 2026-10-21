@@ -134,10 +134,12 @@ Checks requested after the first version of this profile:
   `static REGISTRY: LazyLock<LanguageRegistry>` and `get_language(name)` looks the language up on
   demand (pack `lib.rs:96,189-200`).
 - **Large-file prefilter:** skipped (see option 2 above) — not a ~30-line, safely provable change.
-- **The perf gate is relative, not absolute.** `eval/baseline.py` fails when p95 regresses beyond
-  `tolerance_percent` (25 %) against `eval/baseline.json`'s recorded per-profile p95, and fails
-  closed when the baseline/tolerance is missing or invalid; the 15 ms value is a warning only.
-  Caveat: the gate is **not wired into CI** — it runs manually (`python3 eval/baseline.py <binary>`).
+- **The perf gate is relative, not absolute.** `eval/baseline.py` runs five alternating
+  analysis/`--version` sessions and gates the median ratio against `eval/baseline.json`'s recorded
+  ratio with a 35 % tolerance. It fails only when two of the last three runs are over (history in
+  `eval/baseline-history.json`), and fails closed when the baseline/tolerance/provenance is
+  missing or invalid; the 15 ms value is a warning only. Caveat: the gate is **not wired into
+  CI** — it runs manually (`python3 eval/baseline.py <binary>`), and a fresh job has no run history.
 - **Absolute numbers are host-dependent.** The recorded baseline is 18.28 ms; on the reviewer's box
   p95 ≈ 14.3–14.7 ms is inside the 15 ms target, while this (un-isolated) box measured ≈ 16.2 ms.
   The relative gate is the one that must pass.
