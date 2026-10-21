@@ -1,6 +1,6 @@
 # Baseline
 
-Measured with `eval/baseline.py` on a lightly loaded dev box (load average ~2; re-record on an idle
+Measured with `eval/baseline.py`; absolute numbers are host-dependent (re-record on an idle
 machine for the tightest gate).
 
 ## Contract
@@ -55,5 +55,6 @@ cargo build --release
 python3 eval/baseline.py --record
 ```
 
-Recorded (load ~2): release ratio _TBD_ (median of five sessions); `--version` p95 spread _TBD_.
-Binary size: 31 languages ≈ 53.9 MB, 35 ≈ 60.3 MB (+11.9 %).
+The recorded ratio, tolerance, and `built_from` live in `eval/baseline.json`; the latest gate-run
+ratios live in `eval/baseline-history.json`. Binary size: 31 languages ≈ 53.9 MB, 35 ≈ 60.3 MB
+(+11.9 %).
