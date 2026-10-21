@@ -179,12 +179,16 @@ that the compiled host grammar exposes (for example, a `<script>` block in HTML)
 
 Confidence policy: `source-grep-test` is `medium`; `harness-edited` is `medium` on sensitive harness
 paths (CI workflows, `.gitlab-ci*`, pytest/tox/conftest, jest/vitest config) and `low` otherwise;
-`test-volume` and
-`near-duplicate-test` are `low` telemetry, so the default `medium` gate hides them. Use
-`--min-confidence low` to see them and block on them.
+`test-volume`, `near-duplicate-test`, `echo-test` and `mirror-implementation-test` are `low`
+telemetry, so the default `medium` gate hides them. Use `--min-confidence low` to see them and block
+on them.
 
 Each finding carries a `confidence` of `high`/`medium`/`low`. Line rules classify the added lines of
 the captured test bodies (comments stripped); diff rules compare an edit's old and new content.
+
+On an `Edit`/`MultiEdit` fragment, whole-test rules (`gutted-test`, `over-mocking`, `no-assertion`,
+`duplicate-test`, `near-duplicate-test`, `echo-test`) fire only when the fragment contains the
+complete test; line-local rules still apply.
 
 Three rules — `weakened-assertion`, `snapshot-regenerated`, `tolerance-broadened` — are
 **diff-aware**. They compare a declarative matcher-strength table (JS/TS `toStrictEqual` > `toEqual`
