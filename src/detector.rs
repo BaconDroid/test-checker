@@ -234,7 +234,9 @@ impl TestDetector {
                 .and_then(|old_tree| masked_view(&runtime, old_tree, old_string));
             let new_view = masked_new.as_deref().unwrap_or(new_string);
             let old_view = masked_old.as_deref().unwrap_or(old_string);
-            findings.extend(rules::diff_findings_on_views(old_view, new_view, file_path));
+            findings.extend(rules::diff_findings_on_views(
+                old_view, new_view, old_string, new_string, file_path,
+            ));
             if let Some(query) = &runtime.test_query {
                 let bodies = capture_bodies(&runtime, query, &tree, source);
                 let added = engine::added_lines(old_string, new_string);
@@ -245,6 +247,7 @@ impl TestDetector {
                     &added,
                     Views {
                         original: new_string,
+                        old_original: old_string,
                         old: old_view,
                         masked: new_view,
                     },
@@ -742,6 +745,7 @@ fn analyze_new_bodies(
 #[derive(Clone, Copy)]
 struct Views<'a> {
     original: &'a str,
+    old_original: &'a str,
     old: &'a str,
     masked: &'a str,
 }
@@ -755,13 +759,17 @@ fn analyze_edited_bodies(
 ) -> Vec<Finding> {
     let Views {
         original: content,
+        old_original: old_content,
         old: old_view,
         masked: view,
     } = views;
     let mut findings = Vec::new();
     let mut seen = DuplicateSignatures::default();
-    let removed = removed_lines(old_view, view);
-    let diff = DiffContext { removed: &removed };
+    let (removed, removed_original) = removed_lines(old_view, view, old_content);
+    let diff = DiffContext {
+        removed: &removed,
+        removed_original: &removed_original,
+    };
     for body in bodies {
         let full = body_added_lines(view, body, language);
         let original_lines = body_added_lines(content, body, language);
@@ -822,15 +830,23 @@ fn analyze_edited_bodies(
 ///
 /// `engine::added_lines(from, to)` returns the unmatched line indices of its **second** argument,
 /// so the arguments are deliberately reversed here: `added_lines(new, old)` yields the *old* lines
-/// the edit removed, indexed against `old_content`.
-fn removed_lines<'a>(old_content: &'a str, new_content: &str) -> Vec<&'a str> {
-    let removed = engine::added_lines(new_content, old_content);
-    old_content
-        .lines()
-        .enumerate()
-        .filter(|(index, line)| removed.contains(index) && !rules::is_comment_line(line))
-        .map(|(_, line)| line.trim())
-        .collect()
+/// the edit removed, indexed against `old_view`. Each removed line is returned twice: the masked
+/// view (structure) and the original (literal values), at the same line index.
+fn removed_lines<'a>(
+    old_view: &'a str,
+    new_view: &str,
+    old_content: &'a str,
+) -> (Vec<&'a str>, Vec<&'a str>) {
+    let removed = engine::added_lines(new_view, old_view);
+    let mut views = Vec::new();
+    let mut originals = Vec::new();
+    for (index, (view, original)) in old_view.lines().zip(old_content.lines()).enumerate() {
+        if removed.contains(&index) && !rules::is_comment_line(view) {
+            views.push(view.trim());
+            originals.push(original.trim());
+        }
+    }
+    (views, originals)
 }
 
 /// The first line of each earlier body, keyed by its signature: `exact` preserves comments (the

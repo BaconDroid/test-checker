@@ -1308,3 +1308,106 @@ fn detect_given_distinct_literal_operands_does_not_report_tautology() {
         "findings: {same_findings:?}"
     );
 }
+
+fn literal_rules(path: &str, content: &str) -> Vec<String> {
+    TestDetector::new()
+        .detect(content, path, true, true)
+        .into_iter()
+        .map(|finding| finding.rule)
+        .collect()
+}
+
+fn assert_distinct_strings_are_not_constant(path: &str, distinct: &str, identical: &str) {
+    let distinct = literal_rules(path, distinct);
+    assert!(
+        !distinct
+            .iter()
+            .any(|rule| rule == "constant-assertion" || rule == "tautological-assertion"),
+        "distinct strings were flagged: {distinct:?}"
+    );
+    let identical = literal_rules(path, identical);
+    assert!(
+        identical.iter().any(|rule| rule == "constant-assertion"),
+        "identical strings were not flagged: {identical:?}"
+    );
+}
+
+#[test]
+fn typescript_distinct_string_literals_are_not_constant() {
+    assert_distinct_strings_are_not_constant(
+        "tests/app.test.ts",
+        "it('x', () => {\n  expect(\"abc\").toBe(\"xyz\");\n});\n",
+        "it('x', () => {\n  expect(\"abc\").toBe(\"abc\");\n});\n",
+    );
+}
+
+#[test]
+fn python_distinct_string_literals_are_not_constant() {
+    assert_distinct_strings_are_not_constant(
+        "tests/test_app.py",
+        "def test_a():\n    assert \"abc\" == \"xyz\"\n",
+        "def test_a():\n    assert \"abc\" == \"abc\"\n",
+    );
+}
+
+#[test]
+fn go_distinct_string_literals_are_not_constant() {
+    assert_distinct_strings_are_not_constant(
+        "tests/app_test.go",
+        "package app\n\nfunc TestA(t *testing.T) {\n\tassert.Equal(t, \"abc\", \"xyz\")\n}\n",
+        "package app\n\nfunc TestA(t *testing.T) {\n\tassert.Equal(t, \"abc\", \"abc\")\n}\n",
+    );
+}
+
+#[test]
+fn rust_distinct_string_literals_are_not_constant() {
+    assert_distinct_strings_are_not_constant(
+        "tests/app_test.rs",
+        "#[test]\nfn a() {\n    assert_eq!(\"abc\", \"xyz\");\n}\n",
+        "#[test]\nfn a() {\n    assert_eq!(\"abc\", \"abc\");\n}\n",
+    );
+}
+
+#[test]
+fn java_distinct_string_literals_are_not_constant() {
+    assert_distinct_strings_are_not_constant(
+        "src/test/java/AppTest.java",
+        "class AppTest {\n  @Test\n  void a() {\n    assertEquals(\"abc\", \"xyz\");\n  }\n}\n",
+        "class AppTest {\n  @Test\n  void a() {\n    assertEquals(\"abc\", \"abc\");\n  }\n}\n",
+    );
+}
+
+#[test]
+fn detect_given_same_length_literal_strings_does_not_duplicate() {
+    // given: two tests whose only difference is the value of a same-length string literal
+    let source = "it('upper', () => {\n  expect(read()).toBe('abc');\n});\nit('lower', () => {\n  expect(read()).toBe('xyz');\n});\n";
+
+    // when
+    let findings = TestDetector::new().detect(source, "tests/app.test.js", true, true);
+
+    // then
+    assert!(
+        !findings.iter().any(
+            |finding| finding.rule == "duplicate-test" || finding.rule == "near-duplicate-test"
+        ),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn expected_copied_from_actual_still_sees_string_literals() {
+    // given: the expected string literal is replaced by a copy of the actual expression
+    let old = "def test_a():\n    assert compute() == \"abc\"\n";
+    let new = "def test_a():\n    assert compute() == compute()\n";
+
+    // when
+    let findings = TestDetector::new().detect_edit(old, new, "tests/test_app.py", true, true);
+
+    // then
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "expected-copied-from-actual"),
+        "findings: {findings:?}"
+    );
+}

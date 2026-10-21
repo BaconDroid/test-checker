@@ -287,11 +287,15 @@ const MARKER_RULES: &[MarkerRule] = &[
     },
 ];
 
-/// The removed (LCS-unmatched old) lines of an `Edit`. Empty for a `Write`, where the presence
-/// rules fall back to Low confidence.
+/// The removed (LCS-unmatched old) lines of an `Edit`.
+///
+/// Empty for a `Write`, where the presence rules fall back to Low confidence. `removed` is the
+/// masked view (structure only) and `removed_original` carries the literal values at the same line
+/// positions.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DiffContext<'a> {
     pub removed: &'a [&'a str],
+    pub removed_original: &'a [&'a str],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -340,34 +344,34 @@ struct ToleranceForm {
     polarity: TolerancePolarity,
 }
 
+/// The subject text at `span`, read from the original line.
+fn subject_at(view: &str, original: &str, span: Span) -> Option<String> {
+    let (start, end) = trim_span(view, span);
+    let subject = original.get(start..end)?.trim();
+    (!subject.is_empty()).then(|| subject.to_string())
+}
+
 /// Extract the JS/TS matcher subject and strictness from a line.
-fn js_matcher_form(text: &str) -> Option<MatcherForm> {
-    let subject = inner_args(text, "expect(")?.trim();
-    if subject.is_empty() {
-        return None;
-    }
+fn js_matcher_form_views(view: &str, original: &str) -> Option<MatcherForm> {
+    let expect = inner_args_span(view, "expect(")?;
+    let subject = subject_at(view, original, expect)?;
     let (_, strength) = JS_MATCHERS
         .iter()
-        .find(|(marker, _)| text.contains(*marker))?;
+        .find(|(marker, _)| view.contains(*marker))?;
     Some(MatcherForm {
-        subject: subject.to_string(),
+        subject,
         strength: *strength,
         kind: MatcherKind::Js,
     })
 }
 
-/// The first top-level argument of an already-opened call, trimmed and non-empty.
-fn first_arg(inner: &str) -> Option<String> {
-    let parts = split_top_level(inner);
-    let subject = parts.first()?.trim();
-    (!subject.is_empty()).then(|| subject.to_string())
-}
-
 /// Extract the Python assert-call or `assert` statement subject and strictness.
-fn py_matcher_form(text: &str) -> Option<MatcherForm> {
+fn py_matcher_form_views(view: &str, original: &str) -> Option<MatcherForm> {
     for (marker, strength) in PY_ASSERT_CALLS {
-        if let Some(inner) = inner_args(text, marker)
-            && let Some(subject) = first_arg(inner)
+        if let Some(inner) = inner_args_span(view, marker)
+            && let Some(subject_span) =
+                split_top_level_spans(&view[inner.0..inner.1], inner.0).first()
+            && let Some(subject) = subject_at(view, original, *subject_span)
         {
             return Some(MatcherForm {
                 subject,
@@ -376,26 +380,39 @@ fn py_matcher_form(text: &str) -> Option<MatcherForm> {
             });
         }
     }
-    py_assert_statement_form(text)
+    py_assert_statement_form_views(view, original)
 }
 
-fn py_assert_statement_form(text: &str) -> Option<MatcherForm> {
-    let rest = text.strip_prefix("assert ")?;
+fn py_assert_statement_form_views(view: &str, original: &str) -> Option<MatcherForm> {
+    let rest_start = view.len() - view.strip_prefix("assert ")?.len();
+    let rest = &view[rest_start..];
     if let Some((left, _)) = rest.split_once(" == ") {
-        let subject = left.trim();
-        if !subject.is_empty() && !subject.contains('=') {
+        let span = trim_span(view, (rest_start, rest_start + left.len()));
+        if let Some(subject) = subject_at(view, original, span)
+            && !subject.contains('=')
+        {
             return Some(MatcherForm {
-                subject: subject.to_string(),
+                subject,
                 strength: EXACT_MIN,
                 kind: MatcherKind::Python,
             });
         }
     }
     if let Some((left, right)) = rest.split_once(" is not ") {
-        let subject = left.trim();
-        if right.trim() == "None" && !subject.is_empty() {
+        let span = trim_span(view, (rest_start, rest_start + left.len()));
+        let right_span = trim_span(
+            view,
+            (
+                rest_start + left.len() + " is not ".len(),
+                rest_start + left.len() + " is not ".len() + right.len(),
+            ),
+        );
+        let right_value = original.get(right_span.0..right_span.1)?.trim();
+        if right_value == "None"
+            && let Some(subject) = subject_at(view, original, span)
+        {
             return Some(MatcherForm {
-                subject: subject.to_string(),
+                subject,
                 strength: LOOSE_MAX,
                 kind: MatcherKind::Python,
             });
@@ -404,47 +421,55 @@ fn py_assert_statement_form(text: &str) -> Option<MatcherForm> {
     None
 }
 
-fn matcher_form(text: &str) -> Option<MatcherForm> {
-    py_matcher_form(text).or_else(|| js_matcher_form(text))
+fn matcher_form_views(view: &str, original: &str) -> Option<MatcherForm> {
+    py_matcher_form_views(view, original).or_else(|| js_matcher_form_views(view, original))
 }
 
 /// Extract the subject a snapshot/approval assertion supersedes.
-fn snapshot_subject(text: &str) -> Option<String> {
+fn snapshot_subject_views(view: &str, original: &str) -> Option<String> {
     let marker = *SNAPSHOT_MATCHERS
         .iter()
-        .find(|marker| text.contains(**marker))?;
-    let subject = if marker.starts_with(".toMatch") {
-        inner_args(text, "expect(")?.trim().to_string()
-    } else {
-        first_arg(inner_args(text, marker)?)?
-    };
-    (!subject.is_empty()).then_some(subject)
+        .find(|marker| view.contains(**marker))?;
+    if marker.starts_with(".toMatch") {
+        let expect = inner_args_span(view, "expect(")?;
+        return subject_at(view, original, expect);
+    }
+    let inner = inner_args_span(view, marker)?;
+    let first = split_top_level_spans(&view[inner.0..inner.1], inner.0)
+        .first()
+        .copied()?;
+    subject_at(view, original, first)
 }
 
 /// Extract a numeric tolerance occurrence (places/delta/rtol/precision/approx/sleep duration).
-fn tolerance_form(text: &str) -> Option<ToleranceForm> {
+fn tolerance_form_views(view: &str, original: &str) -> Option<ToleranceForm> {
     for marker in [
         "assertAlmostEqual(",
         "assertAlmostEquals(",
         "assert_allclose(",
     ] {
-        if let Some(inner) = inner_args(text, marker) {
-            let subject = first_arg(inner)?;
-            if let Some(value) = parse_after(text, "places=") {
+        if let Some(inner) = inner_args_span(view, marker) {
+            let subject_span = split_top_level_spans(&view[inner.0..inner.1], inner.0)
+                .first()
+                .copied()?;
+            let subject = subject_at(view, original, subject_span)?;
+            if let Some(value) = parse_after_views(view, original, "places=") {
                 return Some(ToleranceForm {
                     subject,
                     value,
                     polarity: TolerancePolarity::Precision,
                 });
             }
-            if let Some(value) = parse_after(text, "delta=") {
+            if let Some(value) = parse_after_views(view, original, "delta=") {
                 return Some(ToleranceForm {
                     subject,
                     value,
                     polarity: TolerancePolarity::Duration,
                 });
             }
-            if let Some(value) = parse_after(text, "rtol=").or_else(|| parse_after(text, "atol=")) {
+            if let Some(value) = parse_after_views(view, original, "rtol=")
+                .or_else(|| parse_after_views(view, original, "atol="))
+            {
                 return Some(ToleranceForm {
                     subject,
                     value,
@@ -453,45 +478,47 @@ fn tolerance_form(text: &str) -> Option<ToleranceForm> {
             }
         }
     }
-    if let Some(inner) = inner_args(text, "pytest.approx(") {
-        let subject = py_matcher_form(text)?.subject;
-        let value = parse_after(inner, "rel=").or_else(|| parse_after(inner, "abs="))?;
+    if inner_args_span(view, "pytest.approx(").is_some() {
+        let subject = py_matcher_form_views(view, original)?.subject;
+        let value = parse_after_views(view, original, "rel=")
+            .or_else(|| parse_after_views(view, original, "abs="))?;
         return Some(ToleranceForm {
             subject,
             value,
             polarity: TolerancePolarity::Duration,
         });
     }
-    if let Some(inner) = inner_args(text, "toBeCloseTo(") {
-        let subject = inner_args(text, "expect(")?.trim().to_string();
-        let value = split_top_level(inner)
-            .get(1)
-            .and_then(|part| parse_first_number(part))?;
-        if !subject.is_empty() {
-            return Some(ToleranceForm {
-                subject,
-                value,
-                polarity: TolerancePolarity::Precision,
-            });
-        }
+    if let Some(inner) = inner_args_span(view, "toBeCloseTo(") {
+        let expect = inner_args_span(view, "expect(")?;
+        let subject = subject_at(view, original, expect)?;
+        let spans = split_top_level_spans(&view[inner.0..inner.1], inner.0);
+        let value_span = *spans.get(1)?;
+        let value = original.get(value_span.0..value_span.1)?;
+        let value = parse_first_number(value)?;
+        return Some(ToleranceForm {
+            subject,
+            value,
+            polarity: TolerancePolarity::Precision,
+        });
     }
     for marker in SLEEP_MARKERS {
-        if let Some(inner) = inner_args(text, marker)
-            && let Some(value) = parse_first_number(inner)
-        {
-            return Some(ToleranceForm {
-                subject: marker.trim_end_matches('(').to_string(),
-                value,
-                polarity: TolerancePolarity::Duration,
-            });
+        if let Some(inner) = inner_args_span(view, marker) {
+            let value = original.get(inner.0..inner.1)?;
+            if let Some(value) = parse_first_number(value) {
+                return Some(ToleranceForm {
+                    subject: marker.trim_end_matches('(').to_string(),
+                    value,
+                    polarity: TolerancePolarity::Duration,
+                });
+            }
         }
     }
     None
 }
 
-fn parse_after(text: &str, key: &str) -> Option<f64> {
-    let index = text.find(key)? + key.len();
-    parse_first_number(&text[index..])
+fn parse_after_views(view: &str, original: &str, key: &str) -> Option<f64> {
+    let index = view.find(key)? + key.len();
+    parse_first_number(&original[index..])
 }
 
 fn parse_first_number(text: &str) -> Option<f64> {
@@ -523,12 +550,13 @@ fn parse_first_number(text: &str) -> Option<f64> {
 fn classify_weakening(
     file_path: &str,
     line: &AddedLine<'_>,
-    text: &str,
+    view: &str,
+    original: &str,
     diff: &DiffContext<'_>,
 ) -> Vec<Finding> {
-    let weakened = matcher_form(text);
-    let snapshot = snapshot_subject(text);
-    let tolerance = tolerance_form(text);
+    let weakened = matcher_form_views(view, original);
+    let snapshot = snapshot_subject_views(view, original);
+    let tolerance = tolerance_form_views(view, original);
     if diff.removed.is_empty() {
         return presence_weakening(
             file_path,
@@ -541,12 +569,8 @@ fn classify_weakening(
 
     let mut findings = Vec::new();
     if let Some(new_form) = &weakened
-        && let Some(old_strength) = weaker_match(
-            &new_form.subject,
-            new_form.kind,
-            new_form.strength,
-            diff.removed,
-        )
+        && let Some(old_strength) =
+            weaker_match(&new_form.subject, new_form.kind, new_form.strength, diff)
     {
         let confidence = if old_strength >= EXACT_MIN && new_form.strength <= LOOSE_MAX {
             Confidence::High
@@ -562,10 +586,14 @@ fn classify_weakening(
         ));
     }
     if let Some(snapshot_subject) = snapshot.as_deref() {
-        let superseded = diff.removed.iter().any(|removed| {
-            matcher_form(removed)
-                .is_some_and(|old| old.subject == snapshot_subject && old.strength >= EXACT_MIN)
-        });
+        let superseded = diff
+            .removed
+            .iter()
+            .zip(diff.removed_original)
+            .any(|(view, original)| {
+                matcher_form_views(view, original)
+                    .is_some_and(|old| old.subject == snapshot_subject && old.strength >= EXACT_MIN)
+            });
         if superseded {
             findings.push(finish(
                 "snapshot-regenerated",
@@ -577,15 +605,19 @@ fn classify_weakening(
         }
     }
     if let Some(new_tolerance) = &tolerance {
-        let widened = diff.removed.iter().any(|removed| {
-            tolerance_form(removed).is_some_and(|old| {
-                old.subject == new_tolerance.subject
-                    && old.polarity == new_tolerance.polarity
-                    && new_tolerance
-                        .polarity
-                        .loosened(old.value, new_tolerance.value)
-            })
-        });
+        let widened = diff
+            .removed
+            .iter()
+            .zip(diff.removed_original)
+            .any(|(view, original)| {
+                tolerance_form_views(view, original).is_some_and(|old| {
+                    old.subject == new_tolerance.subject
+                        && old.polarity == new_tolerance.polarity
+                        && new_tolerance
+                            .polarity
+                            .loosened(old.value, new_tolerance.value)
+                })
+            });
         if widened {
             findings.push(finish(
                 "tolerance-broadened",
@@ -599,13 +631,21 @@ fn classify_weakening(
     findings
 }
 
-fn weaker_match(subject: &str, kind: MatcherKind, strength: u8, removed: &[&str]) -> Option<u8> {
-    removed.iter().find_map(|removed| {
-        matcher_form(removed).and_then(|old| {
-            (old.kind == kind && old.subject == subject && old.strength > strength)
-                .then_some(old.strength)
+fn weaker_match(
+    subject: &str,
+    kind: MatcherKind,
+    strength: u8,
+    diff: &DiffContext<'_>,
+) -> Option<u8> {
+    diff.removed
+        .iter()
+        .zip(diff.removed_original)
+        .find_map(|(view, original)| {
+            matcher_form_views(view, original).and_then(|old| {
+                (old.kind == kind && old.subject == subject && old.strength > strength)
+                    .then_some(old.strength)
+            })
         })
-    })
 }
 
 fn presence_weakening(
@@ -787,6 +827,7 @@ fn classify_line(
         return Vec::new();
     };
     let text = line.text.trim();
+    let original = original.trim();
     let mut findings = Vec::new();
 
     for rule in MARKER_RULES {
@@ -812,7 +853,7 @@ fn classify_line(
             file_path,
         ));
     }
-    findings.extend(classify_weakening(file_path, &line, text, diff));
+    findings.extend(classify_weakening(file_path, &line, text, original, diff));
     if let Some(finding) = classify_assertion(file_path, &line, text, original) {
         findings.push(finding);
     }
@@ -916,10 +957,10 @@ fn classify_assertion(
     text: &str,
     original: &str,
 ) -> Option<Finding> {
-    let operands = assertion_operands(text);
+    let operands = assertion_operands_with_original(text, original);
     let literal_pair = operands
         .as_ref()
-        .is_some_and(|(left, right)| is_literal(left) && is_literal(right));
+        .is_some_and(|(left, right)| is_literal(left) && is_literal(right) && left == right);
     if literal_pair || is_constant_bool_assertion(text) {
         return Some(finish(
             "constant-assertion",
@@ -930,11 +971,9 @@ fn classify_assertion(
         ));
     }
     if let Some((left, right)) = operands {
-        // The masked view blanks string content, so two distinct calls can collapse to the same
-        // text (`f("a")` and `f("b")`). Only call it a tautology when the original agrees.
-        let same_in_original = assertion_operands(original.trim())
-            .is_some_and(|(original_left, original_right)| original_left == original_right);
-        if left == right && !is_literal(&left) && same_in_original {
+        // Values come from the original line, so distinct strings (`"a"`/`"b"`) never collapse
+        // into either a literal pair or a tautology.
+        if left == right && !is_literal(&left) {
             return Some(finish(
                 "tautological-assertion",
                 Confidence::High,
@@ -1785,19 +1824,29 @@ fn is_assertion_code_line(line: &str) -> bool {
 /// Diff-only findings: newly introduced weakening between an edit's old and new content.
 #[must_use]
 pub fn diff_findings(old_content: &str, new_content: &str, file_path: &str) -> Vec<Finding> {
-    diff_findings_on_views(old_content, new_content, file_path)
+    diff_findings_on_views(
+        old_content,
+        new_content,
+        old_content,
+        new_content,
+        file_path,
+    )
 }
 
-/// [`diff_findings`] over the masked views. Line numbers come from the view, which is
-/// length-preserving, so they still name the edited lines.
+/// [`diff_findings`] over the masked views (structure) and the original content (values). Line
+/// numbers come from the view, which is length-preserving, so they still name the edited lines.
 #[must_use]
 pub fn diff_findings_on_views(
-    old_content: &str,
-    new_content: &str,
+    old_view: &str,
+    new_view: &str,
+    old_original: &str,
+    new_original: &str,
     file_path: &str,
 ) -> Vec<Finding> {
-    let old_lines: Vec<&str> = old_content.lines().collect();
-    let new_lines: Vec<&str> = new_content.lines().collect();
+    let old_lines: Vec<&str> = old_view.lines().collect();
+    let new_lines: Vec<&str> = new_view.lines().collect();
+    let old_original_lines: Vec<&str> = old_original.lines().collect();
+    let new_original_lines: Vec<&str> = new_original.lines().collect();
     let mut findings = Vec::new();
 
     let old_assertions = old_lines
@@ -1832,17 +1881,23 @@ pub fn diff_findings_on_views(
     }
 
     for (index, new_line) in new_lines.iter().enumerate() {
-        let trimmed = new_line.trim();
-        let Some((left, right)) = assertion_operands(trimmed) else {
+        let new_original_line = new_original_lines.get(index).copied().unwrap_or("");
+        let Some((left, right)) = assertion_operands_with_original(new_line, new_original_line)
+        else {
             continue;
         };
         if left != right || is_literal(&left) {
             continue;
         }
-        let was_literal = old_lines.iter().any(|old_line| {
-            assertion_operands(old_line.trim())
-                .is_some_and(|(old_left, old_right)| old_left == left && is_literal(&old_right))
-        });
+        let was_literal =
+            old_lines
+                .iter()
+                .zip(&old_original_lines)
+                .any(|(old_line, old_original_line)| {
+                    assertion_operands_with_original(old_line, old_original_line).is_some_and(
+                        |(old_left, old_right)| old_left == left && is_literal(&old_right),
+                    )
+                });
         if was_literal {
             findings.push(Finding::new(
                 "expected-copied-from-actual",
@@ -1939,57 +1994,118 @@ fn is_literal(value: &str) -> bool {
     )
 }
 
+/// A byte span in a line.
+type Span = (usize, usize);
+
 /// Extract the two compared operands of an equality-style assertion, if any.
+///
+/// The public form reads one text for both structure and values. The detector's form passes the
+/// masked view for structure and the original line for values (see
+/// [`assertion_operands_with_original`]).
 #[must_use]
 pub fn assertion_operands(line: &str) -> Option<(String, String)> {
-    let stripped = line.trim();
-    if !has_marker(stripped, ASSERTION_MARKERS) {
+    assertion_operands_with_original(line, line)
+}
+
+/// Find the operands in the masked `view`, then read their values from `original` at the same byte
+/// offsets. The view is length-preserving, so this keeps structure (an operator inside a string is
+/// blanked) while preserving the literal values a distinctness/tautology check needs.
+fn assertion_operands_with_original(view: &str, original: &str) -> Option<(String, String)> {
+    let stripped = view.trim();
+    let base = view.len() - view.trim_start().len();
+    let (left, right) = assertion_operand_spans(stripped)?;
+    if !maps_to_original(stripped, left) || !maps_to_original(stripped, right) {
         return None;
     }
-    if let Some(inner) = inner_args(stripped, "assert_eq!(") {
-        return split_two(inner);
-    }
-    if let Some(inner) = inner_args(stripped, "assert!(") {
-        return inner
-            .split_once("==")
-            .map(|(left, right)| (left.trim().to_string(), right.trim().to_string()));
-    }
-    if let Some(inner) = inner_args(stripped, "assertEqual(") {
-        return split_two(inner);
-    }
-    if let Some(inner) = inner_args(stripped, "assertEquals(") {
-        return split_two(inner);
-    }
-    if let Some(inner) = inner_args(stripped, "assert.Equal(") {
-        return split_skip_first(inner);
-    }
-    if let Some(inner) = inner_args(stripped, "require.Equal(") {
-        return split_skip_first(inner);
-    }
-    if let Some((expected, actual)) = expect_to_operands(stripped) {
-        return Some((expected, actual));
-    }
-    if let Some((_left, right)) = stripped.split_once("assert ") {
-        let right = right.trim();
-        if let Some((left, right)) = right.split_once(" == ") {
-            let (left, right) = (left.trim(), right.trim());
-            if !left.is_empty() && !right.is_empty() && !left.contains('=') {
-                return Some((left.to_string(), right.to_string()));
-            }
-        }
-    }
-    None
+    let left = original
+        .get(base + left.0..base + left.1)?
+        .trim()
+        .to_string();
+    let right = original
+        .get(base + right.0..base + right.1)?
+        .trim()
+        .to_string();
+    (!left.is_empty() && !right.is_empty()).then_some((left, right))
 }
 
-fn expect_to_operands(line: &str) -> Option<(String, String)> {
-    let inner = inner_args(line, "expect(")?;
+/// A span that starts on blanked string content cannot be mapped back to a real operand.
+fn maps_to_original(view: &str, span: Span) -> bool {
+    view.as_bytes()
+        .get(span.0)
+        .is_some_and(|byte| *byte != b' ')
+}
+
+fn assertion_operand_spans(line: &str) -> Option<(Span, Span)> {
+    if !has_marker(line, ASSERTION_MARKERS) {
+        return None;
+    }
+    if let Some(inner) = inner_args_span(line, "assert_eq!(") {
+        return split_two_spans(line, inner);
+    }
+    if let Some(inner) = inner_args_span(line, "assert!(") {
+        let (start, end) = inner;
+        let body = &line[start..end];
+        let (left, right) = body.split_once("==")?;
+        let left = trim_span(body, (0, left.len()));
+        let right_start = left.1 + 2;
+        let right = trim_span(body, (right_start, right_start + right.len()));
+        return Some((
+            (start + left.0, start + left.1),
+            (start + right.0, start + right.1),
+        ));
+    }
+    if let Some(inner) = inner_args_span(line, "assertEqual(") {
+        return split_two_spans(line, inner);
+    }
+    if let Some(inner) = inner_args_span(line, "assertEquals(") {
+        return split_two_spans(line, inner);
+    }
+    if let Some(inner) = inner_args_span(line, "assert.Equal(") {
+        return split_skip_first_spans(line, inner);
+    }
+    if let Some(inner) = inner_args_span(line, "require.Equal(") {
+        return split_skip_first_spans(line, inner);
+    }
+    if let Some(operands) = expect_to_operand_spans(line) {
+        return Some(operands);
+    }
+    let marker = "assert ";
+    let index = line.find(marker)?;
+    let rest_start = index + marker.len();
+    let rest = line[rest_start..].trim_start();
+    let rest_start = rest_start + (line[rest_start..].len() - rest.len());
+    let (left, right) = rest.split_once(" == ")?;
+    let left_span = trim_span(rest, (0, left.len()));
+    let right_start = left.len() + 4;
+    let right_span = trim_span(rest, (right_start, right_start + right.len()));
+    let left = &rest[left_span.0..left_span.1];
+    let right = &rest[right_span.0..right_span.1];
+    if left.is_empty() || right.is_empty() || left.contains('=') {
+        return None;
+    }
+    Some((
+        (rest_start + left_span.0, rest_start + left_span.1),
+        (rest_start + right_span.0, rest_start + right_span.1),
+    ))
+}
+
+fn expect_to_operand_spans(line: &str) -> Option<(Span, Span)> {
+    let expect = inner_args_span(line, "expect(")?;
     let matcher = [".toBe(", ".toEqual(", ".toStrictEqual("]
         .iter()
-        .find_map(|matcher| inner_args(line, matcher))?;
-    Some((inner.trim().to_string(), matcher.trim().to_string()))
+        .find_map(|matcher| inner_args_span(line, matcher))?;
+    Some((trim_span(line, expect), trim_span(line, matcher)))
 }
 
-fn inner_args<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
+/// Trim a span of `text` to its non-whitespace edges.
+fn trim_span(text: &str, (start, end): Span) -> Span {
+    let slice = &text[start..end];
+    let lead = slice.len() - slice.trim_start().len();
+    let trail = slice.len() - slice.trim_end().len();
+    (start + lead, end - trail)
+}
+
+fn inner_args_span(line: &str, marker: &str) -> Option<Span> {
     let start = line.find(marker)? + marker.len();
     let rest = &line[start..];
     let mut depth = 1_u32;
@@ -1999,7 +2115,7 @@ fn inner_args<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
             ')' => {
                 depth -= 1;
                 if depth == 0 {
-                    return Some(&rest[..index]);
+                    return Some((start, start + index));
                 }
             }
             _ => {}
@@ -2008,31 +2124,36 @@ fn inner_args<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
     None
 }
 
-fn split_two(inner: &str) -> Option<(String, String)> {
-    match split_top_level(inner).as_slice() {
-        [left, right] => Some((left.trim().to_string(), right.trim().to_string())),
+fn inner_args<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
+    inner_args_span(line, marker).map(|(start, end)| &line[start..end])
+}
+
+fn split_two_spans(line: &str, inner: Span) -> Option<(Span, Span)> {
+    let (start, end) = inner;
+    match split_top_level_spans(&line[start..end], start).as_slice() {
+        [left, right] => Some((*left, *right)),
         _ => None,
     }
 }
 
-fn split_skip_first(inner: &str) -> Option<(String, String)> {
-    let parts = split_top_level(inner);
-    match parts.as_slice() {
-        [_skip, left, right] => Some((left.trim().to_string(), right.trim().to_string())),
+fn split_skip_first_spans(line: &str, inner: Span) -> Option<(Span, Span)> {
+    let (start, end) = inner;
+    match split_top_level_spans(&line[start..end], start).as_slice() {
+        [_skip, left, right] => Some((*left, *right)),
         _ => None,
     }
 }
 
-fn split_top_level(inner: &str) -> Vec<String> {
+/// Split `inner` on top-level commas, returning trimmed spans offset by `base`.
+fn split_top_level_spans(inner: &str, base: usize) -> Vec<Span> {
     let mut parts = Vec::new();
     let mut depth = 0_u32;
     let mut in_string = false;
     let mut quote = '\0';
-    let mut current = String::new();
+    let mut segment_start = 0;
     let mut escaped = false;
-    for character in inner.chars() {
+    for (index, character) in inner.char_indices() {
         if in_string {
-            current.push(character);
             if escaped {
                 escaped = false;
             } else if character == '\\' {
@@ -2046,26 +2167,25 @@ fn split_top_level(inner: &str) -> Vec<String> {
             '"' | '\'' | '`' => {
                 in_string = true;
                 quote = character;
-                current.push(character);
             }
-            '(' | '[' | '{' => {
-                depth += 1;
-                current.push(character);
-            }
-            ')' | ']' | '}' => {
-                depth = depth.saturating_sub(1);
-                current.push(character);
-            }
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
             ',' if depth == 0 => {
-                parts.push(std::mem::take(&mut current));
+                parts.push(offset_span(inner, (segment_start, index), base));
+                segment_start = index + 1;
             }
-            _ => current.push(character),
+            _ => {}
         }
     }
-    if !current.trim().is_empty() || !parts.is_empty() {
-        parts.push(current);
+    if !inner[segment_start..].trim().is_empty() || !parts.is_empty() {
+        parts.push(offset_span(inner, (segment_start, inner.len()), base));
     }
     parts
+}
+
+fn offset_span(text: &str, span: Span, base: usize) -> Span {
+    let (start, end) = trim_span(text, span);
+    (base + start, base + end)
 }
 
 /// Whether a comment body looks like commented-out test/assertion code.
@@ -2610,7 +2730,10 @@ mod tests {
             let added_texts = [new];
             let added = lines(&added_texts);
             let removed = [old];
-            let diff = DiffContext { removed: &removed };
+            let diff = DiffContext {
+                removed: &removed,
+                removed_original: &removed,
+            };
             let findings = classify_diff_line(path, &added, 0, &diff);
             if !findings
                 .iter()
@@ -2632,7 +2755,10 @@ mod tests {
         // given
         let added = lines(&["expect(add(1, 2)).toBeDefined()"]);
         let removed = ["expect(add(1, 2)).toEqual(3)"];
-        let diff = DiffContext { removed: &removed };
+        let diff = DiffContext {
+            removed: &removed,
+            removed_original: &removed,
+        };
 
         // when
         let findings = classify_diff_line("tests/app.test.js", &added, 0, &diff);
@@ -2652,7 +2778,10 @@ mod tests {
         // given
         let added = lines(&["expect(other).toBeDefined()"]);
         let removed = ["expect(add(1, 2)).toEqual(3)"];
-        let diff = DiffContext { removed: &removed };
+        let diff = DiffContext {
+            removed: &removed,
+            removed_original: &removed,
+        };
 
         // when
         let findings = classify_diff_line("tests/app.test.js", &added, 0, &diff);
@@ -2670,7 +2799,10 @@ mod tests {
         // given
         let added = lines(&["expect(x).toStrictEqual(3)"]);
         let removed = ["expect(x).toEqual(3)"];
-        let diff = DiffContext { removed: &removed };
+        let diff = DiffContext {
+            removed: &removed,
+            removed_original: &removed,
+        };
 
         // when
         let findings = classify_diff_line("tests/app.test.js", &added, 0, &diff);
@@ -2688,7 +2820,10 @@ mod tests {
         // given
         let added = lines(&["expect(x).toBeDefined()"]);
         let removed = ["expect(x).toBeTruthy()"];
-        let diff = DiffContext { removed: &removed };
+        let diff = DiffContext {
+            removed: &removed,
+            removed_original: &removed,
+        };
 
         // when
         let findings = classify_diff_line("tests/app.test.js", &added, 0, &diff);
@@ -2706,7 +2841,10 @@ mod tests {
         // given
         let added = lines(&["expect(render()).toMatchSnapshot()"]);
         let removed = ["expect(render()).toEqual({ a: 1 })"];
-        let diff = DiffContext { removed: &removed };
+        let diff = DiffContext {
+            removed: &removed,
+            removed_original: &removed,
+        };
 
         // when
         let findings = classify_diff_line("tests/app.test.js", &added, 0, &diff);
@@ -2724,7 +2862,10 @@ mod tests {
         // given
         let added = lines(&["self.assertAlmostEqual(add(1, 2), 3, places=1)"]);
         let removed = ["self.assertAlmostEqual(add(1, 2), 3, places=5)"];
-        let diff = DiffContext { removed: &removed };
+        let diff = DiffContext {
+            removed: &removed,
+            removed_original: &removed,
+        };
 
         // when
         let findings = classify_diff_line("tests/test_app.py", &added, 0, &diff);
@@ -2742,7 +2883,10 @@ mod tests {
         // given
         let added = lines(&["time.sleep(5)"]);
         let removed = ["time.sleep(1)"];
-        let diff = DiffContext { removed: &removed };
+        let diff = DiffContext {
+            removed: &removed,
+            removed_original: &removed,
+        };
 
         // when
         let findings = classify_diff_line("tests/test_app.py", &added, 0, &diff);
@@ -2760,7 +2904,10 @@ mod tests {
         // given
         let added = lines(&["self.assertAlmostEqual(add(1, 2), 3, places=7)"]);
         let removed = ["self.assertAlmostEqual(add(1, 2), 3, places=2)"];
-        let diff = DiffContext { removed: &removed };
+        let diff = DiffContext {
+            removed: &removed,
+            removed_original: &removed,
+        };
 
         // when
         let findings = classify_diff_line("tests/test_app.py", &added, 0, &diff);
@@ -2778,7 +2925,10 @@ mod tests {
         // given: a larger relative tolerance is looser
         let added = lines(&["assert value == pytest.approx(3.0, rel=1e-1)"]);
         let removed = ["assert value == pytest.approx(3.0, rel=1e-6)"];
-        let diff = DiffContext { removed: &removed };
+        let diff = DiffContext {
+            removed: &removed,
+            removed_original: &removed,
+        };
 
         // when
         let findings = classify_diff_line("tests/test_app.py", &added, 0, &diff);
@@ -2796,7 +2946,10 @@ mod tests {
         // given: the unittest carrier (`assertEqual`) must resolve the same subject
         let added = lines(&["self.assertEqual(value, pytest.approx(3.0, rel=1e-1))"]);
         let removed = ["self.assertEqual(value, pytest.approx(3.0, rel=1e-6))"];
-        let diff = DiffContext { removed: &removed };
+        let diff = DiffContext {
+            removed: &removed,
+            removed_original: &removed,
+        };
 
         // when
         let findings = classify_diff_line("tests/test_app.py", &added, 0, &diff);
