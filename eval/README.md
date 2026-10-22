@@ -13,6 +13,7 @@ included — that is what a PostToolUse hook pays). The gate compares five alter
 analysis/`--version` p95 ratios, uses their median, and fails only when two of the last three runs
 exceed the recorded ratio by 35 %. Run history is kept in `eval/baseline-history.json` (gitignored);
 see `BASELINE.md` for the provenance rule and how a fresh build sets `BASELINE_BUILT_FROM`.
+A stale `baseline.json` makes the gate refuse; re-record on an idle machine or in CI after any change to the binary.
 
 ```bash
 cargo build --release
