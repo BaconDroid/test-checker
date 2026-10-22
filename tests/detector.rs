@@ -620,13 +620,154 @@ fn detect_given_test_reading_a_source_file_reports_source_grep_test() {
     // when
     let findings = detector.detect(source, "tests/test_app.py", true, true);
 
-    // then: the rule fires at medium confidence (policy D29: it is meant to change behaviour), so
-    // it reaches the default `--min-confidence medium` gate
+    // then: the rule is low-confidence telemetry, visible only below the default gate
     assert!(
         findings
             .iter()
             .any(|finding| finding.rule == "source-grep-test"
-                && finding.confidence == Confidence::Medium),
+                && finding.confidence == Confidence::Low),
+        "findings: {findings:?}"
+    );
+}
+
+/// One source-text read plus an assertion on that text, per test language the rule applies to.
+/// Elm is absent: its tests cannot read files at runtime.
+const SOURCE_GREP_CASES: [(&str, &str); 20] = [
+    (
+        "tests/test_app.py",
+        "def test_reads():\n    text = Path(\"src/app.py\").read_text()\n    assert \"def \" in text\n",
+    ),
+    (
+        "tests/app.test.js",
+        "it('reads', () => {\n  const text = fs.readFileSync('src/app.js', 'utf8');\n  expect(text).toContain('function');\n});\n",
+    ),
+    (
+        "tests/app.test.ts",
+        "it('reads', () => {\n  const text = fs.readFileSync('src/app.ts', 'utf8');\n  expect(text).toContain('export');\n});\n",
+    ),
+    (
+        "tests/app.test.tsx",
+        "it('reads', () => {\n  const text = fs.readFileSync('src/App.tsx', 'utf8');\n  expect(text).toMatch(/export default/);\n});\n",
+    ),
+    (
+        "tests/app_test.go",
+        "package app\n\nfunc TestReads(t *testing.T) {\n\tdata, err := os.ReadFile(\"main.go\")\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\tif !strings.Contains(string(data), \"func main\") {\n\t\tt.Errorf(\"missing\")\n\t}\n}\n",
+    ),
+    (
+        "src/lib_test.rs",
+        "#[test]\nfn reads() {\n    let text = std::fs::read_to_string(\"src/lib.rs\").unwrap();\n    assert!(text.contains(\"pub fn\"));\n}\n",
+    ),
+    (
+        "test/app_test.rb",
+        "def test_reads\n  text = File.read(\"src/app.rb\")\n  assert_includes text, \"def \"\nend\n",
+    ),
+    (
+        "src/test/java/AppTest.java",
+        "class AppTest {\n  @Test\n  void reads() {\n    String text = Files.readString(Path.of(\"src/App.java\"));\n    assertTrue(text.contains(\"class \"));\n  }\n}\n",
+    ),
+    (
+        "tests/AppTest.cs",
+        "class AppTest {\n  [Fact]\n  public void Reads() {\n    var text = File.ReadAllText(\"src/App.cs\");\n    Assert.Contains(\"class \", text);\n  }\n}\n",
+    ),
+    (
+        "tests/AppTest.php",
+        "<?php\nclass AppTest {\n  public function testReads() {\n    $text = file_get_contents('src/app.php');\n    $this->assertStringContainsString('<?php', $text);\n  }\n}\n",
+    ),
+    (
+        "src/test/kotlin/AppTest.kt",
+        "class AppTest {\n  @Test\n  fun reads() {\n    val text = File(\"src/App.kt\").readText()\n    assertTrue(text.contains(\"class \"))\n  }\n}\n",
+    ),
+    (
+        "Tests/AppTests.swift",
+        "func testReads() throws {\n  let text = try String(contentsOfFile: \"src/App.swift\", encoding: .utf8)\n  XCTAssertTrue(text.contains(\"class \"))\n}\n",
+    ),
+    (
+        "src/test/scala/AppSpec.scala",
+        "class AppSpec {\n  it(\"reads\") {\n    val text = Source.fromFile(\"src/App.scala\").mkString\n    assert(text.contains(\"class \"))\n  }\n}\n",
+    ),
+    (
+        "test/sums_test.exs",
+        "defmodule SumsTest do\n  test \"reads\" do\n    text = File.read!(\"src/app.ex\")\n    assert text =~ \"defmodule\"\n  end\nend\n",
+    ),
+    (
+        "spec/sums_spec.lua",
+        "describe(\"reads\", function()\n  it(\"reads\", function()\n    local text = io.open(\"src/app.lua\"):read(\"*a\")\n    assert(text:find(\"function\"))\n  end)\nend)\n",
+    ),
+    (
+        "tests/math_test.c",
+        "TEST(Math, Reads) {\n  char *text = read_file(\"src/app.c\");\n  ASSERT_NE(strstr(text, \"int main\"), NULL);\n}\n",
+    ),
+    (
+        "tests/math_test.cpp",
+        "TEST(Math, Reads) {\n  std::string text = read_file(\"src/app.cpp\");\n  EXPECT_NE(text.find(\"int main\"), std::string::npos);\n}\n",
+    ),
+    (
+        "test/Spec.groovy",
+        "class Spec extends Specification {\n  def \"reads\"() {\n    def text = new File(\"src/App.groovy\").getText()\n    assert text.contains(\"class \")\n  }\n}\n",
+    ),
+    (
+        "test/test_math.ml",
+        "let test_reads () =\n  let text = read_file \"src/app.ml\" in\n  Alcotest.(check bool) \"reads\" true (Str.string_match (Str.regexp \"let \") text 0)\n",
+    ),
+    (
+        "tests/math.bats",
+        "@test \"reads\" {\n  content=$(cat \"src/app.sh\")\n  [[ \"$content\" == *\"echo\"* ]]\n  assert_success\n}\n",
+    ),
+];
+
+#[test]
+fn detect_given_source_text_assertion_in_each_language_reports_source_grep_test() {
+    // given: one read-text assertion per test language the rule applies to
+    let detector = TestDetector::new();
+    let mut failures = Vec::new();
+
+    // when
+    for (path, source) in SOURCE_GREP_CASES {
+        let findings = detector.detect(source, path, true, true);
+        if !findings
+            .iter()
+            .any(|finding| finding.rule == "source-grep-test")
+        {
+            failures.push(format!("{path}: no source-grep-test in {findings:?}"));
+        }
+    }
+
+    // then
+    assert!(failures.is_empty(), "coverage failures: {failures:#?}");
+}
+
+#[test]
+fn detect_given_missing_file_read_reports_no_source_grep_test() {
+    // given: the opencode-comments-plugin `readFileIfExists` missing-file test
+    let detector = TestDetector::new();
+    let source = "test(\"readFileIfExists returns undefined for a missing file\", () => {\n  expect(readFileIfExists(join(tmpdir(), \"does-not-exist-guard-xyz.ts\"))).toBeUndefined()\n})\n";
+
+    // when
+    let findings = detector.detect(source, "src/core/diff.test.ts", true, true);
+
+    // then: reading a path that does not exist asserts on the return value, not on source text
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "source-grep-test"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_given_parsed_fixture_property_reports_no_source_grep_test() {
+    // given: a source-named fixture is read, parsed, and a property of the parsed value is asserted
+    let detector = TestDetector::new();
+    let source = "it('parses the fixture', () => {\n  const raw = fs.readFileSync('tests/fixtures/sample.ts', 'utf8');\n  const parsed = JSON.parse(raw);\n  expect(parsed.name).toBe('x');\n});\n";
+
+    // when
+    let findings = detector.detect(source, "tests/app.test.js", true, true);
+
+    // then: the assertion operates on the parsed value, not on the read text
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "source-grep-test"),
         "findings: {findings:?}"
     );
 }
@@ -955,6 +1096,459 @@ fn detect_edit_given_incomplete_new_fragment_does_not_report_test_removed() {
         !findings
             .iter()
             .any(|finding| finding.rule == "test-removed"),
+        "findings: {findings:?}"
+    );
+}
+
+// ---- masked-view precision fixtures ----
+
+fn detect(path: &str, content: &str) -> Vec<String> {
+    TestDetector::new()
+        .detect(content, path, true, true)
+        .into_iter()
+        .map(|finding| finding.rule)
+        .collect()
+}
+
+fn has(rules: &[String], rule: &str) -> bool {
+    rules.iter().any(|candidate| candidate == rule)
+}
+
+#[test]
+fn typescript_marker_inside_string_is_not_a_finding() {
+    // then: `it.only` inside a string literal is data, not a focus marker
+    assert!(!has(
+        &detect(
+            "tests/app.test.ts",
+            "it('sums', () => {\n  const label = \"it.only('x', () => {})\";\n  expect(add(1, 2)).toBe(3);\n});\n"
+        ),
+        "focus-added"
+    ));
+    // but the same marker in code still fires
+    assert!(has(
+        &detect(
+            "tests/app.test.ts",
+            "it.only('sums', () => {\n  expect(add(1, 2)).toBe(3);\n});\n"
+        ),
+        "focus-added"
+    ));
+    // a commented-out test is still a finding
+    assert!(has(
+        &detect(
+            "tests/app.test.ts",
+            "// it('old', () => {\n//   expect(1).toBe(1);\n// });\n"
+        ),
+        "commented-out-test"
+    ));
+    // a JSDoc block carrying a focus marker is documentation
+    assert!(!has(
+        &detect(
+            "tests/app.test.ts",
+            "it('sums', () => {\n  /** it.only('x') */\n  expect(add(1, 2)).toBe(3);\n});\n"
+        ),
+        "focus-added"
+    ));
+}
+
+#[test]
+fn python_marker_inside_string_is_not_a_finding() {
+    // then: the decorator text inside a string is data
+    assert!(!has(
+        &detect(
+            "tests/test_app.py",
+            "def test_sums():\n    label = \"@pytest.mark.skip\"\n    assert add(1, 2) == 3\n"
+        ),
+        "skip-added"
+    ));
+    // the same decorator in code still fires
+    assert!(has(
+        &detect(
+            "tests/test_app.py",
+            "@pytest.mark.skip\ndef test_sums():\n    assert add(1, 2) == 3\n"
+        ),
+        "skip-added"
+    ));
+    // a commented-out test is still a finding
+    assert!(has(
+        &detect(
+            "tests/test_app.py",
+            "# def test_old():\n#     assert x == 1\n"
+        ),
+        "commented-out-test"
+    ));
+    // a docstring carrying a skip marker is documentation
+    assert!(!has(
+        &detect(
+            "tests/test_app.py",
+            "def test_sums():\n    \"\"\"@pytest.mark.skip\"\"\"\n    assert add(1, 2) == 3\n"
+        ),
+        "skip-added"
+    ));
+}
+
+#[test]
+fn go_marker_inside_string_is_not_a_finding() {
+    // then: `t.Skip(` inside a string literal is data
+    assert!(!has(
+        &detect(
+            "tests/app_test.go",
+            "package app\n\nfunc TestSums(t *testing.T) {\n\tlabel := \"t.Skip(\\\"later\\\")\"\n\tif got := add(1, 2); got != 3 {\n\t\tt.Errorf(\"got %d\", got)\n\t}\n}\n"
+        ),
+        "skip-added"
+    ));
+    // the same call in code still fires
+    assert!(has(
+        &detect(
+            "tests/app_test.go",
+            "package app\n\nfunc TestSums(t *testing.T) {\n\tt.Skip(\"later\")\n}\n"
+        ),
+        "skip-added"
+    ));
+    // a commented-out test is still a finding
+    assert!(has(
+        &detect(
+            "tests/app_test.go",
+            "// func TestOld(t *testing.T) {\n// \tt.Skip(\"later\")\n// }\n"
+        ),
+        "commented-out-test"
+    ));
+    // a doc comment carrying a skip call is documentation
+    assert!(!has(
+        &detect(
+            "tests/app_test.go",
+            "// t.Skip(\"documented\")\nfunc TestSums(t *testing.T) {\n\tif got := add(1, 2); got != 3 {\n\t\tt.Errorf(\"got %d\", got)\n\t}\n}\n"
+        ),
+        "skip-added"
+    ));
+}
+
+#[test]
+fn rust_marker_inside_string_is_not_a_finding() {
+    // then: an attribute inside a string literal is data
+    assert!(!has(
+        &detect(
+            "tests/app_test.rs",
+            "#[test]\nfn sums() {\n    let label = \"#[ignore]\";\n    assert_eq!(add(1, 2), 3);\n}\n"
+        ),
+        "skip-added"
+    ));
+    // the same attribute in code still fires
+    assert!(has(
+        &detect(
+            "tests/app_test.rs",
+            "#[test]\n#[ignore]\nfn sums() {\n    assert_eq!(add(1, 2), 3);\n}\n"
+        ),
+        "skip-added"
+    ));
+    // a commented-out test is still a finding
+    assert!(has(
+        &detect(
+            "tests/app_test.rs",
+            "// #[test]\n// fn old() {\n//     assert_eq!(1, 1);\n// }\n"
+        ),
+        "commented-out-test"
+    ));
+    // a doc comment carrying an attribute is documentation
+    assert!(!has(
+        &detect(
+            "tests/app_test.rs",
+            "/// #[ignore]\n#[test]\nfn sums() {\n    assert_eq!(add(1, 2), 3);\n}\n"
+        ),
+        "skip-added"
+    ));
+}
+
+#[test]
+fn java_marker_inside_string_is_not_a_finding() {
+    // then: an annotation inside a string literal is data
+    assert!(!has(
+        &detect(
+            "src/test/java/AppTest.java",
+            "class AppTest {\n  @Test\n  void sums() {\n    String label = \"@Disabled\";\n    assertEquals(3, add(1, 2));\n  }\n}\n"
+        ),
+        "skip-added"
+    ));
+    // the same annotation in code still fires
+    assert!(has(
+        &detect(
+            "src/test/java/AppTest.java",
+            "class AppTest {\n  @Test\n  @Disabled\n  void sums() {\n    assertEquals(3, add(1, 2));\n  }\n}\n"
+        ),
+        "skip-added"
+    ));
+    // a commented-out test is still a finding
+    assert!(has(
+        &detect(
+            "src/test/java/AppTest.java",
+            "// @Test\n// void old() {\n//   assertEquals(1, 1);\n// }\n"
+        ),
+        "commented-out-test"
+    ));
+    // a Javadoc block carrying an annotation is documentation
+    assert!(!has(
+        &detect(
+            "src/test/java/AppTest.java",
+            "class AppTest {\n  /** @Disabled */\n  @Test\n  void sums() {\n    assertEquals(3, add(1, 2));\n  }\n}\n"
+        ),
+        "skip-added"
+    ));
+}
+
+#[test]
+fn masked_view_preserves_line_numbers() {
+    // given: a multi-line string whose content carries a marker, followed by a real skip
+    let content = "def test_sums():\n    text = \"\"\"@pytest.mark.skip\n    assert x == 1\n    \"\"\"\n    @pytest.mark.skip\n    assert add(1, 2) == 3\n";
+
+    // when
+    let findings = TestDetector::new().detect(content, "tests/test_app.py", true, true);
+
+    // then: the real marker is still reported on its original line
+    let skip = findings
+        .iter()
+        .find(|finding| finding.rule == "skip-added" && finding.line_number == 5);
+    assert!(skip.is_some(), "findings: {findings:?}");
+    assert_eq!(
+        findings
+            .iter()
+            .filter(|finding| finding.rule == "skip-added")
+            .count(),
+        1,
+        "the marker inside the docstring must not surface"
+    );
+}
+
+#[test]
+fn agent_memo_reads_the_original_text() {
+    // given: a memo phrase in a test name (a string literal, masked for line rules)
+    let findings = TestDetector::new().detect(
+        "it('now we parse twice', () => {\n  expect(add(1, 2)).toBe(3);\n});\n",
+        "tests/app.test.js",
+        true,
+        true,
+    );
+
+    // then: the comment/text rule still reads the original string
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "agent-memo-test"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn source_grep_reads_the_original_literals() {
+    // given: the read target is only visible in the string literal
+    let findings = TestDetector::new().detect(
+        "def test_reads_source():\n    text = Path(\"src/app.py\").read_text()\n    assert \"def \" in text\n",
+        "tests/test_app.py",
+        true,
+        true,
+    );
+
+    // then: masking the view must not hide the source-grep signal
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "source-grep-test"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn template_raw_and_heredoc_content_is_masked() {
+    // then: a focus marker in a template string is data
+    assert!(!has(
+        &detect(
+            "tests/app.test.ts",
+            "it('sums', () => {\n  const label = `it.only('x')`;\n  expect(add(1, 2)).toBe(3);\n});\n"
+        ),
+        "focus-added"
+    ));
+    // a raw string
+    assert!(!has(
+        &detect(
+            "tests/app_test.rs",
+            "#[test]\nfn sums() {\n    let label = r#\"#[ignore]\"#;\n    assert_eq!(add(1, 2), 3);\n}\n"
+        ),
+        "skip-added"
+    ));
+    // a raw Go string
+    assert!(!has(
+        &detect(
+            "tests/app_test.go",
+            "package app\n\nfunc TestSums(t *testing.T) {\n\tlabel := `t.Skip(\"later\")`\n\tif got := add(1, 2); got != 3 {\n\t\tt.Errorf(\"got %d\", got)\n\t}\n}\n"
+        ),
+        "skip-added"
+    ));
+    // a Ruby heredoc
+    assert!(!has(
+        &detect(
+            "test/app_test.rb",
+            "def test_sums\n  label = <<~EOT\n    it.only('x')\n  EOT\n  assert_equal 3, add(1, 2)\nend\n"
+        ),
+        "focus-added"
+    ));
+}
+
+#[test]
+fn detect_given_payload_markers_in_rust_string_literals_reports_no_line_findings() {
+    // given: the shapes that produced the known false positives in `tests/readme_hook.rs` and
+    // `tests/api.rs` — framework markers and assertion snippets carried as Rust string data
+    let source = r##"#[test]
+fn reads_payloads() {
+    let python = "def test_a():\n    @pytest.mark.skip\n    assert x == 1\n";
+    let js = r#"it.only('x', () => { expect(1).toBeDefined(); });"#;
+    let java = "assertEquals(1, 1)";
+    let json = b"{\"tool_name\":\"Write\",\"tool_input\":{\"content\":\"@pytest.mark.skip\"}}";
+    assert!(python.contains("skip"));
+}
+"##;
+
+    // when
+    let findings = TestDetector::new().detect(source, "tests/readme_hook.rs", true, true);
+
+    // then: the string content is data; only the real assertion on the last line is code
+    for rule in [
+        "skip-added",
+        "focus-added",
+        "weakened-assertion",
+        "constant-assertion",
+        "conditional-assertion",
+        "incomplete-assertion",
+    ] {
+        assert!(
+            !findings.iter().any(|finding| finding.rule == rule),
+            "{rule} leaked from a string literal: {findings:?}"
+        );
+    }
+}
+
+#[test]
+fn detect_given_distinct_literal_operands_does_not_report_tautology() {
+    // given: masking the string content collapses both operands' text
+    let detector = TestDetector::new();
+    let distinct = "def test_a():\n    assert f(\"a\") == f(\"b\")\n";
+    let same = "def test_a():\n    assert f(\"a\") == f(\"a\")\n";
+
+    // when
+    let distinct_findings = detector.detect(distinct, "tests/test_app.py", true, true);
+    let same_findings = detector.detect(same, "tests/test_app.py", true, true);
+
+    // then: only the expression compared with itself is a tautology
+    assert!(
+        !distinct_findings
+            .iter()
+            .any(|finding| finding.rule == "tautological-assertion"),
+        "findings: {distinct_findings:?}"
+    );
+    assert!(
+        same_findings
+            .iter()
+            .any(|finding| finding.rule == "tautological-assertion"),
+        "findings: {same_findings:?}"
+    );
+}
+
+fn literal_rules(path: &str, content: &str) -> Vec<String> {
+    TestDetector::new()
+        .detect(content, path, true, true)
+        .into_iter()
+        .map(|finding| finding.rule)
+        .collect()
+}
+
+fn assert_distinct_strings_are_not_constant(path: &str, distinct: &str, identical: &str) {
+    let distinct = literal_rules(path, distinct);
+    assert!(
+        !distinct
+            .iter()
+            .any(|rule| rule == "constant-assertion" || rule == "tautological-assertion"),
+        "distinct strings were flagged: {distinct:?}"
+    );
+    let identical = literal_rules(path, identical);
+    assert!(
+        identical.iter().any(|rule| rule == "constant-assertion"),
+        "identical strings were not flagged: {identical:?}"
+    );
+}
+
+#[test]
+fn typescript_distinct_string_literals_are_not_constant() {
+    assert_distinct_strings_are_not_constant(
+        "tests/app.test.ts",
+        "it('x', () => {\n  expect(\"abc\").toBe(\"xyz\");\n});\n",
+        "it('x', () => {\n  expect(\"abc\").toBe(\"abc\");\n});\n",
+    );
+}
+
+#[test]
+fn python_distinct_string_literals_are_not_constant() {
+    assert_distinct_strings_are_not_constant(
+        "tests/test_app.py",
+        "def test_a():\n    assert \"abc\" == \"xyz\"\n",
+        "def test_a():\n    assert \"abc\" == \"abc\"\n",
+    );
+}
+
+#[test]
+fn go_distinct_string_literals_are_not_constant() {
+    assert_distinct_strings_are_not_constant(
+        "tests/app_test.go",
+        "package app\n\nfunc TestA(t *testing.T) {\n\tassert.Equal(t, \"abc\", \"xyz\")\n}\n",
+        "package app\n\nfunc TestA(t *testing.T) {\n\tassert.Equal(t, \"abc\", \"abc\")\n}\n",
+    );
+}
+
+#[test]
+fn rust_distinct_string_literals_are_not_constant() {
+    assert_distinct_strings_are_not_constant(
+        "tests/app_test.rs",
+        "#[test]\nfn a() {\n    assert_eq!(\"abc\", \"xyz\");\n}\n",
+        "#[test]\nfn a() {\n    assert_eq!(\"abc\", \"abc\");\n}\n",
+    );
+}
+
+#[test]
+fn java_distinct_string_literals_are_not_constant() {
+    assert_distinct_strings_are_not_constant(
+        "src/test/java/AppTest.java",
+        "class AppTest {\n  @Test\n  void a() {\n    assertEquals(\"abc\", \"xyz\");\n  }\n}\n",
+        "class AppTest {\n  @Test\n  void a() {\n    assertEquals(\"abc\", \"abc\");\n  }\n}\n",
+    );
+}
+
+#[test]
+fn detect_given_same_length_literal_strings_does_not_duplicate() {
+    // given: two tests whose only difference is the value of a same-length string literal
+    let source = "it('upper', () => {\n  expect(read()).toBe('abc');\n});\nit('lower', () => {\n  expect(read()).toBe('xyz');\n});\n";
+
+    // when
+    let findings = TestDetector::new().detect(source, "tests/app.test.js", true, true);
+
+    // then
+    assert!(
+        !findings.iter().any(
+            |finding| finding.rule == "duplicate-test" || finding.rule == "near-duplicate-test"
+        ),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn expected_copied_from_actual_still_sees_string_literals() {
+    // given: the expected string literal is replaced by a copy of the actual expression
+    let old = "def test_a():\n    assert compute() == \"abc\"\n";
+    let new = "def test_a():\n    assert compute() == compute()\n";
+
+    // when
+    let findings = TestDetector::new().detect_edit(old, new, "tests/test_app.py", true, true);
+
+    // then
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "expected-copied-from-actual"),
         "findings: {findings:?}"
     );
 }

@@ -53,6 +53,61 @@ pub(crate) fn test_query(name: &str) -> Option<&'static str> {
     }
 }
 
+/// Per-language node kinds whose text is a string literal.
+///
+/// One table, consumed by [`crate::detector`] to build the masked view: the content of every node
+/// of these kinds is blanked to spaces (newlines and quotes preserved), so a marker that appears
+/// only inside a string cannot drive a line rule. A language with no entry parses as before and its
+/// line rules see the unmasked text.
+pub(crate) fn string_node_kinds(name: &str) -> &'static [&'static str] {
+    match name {
+        "python" | "lua" | "groovy" | "r" | "toml" | "cue" | "proto" => &["string"],
+        "javascript" | "typescript" | "tsx" => &["string", "template_string"],
+        "go" => &["interpreted_string_literal", "raw_string_literal"],
+        "rust" | "cpp" => &["string_literal", "raw_string_literal", "char_literal"],
+        "java" | "kotlin" => &["string_literal", "character_literal"],
+        "ruby" => &["string", "heredoc_body"],
+        "csharp" => &[
+            "string_literal",
+            "verbatim_string_literal",
+            "character_literal",
+        ],
+        "php" => &["string", "encapsed_string", "heredoc", "nowdoc"],
+        "swift" => &["line_string_literal", "multi_line_string_literal"],
+        "scala" => &["string", "interpolated_string", "character_literal"],
+        "elixir" => &["string", "charlist", "sigil"],
+        "c" => &["string_literal", "char_literal"],
+        "ocaml" => &["string", "quoted_string", "character"],
+        "elm" => &["string_constant_expr", "char_constant_expr"],
+        "bash" => &["string", "raw_string", "ansi_c_string", "heredoc_body"],
+        "haskell" => &["string", "char"],
+        "yaml" => &[
+            "string_scalar",
+            "single_quote_scalar",
+            "double_quote_scalar",
+            "block_scalar",
+            "plain_scalar",
+        ],
+        "hcl" => &["string_lit", "heredoc_template"],
+        "css" => &["string_value"],
+        "html" => &["quoted_attribute_value"],
+        "dart" => &["string_literal"],
+        "zig" => &["STRINGLITERALSINGLE"],
+        _ => &[],
+    }
+}
+
+/// The tree-sitter query built from a language's string kinds.
+pub(crate) fn string_query_source(kinds: &[&str]) -> String {
+    let mut source = String::new();
+    for kind in kinds {
+        source.push('(');
+        source.push_str(kind);
+        source.push_str(") @string\n");
+    }
+    source
+}
+
 /// Whether the name is a test-function identifier for the languages that gate on the name.
 pub(crate) fn is_test_function_name(name: &str) -> bool {
     name.starts_with("test_") || name.starts_with("Test") || name.starts_with("spec_")
@@ -218,5 +273,62 @@ mod tests {
         assert!(is_test_callee("describe"));
         assert!(!is_test_callee("expect_throws"));
         assert!(!is_test_callee("console"));
+    }
+
+    /// Every table entry must name a node kind its grammar actually has, or the masking query
+    /// silently fails to build and the string content leaks back into the line rules.
+    #[test]
+    fn string_node_kinds_build_a_query_for_every_language() {
+        use super::string_node_kinds;
+        use tree_sitter::Query;
+
+        let names = [
+            "bash",
+            "c",
+            "cpp",
+            "csharp",
+            "css",
+            "cue",
+            "dart",
+            "dockerfile",
+            "elixir",
+            "elm",
+            "go",
+            "groovy",
+            "haskell",
+            "hcl",
+            "html",
+            "java",
+            "javascript",
+            "kotlin",
+            "lua",
+            "ocaml",
+            "php",
+            "proto",
+            "python",
+            "r",
+            "ruby",
+            "rust",
+            "scala",
+            "sql",
+            "svelte",
+            "swift",
+            "toml",
+            "tsx",
+            "typescript",
+            "yaml",
+            "zig",
+        ];
+        for name in names {
+            let kinds = string_node_kinds(name);
+            if kinds.is_empty() {
+                continue;
+            }
+            let language = tree_sitter_language_pack::get_language(name)
+                .unwrap_or_else(|error| panic!("{name}: grammar unavailable: {error}"));
+            let source = super::string_query_source(kinds);
+            Query::new(&language, &source)
+                .unwrap_or_else(|error| panic!("{name}: invalid string kinds {kinds:?}: {error}"));
+        }
     }
 }

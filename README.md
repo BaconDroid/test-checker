@@ -192,14 +192,23 @@ that the compiled host grammar exposes (for example, a `<script>` block in HTML)
 `commented-out-test`, `source-grep-test`, `test-volume`, `harness-edited`, `near-duplicate-test`,
 `echo-test`, `mirror-implementation-test`.
 
-Confidence policy: `source-grep-test` is `medium`; `harness-edited` is `medium` on sensitive harness
-paths (CI workflows, `.gitlab-ci*`, pytest/tox/conftest, jest/vitest config) and `low` otherwise;
-`test-volume`, `near-duplicate-test`, `echo-test` and `mirror-implementation-test` are `low`
-telemetry, so the default `medium` gate hides them. Use `--min-confidence low` to see them and block
-on them.
+Confidence policy: `source-grep-test` is `low` telemetry and fires only when an assertion inspects
+the **text** of a read source file (substring/`includes`, regex/`toMatch`, or snapshot); reading a
+missing file or asserting a parsed property does not fire. `harness-edited` is `medium` on sensitive
+harness paths (CI workflows, `.gitlab-ci*`, pytest/tox/conftest, jest/vitest config) and `low`
+otherwise; `test-volume`, `near-duplicate-test`, `echo-test` and `mirror-implementation-test` are
+`low` telemetry, so the default `medium` gate hides them. Use `--min-confidence low` to see them and
+block on them.
 
 Each finding carries a `confidence` of `high`/`medium`/`low`. Line rules classify the added lines of
-the captured test bodies (comments stripped); diff rules compare an edit's old and new content.
+the captured test bodies (comments stripped) against a **masked view**: the content of string
+literals, docstrings, template strings, raw strings and heredocs is replaced by spaces, preserving
+newlines and byte offsets so line numbers do not move. A `@pytest.mark.skip` or `.only` that appears
+only inside a string is therefore data, not a disabled or focused test. The per-language string node
+kinds live in one table (`src/language.rs`), with a fixture per language. Comment-based rules
+(`commented-out-test`, `agent-memo-test`) keep reading the original text; the rules that read literal
+targets (`source-grep-test`, `mock-of-sut`) locate the call in the view and resolve the file or module
+literal from the original line. Diff rules compare an edit's old and new content.
 
 On an `Edit`/`MultiEdit` fragment, whole-test rules (`gutted-test`, `over-mocking`, `no-assertion`,
 `duplicate-test`, `near-duplicate-test`, `echo-test`) fire only when the fragment contains the

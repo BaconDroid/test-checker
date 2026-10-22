@@ -5,7 +5,10 @@ use std::time::Instant;
 use tree_sitter::{Query, QueryCursor, StreamingIterator};
 
 use crate::engine;
-use crate::language::{is_test_callee, is_test_function_name, language_for_path, test_query};
+use crate::language::{
+    is_test_callee, is_test_function_name, language_for_path, string_node_kinds,
+    string_query_source, test_query,
+};
 use crate::models::{Confidence, Finding};
 use crate::rules::{self, AddedLine, DiffContext};
 
@@ -15,10 +18,56 @@ struct Runtime {
     comment_query: Query,
     test_query: Option<Query>,
     injection_query: Option<Query>,
+    /// Matches every string-literal node in the grammar (see `language::string_node_kinds`).
+    string_query: Option<Query>,
 }
 
 static RUNTIMES: LazyLock<Mutex<HashMap<String, Arc<Runtime>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Work counters for [`masked_view`], compiled only into the crate's unit tests so a release build
+/// carries no counter, atomic, or branch.
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct MaskedViewCounters {
+    constructions: std::sync::atomic::AtomicUsize,
+    nodes_visited: std::sync::atomic::AtomicUsize,
+    bytes_copied: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+static MASKED_VIEW_COUNTERS: MaskedViewCounters = MaskedViewCounters {
+    constructions: std::sync::atomic::AtomicUsize::new(0),
+    nodes_visited: std::sync::atomic::AtomicUsize::new(0),
+    bytes_copied: std::sync::atomic::AtomicUsize::new(0),
+};
+
+#[cfg(test)]
+impl MaskedViewCounters {
+    fn reset(&self) {
+        use std::sync::atomic::Ordering;
+        self.constructions.store(0, Ordering::Relaxed);
+        self.nodes_visited.store(0, Ordering::Relaxed);
+        self.bytes_copied.store(0, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> WorkCounts {
+        use std::sync::atomic::Ordering;
+        WorkCounts {
+            constructions: self.constructions.load(Ordering::Relaxed),
+            nodes_visited: self.nodes_visited.load(Ordering::Relaxed),
+            bytes_copied: self.bytes_copied.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WorkCounts {
+    constructions: usize,
+    nodes_visited: usize,
+    bytes_copied: usize,
+}
 
 /// Unit-test seam for the internal-failure path. Compiled only into the crate's unit tests, so no
 /// binary, environment variable, or command-line flag can reach it.
@@ -133,10 +182,12 @@ impl TestDetector {
         if include_body_tests {
             if let Some(query) = &runtime.test_query {
                 let bodies = capture_bodies(&runtime, query, &tree, source);
+                let masked = masked_view(&runtime, &tree, content);
                 findings.extend(analyze_new_bodies(
                     &runtime.name,
                     file_path,
                     content,
+                    masked.as_deref().unwrap_or(content),
                     &bodies,
                 ));
             }
@@ -221,17 +272,29 @@ impl TestDetector {
             findings.extend(commented_out_findings(file_path, &new_comments, &old_texts));
         }
         if include_body_tests {
-            findings.extend(rules::diff_findings(old_string, new_string, file_path));
+            let masked_new = masked_view(&runtime, &tree, new_string);
+            let masked_old = old_tree
+                .as_ref()
+                .and_then(|old_tree| masked_view(&runtime, old_tree, old_string));
+            let new_view = masked_new.as_deref().unwrap_or(new_string);
+            let old_view = masked_old.as_deref().unwrap_or(old_string);
+            findings.extend(rules::diff_findings_on_views(
+                old_view, new_view, old_string, new_string, file_path,
+            ));
             if let Some(query) = &runtime.test_query {
                 let bodies = capture_bodies(&runtime, query, &tree, source);
                 let added = engine::added_lines(old_string, new_string);
                 findings.extend(analyze_edited_bodies(
                     &runtime.name,
                     file_path,
-                    old_string,
-                    new_string,
                     &bodies,
                     &added,
+                    Views {
+                        original: new_string,
+                        old_original: old_string,
+                        old: old_view,
+                        masked: new_view,
+                    },
                 ));
                 if let Some(old_tree) = &old_tree {
                     let old_bodies =
@@ -322,12 +385,14 @@ fn runtime_by_name(name: &str) -> Result<Arc<Runtime>, DetectError> {
         Some(source) => Some(Query::new(&language, source).map_err(|_| uncompilable())?),
         None => None,
     };
+    let string_query = string_query(&language, name);
     let runtime = Arc::new(Runtime {
         name: name.to_owned(),
         language,
         comment_query: comment,
         test_query: body,
         injection_query: injection,
+        string_query,
     });
     runtimes.insert(name.to_owned(), Arc::clone(&runtime));
     Ok(runtime)
@@ -361,6 +426,59 @@ fn parse_with_runtime(
         }
         None => Err(DetectError::Internal(format!("parse failed: {file_path}"))),
     }
+}
+
+/// Build the string-literal query for a grammar from the one kind table.
+fn string_query(language: &tree_sitter::Language, name: &str) -> Option<Query> {
+    let kinds = string_node_kinds(name);
+    if kinds.is_empty() {
+        return None;
+    }
+    Query::new(language, &string_query_source(kinds)).ok()
+}
+
+/// A length-preserving copy of `content` where every string literal's content is blanked.
+///
+/// Newlines and every string delimiter character are preserved, so line numbers and byte offsets do
+/// not move; only the bytes between the delimiters become spaces. `None` when the grammar has no
+/// string kinds or the content is not valid UTF-8 (it always is: ASCII spaces replace whole bytes).
+fn masked_view(runtime: &Runtime, tree: &tree_sitter::Tree, content: &str) -> Option<String> {
+    let query = runtime.string_query.as_ref()?;
+    let source = content.as_bytes();
+    #[cfg(test)]
+    {
+        use std::sync::atomic::Ordering;
+        MASKED_VIEW_COUNTERS
+            .constructions
+            .fetch_add(1, Ordering::Relaxed);
+        MASKED_VIEW_COUNTERS
+            .bytes_copied
+            .fetch_add(source.len(), Ordering::Relaxed);
+    }
+    let mut bytes = source.to_vec();
+    let mut cursor = QueryCursor::new();
+    let mut captures = cursor.captures(query, tree.root_node(), source);
+    captures.advance();
+    while let Some((query_match, capture_index)) = captures.get() {
+        if let Some(capture) = query_match.captures.get(*capture_index) {
+            #[cfg(test)]
+            {
+                use std::sync::atomic::Ordering;
+                MASKED_VIEW_COUNTERS
+                    .nodes_visited
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            if let Some(range) = bytes.get_mut(capture.node.byte_range()) {
+                for byte in range.iter_mut() {
+                    if !matches!(*byte, b'\n' | b'\r' | b'"' | b'\'' | b'`') {
+                        *byte = b' ';
+                    }
+                }
+            }
+        }
+        captures.advance();
+    }
+    String::from_utf8(bytes).ok()
 }
 
 fn collect_comments(
@@ -645,17 +763,20 @@ fn analyze_new_bodies(
     language: &str,
     file_path: &str,
     content: &str,
+    view: &str,
     bodies: &[Body],
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
     let mut seen = DuplicateSignatures::default();
     for body in bodies {
-        let lines = body_added_lines(content, body, language);
-        findings.extend(classify_lines(file_path, &lines));
-        findings.extend(rules::classify_test_body_with_reliability(
+        let lines = body_added_lines(view, body, language);
+        let original_lines = body_added_lines(content, body, language);
+        findings.extend(classify_lines(file_path, &lines, &original_lines));
+        findings.extend(rules::classify_test_body_with_original(
             file_path,
             body.start_row + 1,
             &lines,
+            &original_lines,
             body.reliable,
         ));
         // `duplicate-test` compares the whole body, so adding the same line to two different
@@ -668,7 +789,7 @@ fn analyze_new_bodies(
                 file_path,
                 body.start_row + 1,
                 &exact_lines,
-                &lines,
+                &original_lines,
             )
         {
             findings.push(finding);
@@ -681,30 +802,58 @@ fn analyze_new_bodies(
     findings
 }
 
+/// The original content and its masked view, plus the masked view of the pre-edit content.
+#[derive(Clone, Copy)]
+struct Views<'a> {
+    original: &'a str,
+    old_original: &'a str,
+    old: &'a str,
+    masked: &'a str,
+}
+
 fn analyze_edited_bodies(
     language: &str,
     file_path: &str,
-    old_content: &str,
-    content: &str,
     bodies: &[Body],
     added: &HashSet<usize>,
+    views: Views<'_>,
 ) -> Vec<Finding> {
+    let Views {
+        original: content,
+        old_original: old_content,
+        old: old_view,
+        masked: view,
+    } = views;
     let mut findings = Vec::new();
     let mut seen = DuplicateSignatures::default();
-    let removed = removed_lines(old_content, content);
-    let diff = DiffContext { removed: &removed };
+    let (removed, removed_original) = removed_lines(old_view, view, old_content);
+    let diff = DiffContext {
+        removed: &removed,
+        removed_original: &removed_original,
+    };
     for body in bodies {
-        let full = body_added_lines(content, body, language);
+        let full = body_added_lines(view, body, language);
+        let original_lines = body_added_lines(content, body, language);
         let touched: Vec<AddedLine<'_>> = full
+            .iter()
+            .copied()
+            .filter(|line| added.contains(&(line.line_number - 1)))
+            .collect();
+        let touched_original: Vec<AddedLine<'_>> = original_lines
             .iter()
             .copied()
             .filter(|line| added.contains(&(line.line_number - 1)))
             .collect();
         let is_touched = !touched.is_empty();
         if is_touched {
-            findings.extend(classify_diff_lines(file_path, &touched, &diff));
+            findings.extend(classify_diff_lines(
+                file_path,
+                &touched,
+                &touched_original,
+                &diff,
+            ));
             if let Some(finding) =
-                rules::classify_echo_body(file_path, &full, body.reliable, Some(added))
+                rules::classify_echo_body(file_path, &original_lines, body.reliable, Some(added))
             {
                 findings.push(finding);
             }
@@ -720,7 +869,7 @@ fn analyze_edited_bodies(
                 file_path,
                 body.start_row + 1,
                 &exact_lines,
-                &full,
+                &original_lines,
             )
             && is_touched
         {
@@ -742,15 +891,23 @@ fn analyze_edited_bodies(
 ///
 /// `engine::added_lines(from, to)` returns the unmatched line indices of its **second** argument,
 /// so the arguments are deliberately reversed here: `added_lines(new, old)` yields the *old* lines
-/// the edit removed, indexed against `old_content`.
-fn removed_lines<'a>(old_content: &'a str, new_content: &str) -> Vec<&'a str> {
-    let removed = engine::added_lines(new_content, old_content);
-    old_content
-        .lines()
-        .enumerate()
-        .filter(|(index, line)| removed.contains(index) && !rules::is_comment_line(line))
-        .map(|(_, line)| line.trim())
-        .collect()
+/// the edit removed, indexed against `old_view`. Each removed line is returned twice: the masked
+/// view (structure) and the original (literal values), at the same line index.
+fn removed_lines<'a>(
+    old_view: &'a str,
+    new_view: &str,
+    old_content: &'a str,
+) -> (Vec<&'a str>, Vec<&'a str>) {
+    let removed = engine::added_lines(new_view, old_view);
+    let mut views = Vec::new();
+    let mut originals = Vec::new();
+    for (index, (view, original)) in old_view.lines().zip(old_content.lines()).enumerate() {
+        if removed.contains(&index) && !rules::is_comment_line(view) {
+            views.push(view.trim());
+            originals.push(original.trim());
+        }
+    }
+    (views, originals)
 }
 
 /// The first line of each earlier body, keyed by its signature: `exact` preserves comments (the
@@ -863,10 +1020,17 @@ fn strip_block_comment<'a>(line: &'a str, in_block_comment: &mut bool) -> Option
     }
 }
 
-fn classify_lines(file_path: &str, lines: &[AddedLine<'_>]) -> Vec<Finding> {
+fn classify_lines(
+    file_path: &str,
+    lines: &[AddedLine<'_>],
+    original_lines: &[AddedLine<'_>],
+) -> Vec<Finding> {
     let mut findings = Vec::new();
     for index in 0..lines.len() {
-        findings.extend(rules::classify_added_line(file_path, lines, index));
+        let original = original_lines.get(index).map_or("", |line| line.text);
+        findings.extend(rules::classify_added_line_with_original(
+            file_path, lines, index, original,
+        ));
     }
     findings
 }
@@ -874,11 +1038,15 @@ fn classify_lines(file_path: &str, lines: &[AddedLine<'_>]) -> Vec<Finding> {
 fn classify_diff_lines(
     file_path: &str,
     lines: &[AddedLine<'_>],
+    original_lines: &[AddedLine<'_>],
     diff: &DiffContext<'_>,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
     for index in 0..lines.len() {
-        findings.extend(rules::classify_diff_line(file_path, lines, index, diff));
+        let original = original_lines.get(index).map_or("", |line| line.text);
+        findings.extend(rules::classify_diff_line_with_original(
+            file_path, lines, index, original, diff,
+        ));
     }
     findings
 }
@@ -943,7 +1111,134 @@ fn strip_line_comment<'a>(line: &'a str, language: &str) -> &'a str {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_line_comment;
+    use std::fmt::Write as _;
+
+    use super::{MASKED_VIEW_COUNTERS, TestDetector, WorkCounts, strip_line_comment};
+
+    const TYPICAL_BYTES: usize = 1_500;
+    const LARGE_BYTES: usize = 200_000;
+
+    /// A zero-cost filler so each literal is long enough that a 200 KB payload has a shallow
+    /// parse tree; tree-sitter's debug-build parse stays inside the shared 50 ms budget while the
+    /// literal count still grows with the payload.
+    fn filler(index: usize, length: usize) -> String {
+        let mut text = format!("assert {index} ");
+        text.push_str(&"x".repeat(length.saturating_sub(text.len())));
+        text
+    }
+
+    /// A TypeScript test carrying a plain string, a template literal, and a raw template string
+    /// per iteration, grown until `target` bytes.
+    fn typescript_payload(target: usize) -> String {
+        let mut payload = String::with_capacity(target + 256);
+        payload.push_str("it('bulk', () => {\n");
+        let literal_len = if target >= LARGE_BYTES { 1_000 } else { 96 };
+        let mut index = 0;
+        while payload.len() < target {
+            let text = filler(index, literal_len);
+            write!(
+                payload,
+                "  const a{index} = \"{text}\";\n  const b{index} = `{text}`;\n  const c{index} = String.raw`{text}`;\n"
+            )
+            .expect("writing to a String cannot fail");
+            index += 1;
+        }
+        payload.push_str("  expect(add(1, 2)).toBe(3);\n});\n");
+        payload
+    }
+
+    /// A Rust test carrying a plain string, a raw string, and a byte string per iteration, grown
+    /// until `target` bytes.
+    fn rust_payload(target: usize) -> String {
+        let mut payload = String::with_capacity(target + 256);
+        payload.push_str("#[test]\nfn bulk() {\n");
+        let literal_len = if target >= LARGE_BYTES { 1_000 } else { 96 };
+        let mut index = 0;
+        while payload.len() < target {
+            let text = filler(index, literal_len);
+            write!(
+                payload,
+                "    let a{index} = \"{text}\";\n    let b{index} = r#\"{text}\"#;\n    let c{index} = b\"{text}\";\n"
+            )
+            .expect("writing to a String cannot fail");
+            index += 1;
+        }
+        payload.push_str("    assert_eq!(add(1, 2), 3);\n}\n");
+        payload
+    }
+
+    /// Run one `detect` call with the counters reset, returning the work it performed.
+    fn measure(path: &str, payload: &str) -> WorkCounts {
+        MASKED_VIEW_COUNTERS.reset();
+        let _ = TestDetector::new().detect(payload, path, true, true);
+        MASKED_VIEW_COUNTERS.snapshot()
+    }
+
+    /// The masked view's work bound.
+    ///
+    /// One `detect` call builds the view exactly once (never per rule), copies the input at most
+    /// twice (the implementation is one length-preserving pass, so the real count is exactly one
+    /// input), and visits at most one string-literal node per input byte. The 200 KB/typical node
+    /// ratio is capped at 300x: a ~1.8 KB typical payload grows ~110x in bytes to 200 KB, so 300x
+    /// keeps ~2.7x headroom for a denser string layout while rejecting superlinear rescans (a
+    /// per-rule rebuild would also break the construction and byte bounds).
+    #[test]
+    fn masked_view_work_is_bounded_and_linear() {
+        const MAX_NODE_RATIO: usize = 300;
+
+        let ts_typical = typescript_payload(TYPICAL_BYTES);
+        let ts_large = typescript_payload(LARGE_BYTES);
+        let rust_typical = rust_payload(TYPICAL_BYTES);
+        let rust_large = rust_payload(LARGE_BYTES);
+
+        let ts_typical_counts = measure("tests/app.test.ts", &ts_typical);
+        let ts_large_counts = measure("tests/app.test.ts", &ts_large);
+        let rust_typical_counts = measure("tests/app_test.rs", &rust_typical);
+        let rust_large_counts = measure("tests/app_test.rs", &rust_large);
+
+        eprintln!(
+            "masked view work: TS typical {} bytes {ts_typical_counts:?}; TS 200KB {} bytes {ts_large_counts:?}; Rust typical {} bytes {rust_typical_counts:?}; Rust 200KB {} bytes {rust_large_counts:?}",
+            ts_typical.len(),
+            ts_large.len(),
+            rust_typical.len(),
+            rust_large.len(),
+        );
+
+        for (label, counts, input) in [
+            ("TS typical", ts_typical_counts, ts_typical.len()),
+            ("TS 200KB", ts_large_counts, ts_large.len()),
+            ("Rust typical", rust_typical_counts, rust_typical.len()),
+            ("Rust 200KB", rust_large_counts, rust_large.len()),
+        ] {
+            assert_eq!(
+                counts.constructions, 1,
+                "{label}: the masked view must be built exactly once per detect call"
+            );
+            assert!(
+                counts.nodes_visited > 0,
+                "{label}: the payload must contain string literals"
+            );
+            assert!(
+                counts.bytes_copied <= 2 * input,
+                "{label}: bytes copied {} exceeds 2x the {input}-byte input",
+                counts.bytes_copied
+            );
+            assert!(
+                counts.nodes_visited <= input,
+                "{label}: visited {} string nodes for {input} input bytes",
+                counts.nodes_visited
+            );
+        }
+
+        assert!(
+            ts_large_counts.nodes_visited <= MAX_NODE_RATIO * ts_typical_counts.nodes_visited,
+            "TS node growth is superlinear: {ts_typical_counts:?} -> {ts_large_counts:?}"
+        );
+        assert!(
+            rust_large_counts.nodes_visited <= MAX_NODE_RATIO * rust_typical_counts.nodes_visited,
+            "Rust node growth is superlinear: {rust_typical_counts:?} -> {rust_large_counts:?}"
+        );
+    }
 
     #[test]
     fn strip_line_comment_given_trailing_comment_removes_it() {
