@@ -2340,6 +2340,15 @@ fn offset_span(text: &str, span: Span, base: usize) -> Span {
     (base + start, base + end)
 }
 
+/// The top-level comma-separated arguments of `inner`, trimmed, for callers that need the text
+/// rather than byte offsets.
+fn split_top_level(inner: &str) -> Vec<String> {
+    split_top_level_spans(inner, 0)
+        .into_iter()
+        .map(|(start, end)| inner[start..end].to_string())
+        .collect()
+}
+
 /// Whether a comment body looks like commented-out test/assertion code.
 #[must_use]
 pub fn looks_like_commented_out_test(comment_body: &str) -> bool {
