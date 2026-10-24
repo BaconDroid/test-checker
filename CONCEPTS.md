@@ -28,6 +28,18 @@ memory. So the target is "lean", not "empty".
   config is a high `config-edited` finding. A marker added in the same change that triggers the
   finding is itself reported (`allow-added`).
 
+## Speed bump, not a security boundary
+
+The hook runs after the write, reports what it saw, and asks the agent to stop. It is a **speed
+bump**, not a boundary: the agent has a shell and can edit the file again, disable or remove the
+hook, or write a suppression entry, so a determined agent can always get past it. That is accepted.
+The product promise is visibility and a human in the loop, not enforcement.
+
+An intended removal is approved by a **human** through a committed `.test-checker.json` entry with a
+reason. The agent's job on a removal finding is to stop and ask for that entry; adding it itself is
+exactly the behaviour the findings exist to expose, and editing the config is itself a high
+`config-edited` finding.
+
 ## Verdict and kind
 
 A **finding** is one reported problem: `comment-checker` reports a `<comment>` element,

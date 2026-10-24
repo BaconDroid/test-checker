@@ -25,6 +25,13 @@ trustworthy.
 writes its message to stderr; Claude Code feeds that message back to the agent, which is expected
 to revise the file. The hook cannot prevent or undo the write, and it never edits the file itself.
 
+This is a **speed bump, not a security boundary**. The agent has a shell: it can edit files
+directly, disarm or remove the hook, or write its own suppression, and any of those bypasses the
+check. The hook's job is to make weakening visible in the transcript and ask the agent to stop; it
+does not and cannot constrain a determined agent. An intended removal is approved by a **human**
+through a committed `.test-checker.json` entry with a reason — the agent must stop and ask for that,
+never grant it to itself.
+
 | | Status |
 |---|---|
 | Detect and report weakened or superfluous tests | works today (PostToolUse, exit `2`) |
@@ -236,15 +243,18 @@ a brand-new test is not blocked for using a loose matcher.
   the reason after `--` has at least 12 characters. A bare marker, an unknown rule, or a short reason
   suppresses nothing and is itself reported as `allow-invalid`. A marker added **in the same change**
   does not suppress it and is reported as `allow-added`.
-- **File-wide suppression.** Commit a `.test-checker.json` at the repo root. Only entries with a glob,
-  at least one rule id, and a non-empty reason suppress anything:
+- **File-wide suppression.** Commit a `.test-checker.json` at the repo root. The hook walks up from
+  the payload `cwd` to the first directory containing `.git` and reads the config only there, so a
+  config in a subdirectory is ignored. Only entries with a glob, at least one rule id, and a non-empty
+  reason suppress anything:
 
   ```json
   { "allow": [ { "glob": "tests/**", "rules": ["skip-added"], "reason": "legacy suite, tracked in #123" } ] }
   ```
 
   A file whose path matches a glob and whose rule is listed is suppressed. Editing `.test-checker.json`
-  itself is reported as a **high** `config-edited` finding.
+  itself is reported as a **high** `config-edited` finding. The reason is the human's approval of an
+  intended removal; the agent must ask for the entry instead of adding one.
 - `scripts/doctor.sh` lists old bare `test-checker: allow` markers that no longer suppress.
 
 `agent-memo-test` findings are additionally summarised under a dedicated banner, pointing at the test
