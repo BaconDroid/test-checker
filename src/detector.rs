@@ -84,6 +84,14 @@ thread_local! {
     pub(crate) static FORCE_BUDGET_EXCEEDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+// Unit-test seam that disables the shared parse budget for tests that assert on masked-view work
+// counters. A budget abort leaves the counters at zero and makes the measurement meaningless, so
+// those tests parse without the 50 ms limit; production always keeps the engine's budget.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static IGNORE_PARSE_BUDGET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Why a detection run produced no findings to judge.
 ///
 /// A `BudgetExceeded` is a deliberate fail-open skip; an `Internal` failure means the check never
@@ -421,6 +429,10 @@ fn parse_with_runtime(
     if FORCE_BUDGET_EXCEEDED.with(std::cell::Cell::get) {
         return Err(DetectError::BudgetExceeded);
     }
+    #[cfg(test)]
+    if IGNORE_PARSE_BUDGET.with(std::cell::Cell::get) {
+        return parse_unbounded(runtime, source, file_path);
+    }
     let started = Instant::now();
     match engine::parse_cached(&runtime.name, &runtime.language, source) {
         Some(tree) => Ok(tree),
@@ -429,6 +441,23 @@ fn parse_with_runtime(
         }
         None => Err(DetectError::Internal(format!("parse failed: {file_path}"))),
     }
+}
+
+/// Parse without the shared time budget, for unit tests that measure work counters. Test-only:
+/// production parsing always goes through [`engine::parse_cached`] and its 50 ms budget.
+#[cfg(test)]
+fn parse_unbounded(
+    runtime: &Runtime,
+    source: &[u8],
+    file_path: &str,
+) -> Result<tree_sitter::Tree, DetectError> {
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&runtime.language)
+        .map_err(|_| DetectError::Internal(format!("parse failed: {file_path}")))?;
+    parser
+        .parse(source, None)
+        .ok_or_else(|| DetectError::Internal(format!("parse failed: {file_path}")))
 }
 
 /// Build the string-literal query for a grammar from the one kind table.
@@ -1158,8 +1187,8 @@ mod tests {
     const LARGE_BYTES: usize = 200_000;
 
     /// A zero-cost filler so each literal is long enough that a 200 KB payload has a shallow
-    /// parse tree; tree-sitter's debug-build parse stays inside the shared 50 ms budget while the
-    /// literal count still grows with the payload.
+    /// parse tree; the work-counter test disables the shared parse budget, and the literal count
+    /// still grows with the payload.
     fn filler(index: usize, length: usize) -> String {
         let mut text = format!("assert {index} ");
         text.push_str(&"x".repeat(length.saturating_sub(text.len())));
@@ -1206,6 +1235,23 @@ mod tests {
         payload
     }
 
+    /// Disables the shared parse budget for the duration of a work-counter test, so a slow debug
+    /// parse cannot abort and zero the counters.
+    struct ParseBudgetDisabled;
+
+    impl ParseBudgetDisabled {
+        fn new() -> Self {
+            super::IGNORE_PARSE_BUDGET.with(|flag| flag.set(true));
+            Self
+        }
+    }
+
+    impl Drop for ParseBudgetDisabled {
+        fn drop(&mut self) {
+            super::IGNORE_PARSE_BUDGET.with(|flag| flag.set(false));
+        }
+    }
+
     /// Run one `detect` call with the counters reset, returning the work it performed.
     fn measure(path: &str, payload: &str) -> WorkCounts {
         MASKED_VIEW_COUNTERS.reset();
@@ -1224,6 +1270,10 @@ mod tests {
     #[test]
     fn masked_view_work_is_bounded_and_linear() {
         const MAX_NODE_RATIO: usize = 300;
+
+        // The 200 KB debug parse can exceed the production 50 ms budget under load; a budget abort
+        // would zero the counters, so this measurement runs budget-free.
+        let _unbounded = ParseBudgetDisabled::new();
 
         let ts_typical = typescript_payload(TYPICAL_BYTES);
         let ts_large = typescript_payload(LARGE_BYTES);
