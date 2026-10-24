@@ -1043,3 +1043,74 @@ fn check_hook_input_given_git_root_without_a_config_file_makes_only_stats() -> s
     assert!(result.message.contains("skip-added"), "{}", result.message);
     Ok(())
 }
+
+/// A config entry that lists only the two diff rules and whose reason is long enough.
+const fn diff_rule_config() -> &'static str {
+    r#"{"allow":[
+        {"glob":"npm/test-checker/*.test.js","rules":["assertion-removed","test-removed"],"reason":"payload fixtures intentionally drop assertions"},
+        {"glob":"tests/detector.rs","rules":["assertion-removed","test-removed"],"reason":"fixture text embeds assertion samples"},
+        {"glob":"tests/output.rs","rules":["assertion-removed","test-removed"],"reason":"fixture text embeds assertion samples"}
+    ]}"#
+}
+
+fn edit_payload(cwd: &std::path::Path, file_path: &str, old: &str, new: &str) -> String {
+    serde_json::json!({
+        "tool_name": "Edit",
+        "cwd": cwd.to_string_lossy(),
+        "tool_input": { "file_path": file_path, "old_string": old, "new_string": new },
+    })
+    .to_string()
+}
+
+#[test]
+fn check_hook_input_given_config_diff_rules_suppress_the_three_known_shapes() -> std::io::Result<()>
+{
+    // given: the three files whose fixture text makes the diff rules fire on a benign edit
+    let repo = temp_repo("diff-rule-suppression")?;
+    std::fs::write(repo.join(".test-checker.json"), diff_rule_config())?;
+    let cases = [
+        (
+            "npm/test-checker/index.test.js",
+            "it('a', () => {\n  assert.equal(add(1, 2), 3);\n  assert.equal(add(2, 2), 4);\n});\n",
+            "it('a', () => {\n  assert.equal(add(1, 2), 3);\n});\n",
+        ),
+        (
+            "tests/detector.rs",
+            "#[test]\nfn a() {\n    assert_eq!(add(1, 2), 3);\n    assert_eq!(add(2, 2), 4);\n}\n",
+            "#[test]\nfn a() {\n    assert_eq!(add(1, 2), 3);\n}\n",
+        ),
+        (
+            "tests/output.rs",
+            "#[test]\nfn a() {\n    assert_eq!(add(1, 2), 3);\n    assert_eq!(add(2, 2), 4);\n}\n",
+            "#[test]\nfn a() {\n    assert_eq!(add(1, 2), 3);\n}\n",
+        ),
+    ];
+
+    for (path, old, new) in cases {
+        // when
+        let result = check_hook_input(&edit_payload(&repo, path, old, new), "");
+
+        // then: the committed reason suppresses the diff rules for this edit
+        assert_eq!(result.exit_code, 0, "{path}: {}", result.message);
+    }
+    let _ = std::fs::remove_dir_all(&repo);
+    Ok(())
+}
+
+#[test]
+fn check_hook_input_given_config_diff_entry_does_not_suppress_other_rules() -> std::io::Result<()> {
+    // given: a config that lists only the diff rules, on an edit that adds a skip marker
+    let repo = temp_repo("diff-rule-only")?;
+    std::fs::write(repo.join(".test-checker.json"), diff_rule_config())?;
+    let old = "#[test]\nfn a() {\n    assert_eq!(add(1, 2), 3);\n}\n";
+    let new = "#[test]\n#[ignore]\nfn a() {\n    assert_eq!(add(1, 2), 3);\n}\n";
+
+    // when
+    let result = check_hook_input(&edit_payload(&repo, "tests/detector.rs", old, new), "");
+    let _ = std::fs::remove_dir_all(&repo);
+
+    // then: skip-added is not listed, so it still blocks
+    assert_eq!(result.exit_code, 2, "{}", result.message);
+    assert!(result.message.contains("skip-added"), "{}", result.message);
+    Ok(())
+}
