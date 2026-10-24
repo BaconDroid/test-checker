@@ -1114,3 +1114,47 @@ fn check_hook_input_given_config_diff_entry_does_not_suppress_other_rules() -> s
     assert!(result.message.contains("skip-added"), "{}", result.message);
     Ok(())
 }
+
+#[test]
+fn check_hook_input_given_removed_assertion_asks_the_human_for_a_config_entry() {
+    // given: an edit that drops one assertion
+    let input = r#"{"tool_name":"Edit","tool_input":{"file_path":"tests/test_app.py","old_string":"def test_a():\n    assert add(1, 1) == 2\n    assert add(2, 2) == 4\n","new_string":"def test_a():\n    assert add(1, 1) == 2\n"}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then: the human is told how to approve an intended removal
+    assert_eq!(result.exit_code, 2);
+    assert!(result.message.contains("assertion-removed"));
+    assert!(
+        result.message.contains(
+            "STOP and ask the human to add a .test-checker.json entry with a reason if the removal is intended"
+        ),
+        "{}",
+        result.message
+    );
+}
+
+#[test]
+fn check_hook_input_given_removed_test_asks_the_human_for_a_config_entry() {
+    // given: an edit that drops a whole test while keeping another
+    let input = r#"{"tool_name":"Edit","tool_input":{"file_path":"tests/test_app.py","old_string":"def test_a():\n    assert x == 1\n\ndef test_b():\n    assert y == 2\n","new_string":"def test_b():\n    assert y == 2\n"}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then
+    assert_eq!(result.exit_code, 2);
+    assert!(
+        result.message.contains("test-removed"),
+        "{}",
+        result.message
+    );
+    assert!(
+        result.message.contains(
+            "STOP and ask the human to add a .test-checker.json entry with a reason if the removal is intended"
+        ),
+        "{}",
+        result.message
+    );
+}

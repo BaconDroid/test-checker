@@ -347,7 +347,7 @@ fn removed_test_findings(
             findings.push(Finding::new(
                 "test-removed",
                 Confidence::High,
-                "A test present before this edit is gone; deleting a test is a strong tampering signal.",
+                "A test present before this edit is gone; deleting a test is a strong tampering signal. STOP and ask the human to add a .test-checker.json entry with a reason if the removal is intended.",
                 1,
                 file_path,
                 old_body.name.as_deref().unwrap_or(""),

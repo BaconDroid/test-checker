@@ -2024,7 +2024,9 @@ pub fn diff_findings_on_views(
             findings.push(Finding::new(
                 "assertion-removed",
                 Confidence::High,
-                format!("{removed} existing assertion(s) were removed without a replacement."),
+                format!(
+                    "{removed} existing assertion(s) were removed without a replacement. STOP and ask the human to add a .test-checker.json entry with a reason if the removal is intended."
+                ),
                 1,
                 file_path,
                 "",
