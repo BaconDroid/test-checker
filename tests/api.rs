@@ -699,8 +699,16 @@ fn check_hook_input_from_reader_given_non_harness_edit_does_not_report_harness_e
     );
 }
 
-/// A unique temporary repo directory for a `.test-checker.json` fixture.
+/// A unique temporary repository directory: a directory with a `.git` entry, so the config
+/// lookup treats it as the repository root.
 fn temp_repo(label: &str) -> std::io::Result<std::path::PathBuf> {
+    let path = temp_dir(label)?;
+    std::fs::create_dir_all(path.join(".git"))?;
+    Ok(path)
+}
+
+/// A unique temporary directory with no `.git` anywhere in its ancestry.
+fn temp_dir(label: &str) -> std::io::Result<std::path::PathBuf> {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());
@@ -930,4 +938,108 @@ fn check_hook_input_given_nested_config_edit_returns_a_high_finding() {
         "{}",
         result.message
     );
+}
+
+#[test]
+fn check_hook_input_given_config_at_git_root_found_from_subdirectory_cwd() -> std::io::Result<()> {
+    // given: the config lives at the repository root, but the payload's cwd is a subdirectory
+    let repo = temp_repo("config-from-subdir")?;
+    std::fs::create_dir_all(repo.join("tests/nested"))?;
+    std::fs::write(
+        repo.join(".test-checker.json"),
+        r#"{"allow":[{"glob":"tests/**","rules":["skip-added"],"reason":"legacy suite migration tracked in #42"}]}"#,
+    )?;
+    let content = "def test_a():\n    @pytest.mark.skip\n    assert x == 1\n";
+
+    // when: the cwd is below the root that owns the config
+    let result = check_hook_input(
+        &write_payload(&repo.join("tests/nested"), "tests/test_app.py", content),
+        "",
+    );
+    let _ = std::fs::remove_dir_all(&repo);
+
+    // then: the walk reached the git root and honoured its config
+    assert_eq!(result.exit_code, 0, "{}", result.message);
+    Ok(())
+}
+
+#[test]
+fn check_hook_input_given_config_in_the_cwd_subdirectory_is_ignored() -> std::io::Result<()> {
+    // given: the cwd itself is a subdirectory carrying its own config; the git root has none
+    let repo = temp_repo("config-in-cwd")?;
+    let cwd = repo.join("tests/nested");
+    std::fs::create_dir_all(&cwd)?;
+    std::fs::write(
+        cwd.join(".test-checker.json"),
+        r#"{"allow":[{"glob":"**","rules":["skip-added"],"reason":"subdirectory config must not apply"}]}"#,
+    )?;
+    let content = "def test_a():\n    @pytest.mark.skip\n    assert x == 1\n";
+
+    // when
+    let result = check_hook_input(&write_payload(&cwd, "test_app.py", content), "");
+    let _ = std::fs::remove_dir_all(&repo);
+
+    // then: only the repository-root config is read
+    assert_eq!(result.exit_code, 2, "{}", result.message);
+    assert!(result.message.contains("skip-added"), "{}", result.message);
+    Ok(())
+}
+
+#[test]
+fn check_hook_input_given_config_in_the_file_directory_is_ignored() -> std::io::Result<()> {
+    // given: the edited file's own directory carries a config, but the git root does not
+    let repo = temp_repo("config-in-file-dir")?;
+    std::fs::create_dir_all(repo.join("tests"))?;
+    std::fs::write(
+        repo.join("tests/.test-checker.json"),
+        r#"{"allow":[{"glob":"tests/**","rules":["skip-added"],"reason":"file-directory config must not apply"}]}"#,
+    )?;
+    let content = "def test_a():\n    @pytest.mark.skip\n    assert x == 1\n";
+
+    // when
+    let result = check_hook_input(&write_payload(&repo, "tests/test_app.py", content), "");
+    let _ = std::fs::remove_dir_all(&repo);
+
+    // then
+    assert_eq!(result.exit_code, 2, "{}", result.message);
+    assert!(result.message.contains("skip-added"), "{}", result.message);
+    Ok(())
+}
+
+#[test]
+fn check_hook_input_given_no_git_ancestor_reads_no_config() -> std::io::Result<()> {
+    // given: a config in a directory that is not inside any git work tree
+    let dir = temp_dir("no-git")?;
+    std::fs::write(
+        dir.join(".test-checker.json"),
+        r#"{"allow":[{"glob":"**","rules":["skip-added"],"reason":"config outside a git work tree must not apply"}]}"#,
+    )?;
+    let content = "def test_a():\n    @pytest.mark.skip\n    assert x == 1\n";
+
+    // when
+    let result = check_hook_input(&write_payload(&dir, "tests/test_app.py", content), "");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // then: no `.git` ancestor means no config, even though the file exists in the cwd
+    assert_eq!(result.exit_code, 2, "{}", result.message);
+    assert!(result.message.contains("skip-added"), "{}", result.message);
+    Ok(())
+}
+
+#[test]
+fn check_hook_input_given_git_root_without_a_config_file_makes_only_stats() -> std::io::Result<()> {
+    // given: a git root whose `.test-checker.json` path is a directory, not a readable file.
+    // The lookup must stat the path and skip it; it must not open it as a config.
+    let repo = temp_repo("config-is-directory")?;
+    std::fs::create_dir_all(repo.join(".test-checker.json"))?;
+    let content = "def test_a():\n    @pytest.mark.skip\n    assert x == 1\n";
+
+    // when
+    let result = check_hook_input(&write_payload(&repo, "tests/test_app.py", content), "");
+    let _ = std::fs::remove_dir_all(&repo);
+
+    // then: a non-file config path suppresses nothing
+    assert_eq!(result.exit_code, 2, "{}", result.message);
+    assert!(result.message.contains("skip-added"), "{}", result.message);
+    Ok(())
 }

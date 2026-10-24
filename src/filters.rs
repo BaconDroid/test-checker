@@ -336,7 +336,7 @@ struct ConfigEntry {
     reason: String,
 }
 
-/// The committed file-wide suppression config, read from `<cwd>/.test-checker.json`.
+/// The committed file-wide suppression config, read from `<git root>/.test-checker.json`.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SuppressionConfig {
     entries: Vec<ConfigAllow>,
@@ -344,10 +344,14 @@ pub(crate) struct SuppressionConfig {
 }
 
 impl SuppressionConfig {
-    /// Read the config relative to the payload `cwd`, falling back to the process cwd.
+    /// Read the config from the git root that contains the payload `cwd`, falling back to the
+    /// process cwd.
     ///
-    /// A missing, unreadable, or malformed file yields no suppression. An entry with an empty
-    /// glob, no rules, or a missing/empty reason is dropped.
+    /// The hook walks up from the payload directory to the first directory containing `.git` and
+    /// reads `.test-checker.json` only there. A config anywhere else (a subdirectory, a directory
+    /// above the repository, or a directory without a `.git` ancestor) is ignored. A missing,
+    /// unreadable, or malformed file yields no suppression; an entry with an empty glob, no rules,
+    /// or a missing/empty reason is dropped.
     #[must_use]
     pub(crate) fn load(cwd: Option<&str>) -> Self {
         let cwd = cwd
@@ -362,21 +366,35 @@ impl SuppressionConfig {
         let Some(base) = cwd.as_deref() else {
             return Self::default();
         };
-        let path = std::path::Path::new(base).join(CONFIG_FILE_NAME);
-        let Ok(raw) = std::fs::read_to_string(path) else {
+        let Some(root) = git_root(std::path::Path::new(base)) else {
+            return Self::default();
+        };
+        let root = root.to_string_lossy().into_owned();
+        let path = std::path::Path::new(&root).join(CONFIG_FILE_NAME);
+        // Stat before reading: only an actual file at the repository root is opened.
+        if !path.is_file() {
             return Self {
                 entries: Vec::new(),
-                cwd,
+                cwd: Some(root),
+            };
+        }
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            return Self {
+                entries: Vec::new(),
+                cwd: Some(root),
             };
         };
         let Ok(config) = serde_json::from_str::<ConfigFile>(&raw) else {
             return Self {
                 entries: Vec::new(),
-                cwd,
+                cwd: Some(root),
             };
         };
         let entries = config.allow.iter().filter_map(valid_config_entry).collect();
-        Self { entries, cwd }
+        Self {
+            entries,
+            cwd: Some(root),
+        }
     }
 
     /// Whether a matching committed entry suppresses `rule` for `file_path`.
@@ -390,6 +408,19 @@ impl SuppressionConfig {
                 .any(|allowed| allowed.eq_ignore_ascii_case(rule))
                 && glob_matches(&entry.glob, &relative)
         })
+    }
+}
+
+/// The first ancestor of `start` (inclusive) that contains a `.git` entry.
+///
+/// This only stats candidate paths; it never reads a config from a non-root directory.
+fn git_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut dir = start;
+    loop {
+        if dir.join(".git").exists() {
+            return Some(dir.to_path_buf());
+        }
+        dir = dir.parent()?;
     }
 }
 
