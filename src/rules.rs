@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::filters::is_agent_memo_phrase;
 use crate::language::is_sensitive_harness_path;
@@ -2001,16 +2001,20 @@ pub fn diff_findings_on_views(
     let new_original_lines: Vec<&str> = new_original.lines().collect();
     let mut findings = Vec::new();
 
-    let old_assertions = old_lines
+    let old_assertions = assertion_multiset(&old_lines, &old_original_lines);
+    let new_assertions = assertion_multiset(&new_lines, &new_original_lines);
+    let old_total: usize = old_assertions.values().sum();
+    let new_total: usize = new_assertions.values().sum();
+    let removed: usize = old_assertions
         .iter()
-        .filter(|line| is_assertion_code_line(line))
-        .count();
-    let new_assertions = new_lines
-        .iter()
-        .filter(|line| is_assertion_code_line(line))
-        .count();
-    if new_assertions < old_assertions {
-        if new_assertions == 0 {
+        .map(|(expression, count)| {
+            count.saturating_sub(*new_assertions.get(expression).unwrap_or(&0))
+        })
+        .sum();
+    // A replacement (same number of assertions, different expressions) is the weakening rules'
+    // business, not a removal: only a drop in the total counts one.
+    if new_total < old_total && removed > 0 {
+        if new_total == 0 {
             findings.push(Finding::new(
                 "gutted-test",
                 Confidence::High,
@@ -2020,11 +2024,12 @@ pub fn diff_findings_on_views(
                 "",
             ));
         } else {
-            let removed = old_assertions - new_assertions;
             findings.push(Finding::new(
                 "assertion-removed",
                 Confidence::High,
-                format!("{removed} existing assertion(s) were removed without a replacement."),
+                format!(
+                    "{removed} existing assertion(s) were removed without a replacement. STOP and ask the human to add a .test-checker.json entry with a reason if the removal is intended."
+                ),
                 1,
                 file_path,
                 "",
@@ -2063,6 +2068,34 @@ pub fn diff_findings_on_views(
     }
 
     findings
+}
+
+/// A normalized assertion expression, if `view_line` carries an assertion on code.
+///
+/// The expression comes from the original line (values intact) and collapses internal whitespace,
+/// so moving or reindenting an assertion keeps the same identity. This does not cover renamed
+/// variables, reformatting that re-wraps one expression across lines, or assertions that are not
+/// marker-based expressions (a table-driven loop), which can still read as removals or additions.
+fn normalized_assertion_line(view_line: &str, original_line: &str) -> Option<String> {
+    if !is_assertion_code_line(view_line) {
+        return None;
+    }
+    let trimmed = original_line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// The multiset of normalized assertion expressions in a fragment.
+fn assertion_multiset(lines: &[&str], original: &[&str]) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    for (view_line, original_line) in lines.iter().zip(original) {
+        if let Some(expression) = normalized_assertion_line(view_line, original_line) {
+            *counts.entry(expression).or_insert(0) += 1;
+        }
+    }
+    counts
 }
 
 fn subject_stem(file_path: &str) -> String {
@@ -2649,6 +2682,76 @@ mod tests {
                 .any(|finding| finding.rule == "assertion-removed")
         );
         assert!(!findings.iter().any(|finding| finding.rule == "gutted-test"));
+    }
+
+    #[test]
+    fn diff_findings_given_moved_assertion_reports_no_removal() {
+        // given: the same two assertions in a different order
+        let old = "def test_a():\n    assert add(1, 1) == 2\n    assert add(2, 2) == 4\n";
+        let new = "def test_a():\n    assert add(2, 2) == 4\n    assert add(1, 1) == 2\n";
+
+        // when
+        let findings = diff_findings(old, new, "tests/test_app.py");
+
+        // then: the multiset is unchanged, so nothing was removed
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "assertion-removed")
+        );
+        assert!(!findings.iter().any(|finding| finding.rule == "gutted-test"));
+    }
+
+    #[test]
+    fn diff_findings_given_assertion_removed_reports_removal() {
+        // given: one assertion genuinely absent after the edit
+        let old = "def test_a():\n    assert add(1, 1) == 2\n    assert add(2, 2) == 4\n";
+        let new = "def test_a():\n    assert add(1, 1) == 2\n";
+
+        // when
+        let findings = diff_findings(old, new, "tests/test_app.py");
+
+        // then
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "assertion-removed")
+        );
+    }
+
+    #[test]
+    fn diff_findings_given_assertions_converted_to_a_table_reports_removal() {
+        // given: two explicit assertions replaced by one table-driven assertion
+        let old = "def test_a():\n    assert add(1, 1) == 2\n    assert add(2, 2) == 4\n";
+        let new = "def test_a():\n    for a, b, expected in [(1, 1, 2), (2, 2, 4)]:\n        assert add(a, b) == expected\n";
+
+        // when
+        let findings = diff_findings(old, new, "tests/test_app.py");
+
+        // then: both original expressions are gone even though one assertion remains
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "assertion-removed")
+        );
+        assert!(!findings.iter().any(|finding| finding.rule == "gutted-test"));
+    }
+
+    #[test]
+    fn diff_findings_given_reindented_assertion_reports_no_removal() {
+        // given: the same assertion with different internal whitespace
+        let old = "def test_a():\n    assert add(1, 1) == 2\n";
+        let new = "def test_a():\n        assert  add(1,  1)  ==  2\n";
+
+        // when
+        let findings = diff_findings(old, new, "tests/test_app.py");
+
+        // then: whitespace normalization keeps the expression identity
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "assertion-removed")
+        );
     }
 
     #[test]

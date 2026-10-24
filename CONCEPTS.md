@@ -21,9 +21,24 @@ memory. So the target is "lean", not "empty".
   contract). Kept, with its intent readable from its name.
 - **Integrity**: a test must never be weakened, skipped, focused or deleted to get green.
   This holds even when the suite is lean.
-- **Escape hatch**: the `test-checker: allow` marker suppresses findings in the analyzed text (the
-  whole `Write` content, or the edited fragment). A marker added in the same change that triggers the
+- **Escape hatch**: `test-checker: allow <rule> -- <reason>` suppresses that rule's finding on the
+  marker's line or the line above (known rule, reason >= 12 characters). An invalid marker suppresses
+  nothing and is reported (`allow-invalid`). File-wide suppression lives in a committed
+  `.test-checker.json` (`glob`, `rules`, required `reason`), never in the source comment; editing that
+  config is a high `config-edited` finding. A marker added in the same change that triggers the
   finding is itself reported (`allow-added`).
+
+## Speed bump, not a security boundary
+
+The hook runs after the write, reports what it saw, and asks the agent to stop. It is a **speed
+bump**, not a boundary: the agent has a shell and can edit the file again, disable or remove the
+hook, or write a suppression entry, so a determined agent can always get past it. That is accepted.
+The product promise is visibility and a human in the loop, not enforcement.
+
+An intended removal is approved by a **human** through a committed `.test-checker.json` entry with a
+reason. The agent's job on a removal finding is to stop and ask for that entry; adding it itself is
+exactly the behaviour the findings exist to expose, and editing the config is itself a high
+`config-edited` finding.
 
 ## Verdict and kind
 

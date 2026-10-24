@@ -1,1 +1,1 @@
-examine_globs = ["src/rules.rs"]
+examine_globs = ["src/rules.rs", "src/filters.rs"]
