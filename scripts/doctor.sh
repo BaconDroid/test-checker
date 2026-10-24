@@ -55,6 +55,33 @@ else
     printf 'doctor: note: %s; skipping hook-wiring check (not a failure).\n' "$hook_summary"
 fi
 
+# 3. Report legacy file-wide markers. The bare `test-checker: allow` form no longer
+# suppresses anything; `.test-checker.json` is the file-wide alternative.
+legacy_markers="$(
+    grep -rIn --binary-files=without-match \
+        --exclude-dir=.git --exclude-dir=target --exclude-dir=node_modules \
+        --exclude=doctor.sh 'test-checker: allow' . 2>/dev/null |
+    while IFS= read -r match; do
+        rest="${match#*test-checker: allow}"
+        rest="${rest#"${rest%%[![:space:]]*}"}"
+        case "$rest" in
+            *--*) continue ;;
+            ''|'*/'*|'-->'*|'//'*|'#'*) printf '%s\n' "$match" ;;
+            *) : ;;
+        esac
+    done
+)"
+if [ -n "$legacy_markers" ]; then
+    legacy_count="$(printf '%s\n' "$legacy_markers" | wc -l | tr -d ' ')"
+    printf '\ndoctor: warning: %s old file-wide marker(s) found (they no longer suppress):\n' \
+        "$legacy_count"
+    printf '%s\n' "$legacy_markers"
+    printf '%s\n' "  Migrate each to .test-checker.json or a scoped marker."
+else
+    printf '\ndoctor: old file-wide markers: none\n'
+fi
+legacy_summary="${legacy_count:-0} old file-wide marker(s)"
+
 # Run one gate and show the binary's stderr verbatim. Never use set -e here:
 # the expected failure (exit 2) is data, not a script failure.
 run_gate() {
@@ -100,6 +127,7 @@ printf '\ndoctor: OK\n'
 printf '  binary: %s\n' "$bin_path"
 printf '  version: %s\n' "$version_output"
 printf '  hook settings: %s\n' "$hook_summary"
+printf '  legacy markers: %s\n' "$legacy_summary"
 printf '  skip-added gate: exit 2 as expected\n'
 printf '  clean gate: exit 0 as expected\n'
 exit 0
