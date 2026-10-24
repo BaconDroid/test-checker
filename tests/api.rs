@@ -1158,3 +1158,41 @@ fn check_hook_input_given_removed_test_asks_the_human_for_a_config_entry() {
         result.message
     );
 }
+
+#[test]
+fn check_hook_input_given_marker_inside_a_python_string_is_invisible() {
+    // given: an edit that keeps a string literal containing the marker text and adds a skip
+    let old = "def test_a():\n    note = \"test-checker: allow skip-added -- tracked upstream #12\"\n    assert x == 1\n";
+    let new = "def test_a():\n    note = \"test-checker: allow skip-added -- tracked upstream #12\"\n    @pytest.mark.skip\n    assert x == 1\n";
+    let input = serde_json::json!({
+        "tool_name": "Edit",
+        "tool_input": { "file_path": "tests/test_app.py", "old_string": old, "new_string": new },
+    })
+    .to_string();
+
+    // when
+    let result = check_hook_input(&input, "");
+
+    // then: text inside a string is not a comment, so it neither suppresses nor reports itself
+    assert_eq!(result.exit_code, 2, "{}", result.message);
+    assert!(result.message.contains("skip-added"), "{}", result.message);
+    assert!(!result.message.contains("allow-"), "{}", result.message);
+}
+
+#[test]
+fn check_hook_input_given_marker_in_a_block_comment_suppresses() {
+    // given: a marker inside a Rust block comment on the line above an added `#[ignore]`
+    let old = "#[test]\nfn a() {\n    /* test-checker: allow skip-added -- tracked upstream #12 */\n    assert_eq!(x, 1);\n}\n";
+    let new = "#[test]\nfn a() {\n    /* test-checker: allow skip-added -- tracked upstream #12 */\n    #[ignore]\n    assert_eq!(x, 1);\n}\n";
+    let input = serde_json::json!({
+        "tool_name": "Edit",
+        "tool_input": { "file_path": "tests/app_test.rs", "old_string": old, "new_string": new },
+    })
+    .to_string();
+
+    // when
+    let result = check_hook_input(&input, "");
+
+    // then: the comment node proves the marker is a comment, so it suppresses the skip finding
+    assert_eq!(result.exit_code, 0, "{}", result.message);
+}
