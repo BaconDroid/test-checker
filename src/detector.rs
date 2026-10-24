@@ -69,17 +69,20 @@ struct WorkCounts {
     bytes_copied: usize,
 }
 
-/// Unit-test seam for the internal-failure path. Compiled only into the crate's unit tests, so no
-/// binary, environment variable, or command-line flag can reach it.
+// Unit-test seam for the internal-failure path. Compiled only into the crate's unit tests, so no
+// binary, environment variable, or command-line flag can reach it. Thread-local so a test that sets
+// it cannot force another test's parse down the same path.
 #[cfg(test)]
-pub(crate) static FORCE_INTERNAL_FAILURE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+thread_local! {
+    pub(crate) static FORCE_INTERNAL_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
-/// Unit-test seam for the parse-budget path. Like [`FORCE_INTERNAL_FAILURE`], it exists only in the
-/// crate's unit tests and is unreachable from any binary, environment variable, or flag.
+// Unit-test seam for the parse-budget path. Like `FORCE_INTERNAL_FAILURE`, it exists only in the
+// crate's unit tests and is unreachable from any binary, environment variable, or flag.
 #[cfg(test)]
-pub(crate) static FORCE_BUDGET_EXCEEDED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+thread_local! {
+    pub(crate) static FORCE_BUDGET_EXCEEDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 /// Why a detection run produced no findings to judge.
 ///
@@ -359,7 +362,7 @@ fn removed_test_findings(
 
 fn runtime_by_name(name: &str) -> Result<Arc<Runtime>, DetectError> {
     #[cfg(test)]
-    if FORCE_INTERNAL_FAILURE.load(std::sync::atomic::Ordering::SeqCst) {
+    if FORCE_INTERNAL_FAILURE.with(std::cell::Cell::get) {
         return Err(DetectError::Internal("forced internal failure".to_owned()));
     }
 
@@ -415,7 +418,7 @@ fn parse_with_runtime(
     file_path: &str,
 ) -> Result<tree_sitter::Tree, DetectError> {
     #[cfg(test)]
-    if FORCE_BUDGET_EXCEEDED.load(std::sync::atomic::Ordering::SeqCst) {
+    if FORCE_BUDGET_EXCEEDED.with(std::cell::Cell::get) {
         return Err(DetectError::BudgetExceeded);
     }
     let started = Instant::now();

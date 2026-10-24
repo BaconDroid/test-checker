@@ -743,7 +743,6 @@ fn skip(reason: &str) -> HookOutcome {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering;
     use std::sync::{Mutex, MutexGuard, PoisonError};
 
     use super::check_hook_input;
@@ -763,7 +762,7 @@ mod tests {
 
     impl Drop for ResetFailure {
         fn drop(&mut self) {
-            FORCE_INTERNAL_FAILURE.store(false, Ordering::SeqCst);
+            FORCE_INTERNAL_FAILURE.with(|flag| flag.set(false));
         }
     }
 
@@ -772,7 +771,7 @@ mod tests {
 
     impl Drop for ResetBudget {
         fn drop(&mut self) {
-            FORCE_BUDGET_EXCEEDED.store(false, Ordering::SeqCst);
+            FORCE_BUDGET_EXCEEDED.with(|flag| flag.set(false));
         }
     }
 
@@ -781,7 +780,7 @@ mod tests {
         // given: the runtime seam makes the detector report an internal failure
         let _seam = seam_guard();
         let _reset = ResetFailure;
-        FORCE_INTERNAL_FAILURE.store(true, Ordering::SeqCst);
+        FORCE_INTERNAL_FAILURE.with(|flag| flag.set(true));
         let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/test_app.py","content":"def test_sums():\n    assert add(1, 2) == 3\n"}}"#;
 
         // when
@@ -800,7 +799,7 @@ mod tests {
         // given: the parse seam makes the detector report a budget abort on a valid test payload
         let _seam = seam_guard();
         let _reset = ResetBudget;
-        FORCE_BUDGET_EXCEEDED.store(true, Ordering::SeqCst);
+        FORCE_BUDGET_EXCEEDED.with(|flag| flag.set(true));
         let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/test_app.py","content":"def test_sums():\n    assert add(1, 2) == 3\n"}}"#;
 
         // when
