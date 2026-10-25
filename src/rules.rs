@@ -2153,7 +2153,7 @@ fn assertion_of_line(view_line: &str, original_line: &str) -> Option<Assertion> 
     }
     let (subject, predicate) = assertion_call_subject(view_line, original_line)
         .or_else(|| python_assert_subject(view_line, original_line))?;
-    let subject = subject.split_whitespace().collect::<Vec<_>>().join(" ");
+    let subject = normalize_assertion_subject(&subject);
     (!subject.is_empty()).then_some(Assertion { subject, predicate })
 }
 
@@ -2222,6 +2222,24 @@ fn python_assert_subject(view: &str, original: &str) -> Option<(String, String)>
     let body = rest_original.trim();
     let body = body.strip_prefix("not ").unwrap_or(body);
     (!body.is_empty()).then(|| (body.to_owned(), "truthy".to_owned()))
+}
+
+/// Reduce equivalent assertion shapes to one subject identity.
+///
+/// `assert!(!x.is_empty())` and `assert_eq!(x.len(), 1)` both pin the same collection, so the
+/// emptiness/len wrapper and a leading `!` are stripped. Other calls keep their arguments (`add(1,
+/// 2)` and `add(2, 3)` stay distinct).
+fn normalize_assertion_subject(subject: &str) -> String {
+    let collapsed = subject.split_whitespace().collect::<Vec<_>>().join(" ");
+    let stripped = collapsed
+        .trim()
+        .strip_prefix('!')
+        .map_or_else(|| collapsed.trim(), str::trim_start);
+    let stripped = stripped
+        .strip_suffix(".is_empty()")
+        .or_else(|| stripped.strip_suffix(".len()"))
+        .unwrap_or(stripped);
+    stripped.trim().to_owned()
 }
 
 fn span_text(original: &str, (start, end): Span) -> String {
@@ -2897,6 +2915,24 @@ mod tests {
 
         // when
         let findings = diff_findings(old, new, "tests/app.test.js");
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "assertion-removed"),
+            "findings: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn diff_findings_given_emptiness_rephrased_as_len_reports_no_removal() {
+        // given: the same collection checks written as is_empty() and as len()
+        let old = "#[test]\nfn t() {\n    assert!(!comments.is_empty());\n    assert!(filtered.is_empty());\n}\n";
+        let new = "#[test]\nfn t() {\n    assert_eq!(comments.len(), 1);\n    assert_eq!(filtered.len(), 0);\n}\n";
+
+        // when
+        let findings = diff_findings(old, new, "tests/app_test.rs");
 
         // then
         assert!(
