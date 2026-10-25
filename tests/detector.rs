@@ -782,6 +782,25 @@ fn detect_given_agent_memo_in_a_fixture_string_is_invisible() {
 }
 
 #[test]
+fn detect_given_agent_memo_in_a_helper_argument_is_invisible() {
+    // given: the memo phrase is an argument to a helper called from an assertion, not a message
+    let findings = TestDetector::new().detect(
+        "def test_a():\n    assert is_agent_memo_phrase(\"Changed from old to new\")\n",
+        "tests/test_app.py",
+        true,
+        true,
+    );
+
+    // then
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "agent-memo-test"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
 fn detect_given_agent_memo_in_an_assertion_message_reports() {
     // given: the memo phrase is the assertion's message
     let findings = TestDetector::new().detect(

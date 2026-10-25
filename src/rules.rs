@@ -1704,6 +1704,57 @@ fn classify_agent_memo(file_path: &str, line: &AddedLine<'_>, text: &str) -> Opt
         })
 }
 
+/// The literal a test-level message occupies on an assertion line, if it is a bare quoted string.
+///
+/// Only the message argument counts: the top-level argument list is split (quotes and nesting
+/// respected) and the last argument must itself be a quoted literal. A fixture passed to a helper
+/// (`assert!(is_agent_memo_phrase("Changed from X to Y"))`) is a nested call, so it is not a message.
+#[must_use]
+pub(crate) fn assertion_message_literal(line: &str) -> Option<String> {
+    let line = line.trim();
+    if let Some(rest) = line.strip_prefix("assert ") {
+        let spans = split_top_level_spans(rest, 0);
+        if spans.len() >= 2 {
+            return quoted_literal(&rest[spans[1].0..spans[1].1]);
+        }
+    }
+    for (marker, min_args) in [
+        ("debug_assert!(", 2),
+        ("assert_eq!(", 3),
+        ("assert_ne!(", 3),
+        ("assert!(", 2),
+        ("assertEquals(", 3),
+        ("assertEqual(", 3),
+        ("assert.deepEqual(", 3),
+        ("assert.equal(", 3),
+        ("assertThat(", 3),
+        (".NotContains(", 4),
+        (".Contains(", 4),
+        (".NotEqual(", 4),
+        (".Equal(", 4),
+        (".EqualValues(", 4),
+    ] {
+        if let Some(inner) = inner_args_span(line, marker) {
+            let spans = split_top_level_spans(&line[inner.0..inner.1], inner.0);
+            if spans.len() >= min_args {
+                let last = spans[spans.len() - 1];
+                return quoted_literal(&line[last.0..last.1]);
+            }
+        }
+    }
+    None
+}
+
+fn quoted_literal(text: &str) -> Option<String> {
+    let text = text.trim();
+    for quote in ['"', '\'', '`'] {
+        if text.len() >= 2 && text.starts_with(quote) && text.ends_with(quote) {
+            return Some(text[1..text.len() - 1].to_owned());
+        }
+    }
+    None
+}
+
 /// Whether `value` (an already-unquoted literal) names a source file by its extension.
 fn is_source_file_name(value: &str) -> bool {
     let Some(extension) = std::path::Path::new(value)

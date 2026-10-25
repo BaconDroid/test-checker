@@ -5,6 +5,7 @@ use std::time::Instant;
 use tree_sitter::{Query, QueryCursor, StreamingIterator};
 
 use crate::engine;
+use crate::filters::is_agent_memo_phrase;
 use crate::language::{
     is_test_callee, is_test_function_name, language_for_path, string_node_kinds,
     string_query_source, test_query,
@@ -509,17 +510,26 @@ fn analyze_removals(input: RemovalInput<'_>) -> RemovalAnalysis {
     RemovalAnalysis { findings, refactor }
 }
 
-/// The lines `agent-memo-test` may read: the test's name row and assertion lines inside its body.
+/// The lines `agent-memo-test` may read: the test's name and its assertion message.
 ///
-/// Fixture text in setup lines (a raw string, a `let input = ...`) is not attached to the test and
-/// must not be reported as narration.
-fn agent_memo_lines(body: &Body, view: &str, language: &str) -> HashSet<usize> {
+/// Fixture text in setup lines or passed to a helper inside an assertion (a raw string, a
+/// `is_agent_memo_phrase("...")` argument) is not a test-level message and must not be reported.
+fn agent_memo_lines(body: &Body, content: &str, language: &str) -> HashSet<usize> {
     let mut allowed = HashSet::new();
-    if let Some(row) = body.name_row {
-        allowed.insert(row + 1);
+    if let Some(name) = body
+        .name
+        .as_deref()
+        .filter(|name| is_agent_memo_phrase(name))
+    {
+        let _ = name;
+        if let Some(row) = body.name_row {
+            allowed.insert(row + 1);
+        }
     }
-    for line in body_added_lines(view, body, language) {
-        if rules::is_assertion_line(line.text) {
+    for line in body_added_lines(content, body, language) {
+        if let Some(message) = rules::assertion_message_literal(line.text)
+            && is_agent_memo_phrase(&message)
+        {
             allowed.insert(line.line_number);
         }
     }
@@ -1052,7 +1062,7 @@ fn analyze_new_bodies(
     for body in bodies {
         let lines = body_added_lines(view, body, language);
         let original_lines = body_added_lines(content, body, language);
-        let allowed_memo_lines = agent_memo_lines(body, view, language);
+        let allowed_memo_lines = agent_memo_lines(body, content, language);
         let mut body_findings = classify_lines(file_path, &lines, &original_lines);
         retain_scoped_agent_memo(&mut body_findings, &allowed_memo_lines);
         findings.extend(body_findings);
@@ -1130,7 +1140,7 @@ fn analyze_edited_bodies(
             .collect();
         let is_touched = !touched.is_empty();
         if is_touched {
-            let allowed_memo_lines = agent_memo_lines(body, view, language);
+            let allowed_memo_lines = agent_memo_lines(body, content, language);
             let mut touched_findings =
                 classify_diff_lines(file_path, &touched, &touched_original, &diff);
             retain_scoped_agent_memo(&mut touched_findings, &allowed_memo_lines);
