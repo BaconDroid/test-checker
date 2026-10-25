@@ -480,10 +480,15 @@ fn analyze_removals(input: RemovalInput<'_>) -> RemovalAnalysis {
         .iter()
         .filter_map(|body| body.name.as_deref())
         .collect();
+    // A new test's attribute line is often byte-identical to an old test's attribute and is not
+    // in the LCS-added set, so test the whole body: any added line means the body was introduced
+    // (or rewritten in place) by this edit.
     let added_tests = new_bodies
         .iter()
         .filter(|body| {
-            added.contains(&body.start_row)
+            body_added_lines(new_content, body, language)
+                .iter()
+                .any(|line| added.contains(&(line.line_number - 1)))
                 && body
                     .name
                     .as_deref()
