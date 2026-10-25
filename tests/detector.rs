@@ -574,6 +574,194 @@ fn detect_edit_given_edited_test_does_not_report_test_removed() {
 }
 
 #[test]
+fn detect_edit_given_moved_renamed_test_does_not_report_test_removed() {
+    // given: the same body under a new name at a different position
+    let detector = TestDetector::new();
+    let old = "def test_a():\n    assert one() == 1\n\ndef test_b():\n    assert two() == 2\n";
+    let new = "def test_b():\n    assert two() == 2\n\ndef test_alpha():\n    assert one() == 1\n";
+
+    // when
+    let findings = detector.detect_edit(old, new, "tests/test_app.py", true, true);
+
+    // then
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "test-removed"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_edit_given_test_split_in_two_does_not_report_test_removed() {
+    // given: one body divided across two added tests
+    let detector = TestDetector::new();
+    let old = "def test_adds():\n    assert add(1, 2) == 3\n    assert add(2, 2) == 4\n";
+    let new = "def test_adds_one():\n    assert add(1, 2) == 3\n\ndef test_adds_two():\n    assert add(2, 2) == 4\n";
+
+    // when
+    let findings = detector.detect_edit(old, new, "tests/test_app.py", true, true);
+
+    // then
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "test-removed"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_edit_given_renamed_test_with_similar_body_does_not_report_test_removed() {
+    // given: the body keeps at least 80% of its tokens under a new name
+    let detector = TestDetector::new();
+    let old = "def test_sum():\n    result = add(1, 2)\n    assert result == 3\n";
+    let new =
+        "def test_addition():\n    result = add(1, 2)\n    assert result == 3\n    print(result)\n";
+
+    // when
+    let findings = detector.detect_edit(old, new, "tests/test_app.py", true, true);
+
+    // then
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "test-removed"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_edit_given_genuinely_deleted_test_reports_high() {
+    // given: one test is gone and nothing equivalent was added
+    let detector = TestDetector::new();
+    let old = "def test_a():\n    assert one() == 1\n\ndef test_b():\n    assert two() == 2\n";
+    let new = "def test_a():\n    assert one() == 1\n";
+
+    // when
+    let findings = detector.detect_edit(old, new, "tests/test_app.py", true, true);
+    let removed: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.rule == "test-removed")
+        .collect();
+
+    // then: no mass rewrite, so the deletion keeps blocking
+    assert_eq!(removed.len(), 1, "findings: {findings:?}");
+    assert_eq!(removed[0].confidence, Confidence::High);
+}
+
+#[test]
+fn detect_edit_given_rename_of_every_test_demotes_removals_to_low() {
+    // given: three tests renamed with unrelated bodies (as many added as removed)
+    let detector = TestDetector::new();
+    let old = "def test_a():\n    assert one() == 1\n\ndef test_b():\n    assert two() == 2\n\ndef test_c():\n    assert three() == 3\n";
+    let new = "def test_x():\n    assert ten() == 10\n\ndef test_y():\n    assert twenty() == 20\n\ndef test_z():\n    assert thirty() == 30\n";
+
+    // when
+    let findings = detector.detect_edit(old, new, "tests/test_app.py", true, true);
+    let removed: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.rule == "test-removed")
+        .collect();
+
+    // then: still reported, but low so the default gate is not blocked
+    assert!(!removed.is_empty(), "findings: {findings:?}");
+    assert!(
+        removed
+            .iter()
+            .all(|finding| finding.confidence == Confidence::Low),
+        "findings: {removed:?}"
+    );
+    assert!(
+        removed
+            .iter()
+            .all(|finding| finding.message.contains("Refactor-shaped")),
+        "findings: {removed:?}"
+    );
+}
+
+#[test]
+fn detect_edit_given_mass_rewrite_demotes_assertion_removal_to_low() {
+    // given: more than 40% of a 20+ line file is rewritten
+    let detector = TestDetector::new();
+    let old = "#[test]\nfn t1() {\n    assert_eq!(a(), 1);\n}\n\n#[test]\nfn t2() {\n    assert_eq!(b(), 2);\n}\n\n#[test]\nfn t3() {\n    assert_eq!(c(), 3);\n}\n\n#[test]\nfn t4() {\n    assert_eq!(d(), 4);\n}\n\n#[test]\nfn t5() {\n    assert_eq!(e(), 5);\n}\n";
+    let new = "#[test]\nfn t1() {\n    assert_eq!(a(), 1);\n}\n\n#[test]\nfn t2() {\n    assert_eq!(b(), 2);\n}\n";
+
+    // when
+    let findings = detector.detect_edit(old, new, "tests/app_test.rs", true, true);
+    let removed: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.rule == "assertion-removed")
+        .collect();
+
+    // then
+    assert!(!removed.is_empty(), "findings: {findings:?}");
+    assert!(
+        removed
+            .iter()
+            .all(|finding| finding.confidence == Confidence::Low),
+        "findings: {removed:?}"
+    );
+}
+
+#[test]
+fn detect_edit_given_one_deletion_in_a_large_file_stays_high() {
+    // given: a 20+ line file loses one test (under 40% of its lines)
+    let detector = TestDetector::new();
+    let old = "#[test]\nfn t1() {\n    assert_eq!(a(), 1);\n}\n\n#[test]\nfn t2() {\n    assert_eq!(b(), 2);\n}\n\n#[test]\nfn t3() {\n    assert_eq!(c(), 3);\n}\n\n#[test]\nfn t4() {\n    assert_eq!(d(), 4);\n}\n\n#[test]\nfn t5() {\n    assert_eq!(e(), 5);\n}\n";
+    let new = "#[test]\nfn t1() {\n    assert_eq!(a(), 1);\n}\n\n#[test]\nfn t2() {\n    assert_eq!(b(), 2);\n}\n\n#[test]\nfn t3() {\n    assert_eq!(c(), 3);\n}\n\n#[test]\nfn t4() {\n    assert_eq!(d(), 4);\n}\n";
+
+    // when
+    let findings = detector.detect_edit(old, new, "tests/app_test.rs", true, true);
+    let removed: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.rule == "test-removed")
+        .collect();
+
+    // then
+    assert_eq!(removed.len(), 1, "findings: {findings:?}");
+    assert_eq!(removed[0].confidence, Confidence::High);
+}
+
+#[test]
+fn detect_given_agent_memo_in_a_fixture_string_is_invisible() {
+    // given: the memo phrase is setup data, not a test name or message
+    let findings = TestDetector::new().detect(
+        "it('sums', () => {\n  const input = \"now we parse twice\";\n  expect(add(1, 2)).toBe(3);\n});\n",
+        "tests/app.test.js",
+        true,
+        true,
+    );
+
+    // then
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "agent-memo-test"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_given_agent_memo_in_an_assertion_message_reports() {
+    // given: the memo phrase is the assertion's message
+    let findings = TestDetector::new().detect(
+        "def test_sums():\n    assert add(1, 2) == 3, \"now we parse twice\"\n",
+        "tests/test_app.py",
+        true,
+        true,
+    );
+
+    // then
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "agent-memo-test"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
 fn detect_given_case_only_literal_difference_does_not_report_duplicate() {
     // given: two tests whose bodies differ only by a literal's case (a real distinction)
     let detector = TestDetector::new();
