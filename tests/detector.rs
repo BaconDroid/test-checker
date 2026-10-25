@@ -651,6 +651,27 @@ fn detect_edit_given_genuinely_deleted_test_reports_high() {
 }
 
 #[test]
+fn detect_edit_given_removed_test_plus_unrelated_added_test_still_fires() {
+    // given: one test disappears and an unrelated test appears at the same position
+    let detector = TestDetector::new();
+    let old = "def test_a():\n    assert one() == 1\n\ndef test_b():\n    assert two() == 2\n";
+    let new = "def test_a():\n    assert one() == 1\n\ndef test_c():\n    assert three() == 3\n";
+
+    // when
+    let findings = detector.detect_edit(old, new, "tests/test_app.py", true, true);
+    let removed: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.rule == "test-removed")
+        .collect();
+
+    // then: the unrelated body does not match, so the deletion is still reported; the
+    // add/remove count then demotes it (the refactor guard), but it is not silently dropped.
+    assert_eq!(removed.len(), 1, "findings: {findings:?}");
+    assert_eq!(removed[0].confidence, Confidence::Low);
+    assert!(removed[0].message.contains("Refactor-shaped"));
+}
+
+#[test]
 fn detect_edit_given_rename_of_every_test_demotes_removals_to_low() {
     // given: three tests renamed with unrelated bodies (as many added as removed)
     let detector = TestDetector::new();

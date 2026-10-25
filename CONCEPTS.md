@@ -82,6 +82,21 @@ baseline; when enabled and git is unavailable, the path is unsafe, the file is u
 lookup times out, the diff rules are skipped with a visible `Skipping:` line instead of failing
 silently.
 
+## Removal findings at the default gate
+
+The hook's default gate is **`--min-confidence medium`**. A broad refactor can produce
+`test-removed`/`assertion-removed` findings that are real but not tampering, so the refactor guard
+demotes those two rules to **Low** instead of stopping at Medium (a Medium finding would still exit
+`2`). A Low finding is **invisible to the agent at the default gate**: the hook exits `0`, prints no
+`Skipping:` line for it, and the agent sees nothing. The finding is only visible to a human or a CI
+job that runs with `--min-confidence low`. All other rules keep their existing confidence, and a
+genuine deletion in a file that was not mass-rewritten stays High and still blocks.
+
+A proposed (not implemented) CI guard for this gap: on every PR, compute the set of test declarations
+and assertion subjects in the base and head revisions, and post a PR comment with the delta — "this
+change removes N tests and M assertion subjects" — listing the names. That surfaces a demoted
+removal to the human reviewer without changing the hook's gate.
+
 ## Floor
 
 A **floor** is a per-kind minimum on the evaluation corpus, not an aggregate. Precision and recall

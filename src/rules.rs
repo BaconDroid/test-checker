@@ -2123,6 +2123,8 @@ fn assertion_call_subject(view: &str, original: &str) -> Option<(String, String)
         ("assertNotEqual(", "not-equal", LAST),
         ("assertTrue(", "truthy", FIRST),
         ("assertFalse(", "falsy", FIRST),
+        ("debug_assert!(", "truthy", FIRST),
+        ("assert!(", "truthy", FIRST),
         ("assert_eq!(", "equal", FIRST),
         ("assert_ne!(", "not-equal", FIRST),
     ] {
