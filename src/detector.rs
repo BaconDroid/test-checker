@@ -339,8 +339,8 @@ impl TestDetector {
 /// Two test bodies are the same test when their normalized token multisets are at least this
 /// percent similar.
 const RENAME_PERCENT: usize = 80;
-/// A body near an old test's line can match at this lower similarity (a move within the file).
-const POSITION_PERCENT: usize = 50;
+/// How many lines apart an old and a new body may start and still be the same renamed test.
+const RENAME_POSITION_ROWS: usize = 3;
 
 /// The line-ratio refactor guard needs a whole-file scale: an `Edit` fragment can be a handful of
 /// lines, where dropping one of two tests is ">40%" without being a mass rewrite.
@@ -450,13 +450,18 @@ fn analyze_removals(input: RemovalInput<'_>) -> RemovalAnalysis {
             .name
             .as_deref()
             .is_some_and(|name| new_names.contains(name));
+        // A rename/move needs both signals: the body tokens must be similar *and* the new body
+        // must start in the old body's line neighborhood. Token similarity alone matches sibling
+        // tests that share scaffolding (the Go multi-language family), hiding a real deletion.
         let similar = new_tokens.iter().enumerate().any(|(other, tokens)| {
             jaccard_at_least(&old_tokens[index], tokens, RENAME_PERCENT)
-                || (old_body.start_row.abs_diff(new_bodies[other].start_row) <= 3
-                    && jaccard_at_least(&old_tokens[index], tokens, POSITION_PERCENT))
+                && old_body.start_row.abs_diff(new_bodies[other].start_row) <= RENAME_POSITION_ROWS
         });
         let split = !old_tokens[index].is_empty()
-            && jaccard_at_least(&old_tokens[index], &union, RENAME_PERCENT);
+            && jaccard_at_least(&old_tokens[index], &union, RENAME_PERCENT)
+            && new_bodies
+                .iter()
+                .any(|body| old_body.start_row.abs_diff(body.start_row) <= RENAME_POSITION_ROWS);
         if name_matches || similar || split {
             continue;
         }

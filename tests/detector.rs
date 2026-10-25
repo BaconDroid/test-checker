@@ -616,8 +616,7 @@ fn detect_edit_given_renamed_test_with_similar_body_does_not_report_test_removed
     // given: the body keeps at least 80% of its tokens under a new name
     let detector = TestDetector::new();
     let old = "def test_sum():\n    result = add(1, 2)\n    assert result == 3\n";
-    let new =
-        "def test_addition():\n    result = add(1, 2)\n    assert result == 3\n    print(result)\n";
+    let new = "def test_addition():\n    result = add(1, 2)\n    assert result == 3\n    pass\n";
 
     // when
     let findings = detector.detect_edit(old, new, "tests/test_app.py", true, true);
@@ -629,6 +628,25 @@ fn detect_edit_given_renamed_test_with_similar_body_does_not_report_test_removed
             .any(|finding| finding.rule == "test-removed"),
         "findings: {findings:?}"
     );
+}
+
+#[test]
+fn detect_edit_given_sibling_test_removed_reports_high() {
+    // given: four near-identical Go tests; one is deleted and the siblings remain
+    let detector = TestDetector::new();
+    let old = "func TestPython(t *testing.T) {\n\tdetector := New()\n\tcode := \"# Python\"\n\tcomments := detector.Detect(code, \"test.py\")\n\tassert.Len(t, comments, 1)\n\tassert.Contains(t, comments[0].Text, \"Python\")\n}\n\nfunc TestGo(t *testing.T) {\n\tdetector := New()\n\tcode := \"// Go\"\n\tcomments := detector.Detect(code, \"main.go\")\n\tassert.Len(t, comments, 1)\n\tassert.Contains(t, comments[0].Text, \"Go\")\n}\n\nfunc TestRuby(t *testing.T) {\n\tdetector := New()\n\tcode := \"# Ruby\"\n\tcomments := detector.Detect(code, \"main.rb\")\n\tassert.Len(t, comments, 1)\n\tassert.Contains(t, comments[0].Text, \"Ruby\")\n}\n\nfunc TestBash(t *testing.T) {\n\tdetector := New()\n\tcode := \"# Bash\"\n\tcomments := detector.Detect(code, \"main.sh\")\n\tassert.Len(t, comments, 1)\n\tassert.Contains(t, comments[0].Text, \"Bash\")\n}\n";
+    let new = "func TestPython(t *testing.T) {\n\tdetector := New()\n\tcode := \"# Python\"\n\tcomments := detector.Detect(code, \"test.py\")\n\tassert.Len(t, comments, 1)\n\tassert.Contains(t, comments[0].Text, \"Python\")\n}\n\nfunc TestRuby(t *testing.T) {\n\tdetector := New()\n\tcode := \"# Ruby\"\n\tcomments := detector.Detect(code, \"main.rb\")\n\tassert.Len(t, comments, 1)\n\tassert.Contains(t, comments[0].Text, \"Ruby\")\n}\n\nfunc TestBash(t *testing.T) {\n\tdetector := New()\n\tcode := \"# Bash\"\n\tcomments := detector.Detect(code, \"main.sh\")\n\tassert.Len(t, comments, 1)\n\tassert.Contains(t, comments[0].Text, \"Bash\")\n}\n";
+
+    // when
+    let findings = detector.detect_edit(old, new, "tests/integration_test.go", true, true);
+    let removed: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.rule == "test-removed")
+        .collect();
+
+    // then: token similarity alone would match the Go sibling; position + similarity keeps it
+    assert!(!removed.is_empty(), "findings: {findings:?}");
+    assert_eq!(removed[0].confidence, Confidence::High);
 }
 
 #[test]
