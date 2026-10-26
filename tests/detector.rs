@@ -1798,3 +1798,96 @@ fn expected_copied_from_actual_still_sees_string_literals() {
         "findings: {findings:?}"
     );
 }
+
+#[test]
+fn detect_given_idiomatic_error_guards_reports_no_conditional_assertion() {
+    // given: error/type guards whose assertions inspect the guarded value, per language
+    let cases = [
+        (
+            "tests/app_test.go",
+            "func TestGuards(t *testing.T) {\n\tif exitErr, ok := err.(*exec.ExitError); ok {\n\t\tassert.Equal(t, 2, exitErr.ExitCode())\n\t}\n\tif err != nil {\n\t\tassert.Equal(t, \"boom\", err.Error())\n\t}\n}\n",
+        ),
+        (
+            "tests/app.test.ts",
+            "it('guards', () => {\n  if (err) {\n    expect(err.message).toContain('boom');\n  }\n});\n",
+        ),
+        (
+            "tests/test_app.py",
+            "def test_guards():\n    if isinstance(result, Error):\n        assert result.code == 1\n    try:\n        run()\n    except Exception as exc:\n        assert exc.code == 1\n",
+        ),
+        (
+            "tests/app_test.rs",
+            "#[test]\nfn guards() {\n    if let Some(value) = map.get(key) {\n        assert_eq!(value, 1);\n    }\n    if result.is_err() {\n        assert!(result.unwrap_err().to_string().contains(\"x\"));\n    }\n}\n",
+        ),
+        (
+            "src/test/java/GuardsTest.java",
+            "class GuardsTest {\n    @Test\n    void guards() {\n        if (result instanceof Error) {\n            assertTrue(((Error) result).isFatal());\n        }\n    }\n}\n",
+        ),
+    ];
+
+    // when / then
+    for (path, source) in cases {
+        let findings = TestDetector::new().detect(source, path, true, true);
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "conditional-assertion"),
+            "{path}: {findings:?}"
+        );
+    }
+}
+
+#[test]
+fn detect_given_optional_assertion_under_a_business_condition_reports_conditional_assertion() {
+    // given: a non-error condition that makes the assertion optional, per language
+    let cases = [
+        (
+            "tests/app_test.go",
+            "func TestOptional(t *testing.T) {\n\tif enabled {\n\t\tassert.Equal(t, 1, value)\n\t}\n}\n",
+        ),
+        (
+            "tests/app.test.ts",
+            "it('optional', () => {\n  if (featureEnabled) {\n    expect(value).toBe(1);\n  }\n});\n",
+        ),
+        (
+            "tests/test_app.py",
+            "def test_optional():\n    if feature_enabled:\n        assert value == 1\n",
+        ),
+        (
+            "tests/app_test.rs",
+            "#[test]\nfn optional() {\n    if enabled {\n        assert_eq!(value, 1);\n    }\n}\n",
+        ),
+        (
+            "src/test/java/OptionalTest.java",
+            "class OptionalTest {\n    @Test\n    void optional() {\n        if (enabled) {\n            assertEquals(1, value);\n        }\n    }\n}\n",
+        ),
+    ];
+
+    // when / then
+    for (path, source) in cases {
+        let findings = TestDetector::new().detect(source, path, true, true);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "conditional-assertion"),
+            "{path}: {findings:?}"
+        );
+    }
+}
+
+#[test]
+fn detect_given_error_guard_around_unrelated_assertion_reports_conditional_assertion() {
+    // given: an error guard that makes a general assertion optional (it does not inspect the error)
+    let source = "func TestOptional(t *testing.T) {\n\tif err != nil {\n\t\tassert.Equal(t, 1, value)\n\t}\n}\n";
+
+    // when
+    let findings = TestDetector::new().detect(source, "tests/app_test.go", true, true);
+
+    // then
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "conditional-assertion"),
+        "findings: {findings:?}"
+    );
+}

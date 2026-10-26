@@ -1643,19 +1643,174 @@ fn classify_conditional_assertion(
     index: usize,
     text: &str,
 ) -> Option<Finding> {
-    let next = added.get(index + 1).map(|line| line.text.trim());
-    let assertion_here = has_marker(text, ASSERTION_MARKERS);
     let conditional_here = text.starts_with("if ") || text.starts_with("if(");
-    let triggers = conditional_here
-        && (assertion_here || next.is_some_and(|line| has_marker(line, ASSERTION_MARKERS)));
-    triggers.then(|| {
-        finish(
-            "conditional-assertion",
-            Confidence::High,
-            "The assertion is guarded by a runtime condition and may never run.",
-            &added[index],
-            file_path,
-        )
+    if !conditional_here {
+        return None;
+    }
+    let assertions = block_assertions(added, index);
+    if assertions.is_empty() {
+        return None;
+    }
+    let condition = conditional_text(text);
+    let guard_idents = guard_identifiers(&condition);
+    let guard_condition = is_guard_condition(&condition);
+    // An error/type guard around assertions that inspect the guarded value is error handling, not
+    // an optional assertion. A guard around unrelated assertions is still optional and reports.
+    if guard_condition
+        && !guard_idents.is_empty()
+        && assertions
+            .iter()
+            .all(|assertion| guard_idents.iter().any(|ident| has_word(assertion, ident)))
+    {
+        return None;
+    }
+    Some(finish(
+        "conditional-assertion",
+        Confidence::High,
+        "The assertion is guarded by a runtime condition and may never run.",
+        &added[index],
+        file_path,
+    ))
+}
+
+/// The condition text of an `if` line: `if (cond) {`, `if cond {`, `if cond:`.
+fn conditional_text(text: &str) -> String {
+    let rest = text.strip_prefix("if").unwrap_or(text).trim_start();
+    let parenthesized = rest.starts_with('(');
+    let rest = rest.strip_prefix('(').unwrap_or(rest);
+    let end = rest
+        .find('{')
+        .into_iter()
+        .chain(rest.find(':'))
+        .min()
+        .unwrap_or(rest.len());
+    let condition = rest[..end].trim();
+    if parenthesized {
+        condition.trim_end_matches(')').trim().to_owned()
+    } else {
+        condition.to_owned()
+    }
+}
+
+/// Whether a condition is an error/type/availability guard rather than a business condition.
+fn is_guard_condition(condition: &str) -> bool {
+    const WORDS: &[&str] = &["err", "error", "exitErr", "ok"];
+    const FORMS: &[&str] = &[
+        "isinstance(",
+        "instanceof ",
+        "is None",
+        "is not None",
+        "let Some(",
+        "let Ok(",
+        ".is_err()",
+        ".is_ok()",
+        ".ok()",
+        "!= nil",
+        "== nil",
+        "!= null",
+        "== null",
+    ];
+    WORDS.iter().any(|word| has_word(condition, word))
+        || FORMS.iter().any(|form| condition.contains(form))
+}
+
+/// Identifiers a guard condition carries, used to tell an error-path assertion from an optional
+/// assertion. Calls (`isinstance(`, `get(`) and language keywords are not values.
+fn guard_identifiers(condition: &str) -> Vec<String> {
+    const KEYWORDS: &[&str] = &[
+        "if",
+        "let",
+        "mut",
+        "else",
+        "is",
+        "not",
+        "and",
+        "or",
+        "in",
+        "case",
+        "new",
+        "instanceof",
+        "nil",
+        "none",
+        "null",
+        "undefined",
+        "true",
+        "false",
+        "self",
+        "this",
+    ];
+    let mut identifiers = Vec::new();
+    let bytes = condition.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index].is_ascii_alphabetic() || bytes[index] == b'_' {
+            let start = index;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+            {
+                index += 1;
+            }
+            let ident = &condition[start..index];
+            let next = condition[index..].trim_start();
+            if !next.starts_with('(') && !KEYWORDS.contains(&ident.to_ascii_lowercase().as_str()) {
+                identifiers.push(ident.to_owned());
+            }
+        } else {
+            index += 1;
+        }
+    }
+    identifiers
+}
+
+/// Assertion texts in the `if` block that starts at `index`.
+fn block_assertions<'a>(added: &'a [AddedLine<'a>], index: usize) -> Vec<&'a str> {
+    let first = added.get(index).map_or("", |line| line.text);
+    let mut assertions = Vec::new();
+    if has_marker(first.trim(), ASSERTION_MARKERS) {
+        assertions.push(first.trim());
+    }
+    let colon_style = first.trim_end().ends_with(':');
+    let mut depth = brace_delta(first);
+    if !colon_style && depth == 0 {
+        if assertions.is_empty()
+            && let Some(next) = added.get(index + 1)
+            && has_marker(next.text.trim(), ASSERTION_MARKERS)
+        {
+            assertions.push(next.text.trim());
+        }
+        return assertions;
+    }
+    let indent = indentation(first);
+    for line in added.iter().skip(index + 1) {
+        let text = line.text;
+        if text.trim().is_empty() {
+            continue;
+        }
+        if depth <= 0 && indentation(text) <= indent && !text.trim_start().starts_with('}') {
+            break;
+        }
+        if has_marker(text.trim(), ASSERTION_MARKERS) {
+            assertions.push(text.trim());
+        }
+        depth += brace_delta(text);
+        if depth <= 0 {
+            break;
+        }
+    }
+    assertions
+}
+
+fn indentation(line: &str) -> usize {
+    line.chars()
+        .take_while(|character| character.is_whitespace())
+        .count()
+}
+
+fn brace_delta(line: &str) -> i32 {
+    line.chars().fold(0, |depth, character| match character {
+        '{' => depth + 1,
+        '}' => depth - 1,
+        _ => depth,
     })
 }
 
