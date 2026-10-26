@@ -1,0 +1,45 @@
+{
+  "note": "Replay payloads verified as genuine deletions from their commit diffs (tc 47211c6/c127222, cc 15db1af/fb77020/d348858, c5a9d5a). Keys are sha256(kind|path|old|new)[:16] of the eval/replay.py payload; regenerate if the sibling history changes.",
+  "cases": [
+    {
+      "key": "8c90e57d74d817fa",
+      "kind": "edit",
+      "path": "npm/test-checker/index.test.js"
+    },
+    {
+      "key": "dc361b7273fbb380",
+      "kind": "edit",
+      "path": "tests/api.rs"
+    },
+    {
+      "key": "22ae02387968bfc4",
+      "kind": "edit",
+      "path": "tests/detector.rs"
+    },
+    {
+      "key": "7787ee21b5c5a2c0",
+      "kind": "edit",
+      "path": "tests/integration.rs"
+    },
+    {
+      "key": "80c5108702b93799",
+      "kind": "edit",
+      "path": "npm/comment-checker/index.test.js"
+    },
+    {
+      "key": "b0b458423f92a253",
+      "kind": "edit",
+      "path": "tests/output.rs"
+    },
+    {
+      "key": "f6f0475d60c3f427",
+      "kind": "edit",
+      "path": "go/tests/integration_test.go"
+    },
+    {
+      "key": "f6f0475d60c3f427",
+      "kind": "edit",
+      "path": "go/tests/integration_test.go"
+    }
+  ]
+}

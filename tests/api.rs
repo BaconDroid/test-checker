@@ -594,6 +594,52 @@ fn check_hook_input_given_write_with_uncommitted_file_shows_visible_skip() -> st
     Ok(())
 }
 #[test]
+fn check_hook_input_given_write_baseline_ignores_pre_existing_conditional() -> std::io::Result<()> {
+    // given: a committed test with a pre-existing conditional, then a Write that only adds a line
+    let dir = baseline_dir("conditional-added-lines")?;
+    std::fs::write(
+        dir.join("tests/test_app.py"),
+        "def test_a():\n    if flag:\n        assert x == 1\n",
+    )?;
+    git(&dir, &["init", "-q"])?;
+    git(&dir, &["add", "."])?;
+    git(&dir, &["commit", "-q", "-m", "init"])?;
+    let input = serde_json::json!({
+        "tool_name": "Write",
+        "cwd": dir.to_string_lossy(),
+        "tool_input": {
+            "file_path": "tests/test_app.py",
+            "content": "def test_a():\n    if flag:\n        assert x == 1\n    assert y == 2\n",
+        },
+    })
+    .to_string();
+
+    // when: the HEAD baseline is enabled
+    let with_baseline = run_binary(&input, true)?;
+    let stderr = String::from_utf8_lossy(&with_baseline.stderr);
+    let without_baseline = run_binary(&input, false)?;
+
+    // then: only the added line is examined, while a whole-file Write still flags the guard
+    assert_eq!(with_baseline.status.code(), Some(0), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("conditional-assertion"),
+        "stderr: {stderr}"
+    );
+    let whole_file = String::from_utf8_lossy(&without_baseline.stderr);
+    assert_eq!(
+        without_baseline.status.code(),
+        Some(2),
+        "stderr: {whole_file}"
+    );
+    assert!(
+        whole_file.contains("conditional-assertion"),
+        "stderr: {whole_file}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+#[test]
 fn check_hook_input_given_linter_directive_next_to_skip_still_reports_skip() {
     // given: a skip marker and a linter directive on the same line
     let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/test_app.py","content":"def test_a():\n    @pytest.mark.skip  # noqa\n    assert x == 1\n"}}"#;
