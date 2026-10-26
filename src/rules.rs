@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::filters::is_agent_memo_phrase;
 use crate::language::is_sensitive_harness_path;
@@ -1704,6 +1704,57 @@ fn classify_agent_memo(file_path: &str, line: &AddedLine<'_>, text: &str) -> Opt
         })
 }
 
+/// The literal a test-level message occupies on an assertion line, if it is a bare quoted string.
+///
+/// Only the message argument counts: the top-level argument list is split (quotes and nesting
+/// respected) and the last argument must itself be a quoted literal. A fixture passed to a helper
+/// (`assert!(is_agent_memo_phrase("Changed from X to Y"))`) is a nested call, so it is not a message.
+#[must_use]
+pub(crate) fn assertion_message_literal(line: &str) -> Option<String> {
+    let line = line.trim();
+    if let Some(rest) = line.strip_prefix("assert ") {
+        let spans = split_top_level_spans(rest, 0);
+        if spans.len() >= 2 {
+            return quoted_literal(&rest[spans[1].0..spans[1].1]);
+        }
+    }
+    for (marker, min_args) in [
+        ("debug_assert!(", 2),
+        ("assert_eq!(", 3),
+        ("assert_ne!(", 3),
+        ("assert!(", 2),
+        ("assertEquals(", 3),
+        ("assertEqual(", 3),
+        ("assert.deepEqual(", 3),
+        ("assert.equal(", 3),
+        ("assertThat(", 3),
+        (".NotContains(", 4),
+        (".Contains(", 4),
+        (".NotEqual(", 4),
+        (".Equal(", 4),
+        (".EqualValues(", 4),
+    ] {
+        if let Some(inner) = inner_args_span(line, marker) {
+            let spans = split_top_level_spans(&line[inner.0..inner.1], inner.0);
+            if spans.len() >= min_args {
+                let last = spans[spans.len() - 1];
+                return quoted_literal(&line[last.0..last.1]);
+            }
+        }
+    }
+    None
+}
+
+fn quoted_literal(text: &str) -> Option<String> {
+    let text = text.trim();
+    for quote in ['"', '\'', '`'] {
+        if text.len() >= 2 && text.starts_with(quote) && text.ends_with(quote) {
+            return Some(text[1..text.len() - 1].to_owned());
+        }
+    }
+    None
+}
+
 /// Whether `value` (an already-unquoted literal) names a source file by its extension.
 fn is_source_file_name(value: &str) -> bool {
     let Some(extension) = std::path::Path::new(value)
@@ -1969,8 +2020,12 @@ pub(crate) fn is_comment_line(line: &str) -> bool {
 
 /// Whether a raw line carries an assertion marker on a code line: a commented-out assertion
 /// (`# assert x == y`) must not count towards `assertion-removed`/`gutted-test`.
+pub(crate) fn is_assertion_line(line: &str) -> bool {
+    has_marker(line.trim(), ASSERTION_MARKERS)
+}
+
 fn is_assertion_code_line(line: &str) -> bool {
-    !is_comment_line(line) && has_marker(line.trim(), ASSERTION_MARKERS)
+    !is_comment_line(line) && is_assertion_line(line)
 }
 
 /// Diff-only findings: newly introduced weakening between an edit's old and new content.
@@ -2001,20 +2056,21 @@ pub fn diff_findings_on_views(
     let new_original_lines: Vec<&str> = new_original.lines().collect();
     let mut findings = Vec::new();
 
-    let old_assertions = assertion_multiset(&old_lines, &old_original_lines);
-    let new_assertions = assertion_multiset(&new_lines, &new_original_lines);
-    let old_total: usize = old_assertions.values().sum();
-    let new_total: usize = new_assertions.values().sum();
-    let removed: usize = old_assertions
+    let old_assertions = assertion_keys(&old_lines, &old_original_lines);
+    let new_assertions = assertion_keys(&new_lines, &new_original_lines);
+    // A removal is a *subject* that no longer has any assertion. Recording the predicate as well
+    // keeps two different assertions on one subject from cancelling, and makes an explicit
+    // weaker-to-stronger replacement (Contains -> Equal) a predicate change rather than a removal.
+    let new_subjects: HashSet<&str> = new_assertions
         .iter()
-        .map(|(expression, count)| {
-            count.saturating_sub(*new_assertions.get(expression).unwrap_or(&0))
-        })
-        .sum();
-    // A replacement (same number of assertions, different expressions) is the weakening rules'
-    // business, not a removal: only a drop in the total counts one.
-    if new_total < old_total && removed > 0 {
-        if new_total == 0 {
+        .map(|assertion| assertion.subject.as_str())
+        .collect();
+    let removed = old_assertions
+        .iter()
+        .filter(|assertion| !new_subjects.contains(assertion.subject.as_str()))
+        .count();
+    if new_assertions.is_empty() {
+        if !old_assertions.is_empty() {
             findings.push(Finding::new(
                 "gutted-test",
                 Confidence::High,
@@ -2023,18 +2079,18 @@ pub fn diff_findings_on_views(
                 file_path,
                 "",
             ));
-        } else {
-            findings.push(Finding::new(
-                "assertion-removed",
-                Confidence::High,
-                format!(
-                    "{removed} existing assertion(s) were removed without a replacement. STOP and ask the human to add a .test-checker.json entry with a reason if the removal is intended."
-                ),
-                1,
-                file_path,
-                "",
-            ));
         }
+    } else if removed > 0 {
+        findings.push(Finding::new(
+            "assertion-removed",
+            Confidence::High,
+            format!(
+                "{removed} existing assertion subject(s) were removed without a replacement. STOP and ask the human to add a .test-checker.json entry with a reason if the removal is intended."
+            ),
+            1,
+            file_path,
+            "",
+        ));
     }
 
     for (index, new_line) in new_lines.iter().enumerate() {
@@ -2070,32 +2126,128 @@ pub fn diff_findings_on_views(
     findings
 }
 
-/// A normalized assertion expression, if `view_line` carries an assertion on code.
+/// One assertion reduced to the thing under test and the predicate applied to it.
 ///
-/// The expression comes from the original line (values intact) and collapses internal whitespace,
-/// so moving or reindenting an assertion keeps the same identity. This does not cover renamed
-/// variables, reformatting that re-wraps one expression across lines, or assertions that are not
-/// marker-based expressions (a table-driven loop), which can still read as removals or additions.
-fn normalized_assertion_line(view_line: &str, original_line: &str) -> Option<String> {
-    if !is_assertion_code_line(view_line) {
-        return None;
-    }
-    let trimmed = original_line.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some(trimmed.split_whitespace().collect::<Vec<_>>().join(" "))
+/// `subject` is the expression whose behavior the assertion pins (the actual value, or the left
+/// operand of a language-level `assert`); `predicate` names the check. Whitespace inside the
+/// subject is collapsed so a moved or reindented assertion keeps the same identity. This does not
+/// cover renamed variables, expressions re-wrapped across lines, or table-driven loops: those can
+/// still read as a removal (the table fixture deliberately does).
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Assertion {
+    subject: String,
+    predicate: String,
 }
 
-/// The multiset of normalized assertion expressions in a fragment.
-fn assertion_multiset(lines: &[&str], original: &[&str]) -> HashMap<String, usize> {
-    let mut counts = HashMap::new();
-    for (view_line, original_line) in lines.iter().zip(original) {
-        if let Some(expression) = normalized_assertion_line(view_line, original_line) {
-            *counts.entry(expression).or_insert(0) += 1;
+fn assertion_keys(lines: &[&str], original: &[&str]) -> Vec<Assertion> {
+    lines
+        .iter()
+        .zip(original)
+        .filter_map(|(view_line, original_line)| assertion_of_line(view_line, original_line))
+        .collect()
+}
+
+fn assertion_of_line(view_line: &str, original_line: &str) -> Option<Assertion> {
+    if !is_assertion_code_line(view_line) || view_line.len() != original_line.len() {
+        return None;
+    }
+    let (subject, predicate) = assertion_call_subject(view_line, original_line)
+        .or_else(|| python_assert_subject(view_line, original_line))?;
+    let subject = normalize_assertion_subject(&subject);
+    (!subject.is_empty()).then_some(Assertion { subject, predicate })
+}
+
+/// A call-shaped assertion: testify/unittest/JUnit/`assert_eq!`/`expect(...).toBe(...)`.
+fn assertion_call_subject(view: &str, original: &str) -> Option<(String, String)> {
+    // (marker, predicate, which argument is the subject)
+    const FIRST: u8 = 0;
+    const SECOND: u8 = 1;
+    const LAST: u8 = 2;
+    for (marker, predicate, which) in [
+        (".Contains(", "contains", SECOND),
+        (".NotContains(", "not-contains", SECOND),
+        (".Equal(", "equal", LAST),
+        (".EqualValues(", "equal", LAST),
+        (".Exactly(", "equal", LAST),
+        ("assertEqual(", "equal", LAST),
+        ("assertEquals(", "equal", LAST),
+        ("assertNotEqual(", "not-equal", LAST),
+        ("assertTrue(", "truthy", FIRST),
+        ("assertFalse(", "falsy", FIRST),
+        ("debug_assert!(", "truthy", FIRST),
+        ("assert!(", "truthy", FIRST),
+        ("assert_eq!(", "equal", FIRST),
+        ("assert_ne!(", "not-equal", FIRST),
+    ] {
+        if let Some(inner) = inner_args_span(view, marker) {
+            let args = split_top_level_spans(&view[inner.0..inner.1], inner.0);
+            let span = match which {
+                FIRST => args.first(),
+                SECOND => args.get(1),
+                _ => args.last(),
+            };
+            if let Some(span) = span {
+                return Some((span_text(original, *span), predicate.to_owned()));
+            }
         }
     }
-    counts
+    let (subject_span, _) = expect_to_operand_spans(view)?;
+    let predicate = [".toStrictEqual(", ".toEqual(", ".toBe(", ".toBeTruthy("]
+        .into_iter()
+        .find(|matcher| view.contains(matcher))
+        .unwrap_or(".toBe(");
+    Some((
+        span_text(original, subject_span),
+        predicate.trim_matches(['.', '(']).to_owned(),
+    ))
+}
+
+fn python_assert_subject(view: &str, original: &str) -> Option<(String, String)> {
+    let index = view.find("assert ")?;
+    let start = index + "assert ".len();
+    let rest_view = &view[start..];
+    let rest_original = &original[start..];
+    for (operator, predicate) in [
+        (" in ", "in"),
+        (" not in ", "not-in"),
+        (" == ", "equal"),
+        (" != ", "not-equal"),
+        (" is not ", "not-identical"),
+        (" is ", "identical"),
+    ] {
+        if let Some(position) = rest_view.find(operator) {
+            return Some((rest_original[..position].to_owned(), predicate.to_owned()));
+        }
+    }
+    let body = rest_original.trim();
+    let body = body.strip_prefix("not ").unwrap_or(body);
+    (!body.is_empty()).then(|| (body.to_owned(), "truthy".to_owned()))
+}
+
+/// Reduce equivalent assertion shapes to one subject identity.
+///
+/// `assert!(!x.is_empty())` and `assert_eq!(x.len(), 1)` both pin the same collection, so the
+/// emptiness/len wrapper and a leading `!` are stripped. Other calls keep their arguments (`add(1,
+/// 2)` and `add(2, 3)` stay distinct).
+fn normalize_assertion_subject(subject: &str) -> String {
+    let collapsed = subject.split_whitespace().collect::<Vec<_>>().join(" ");
+    let stripped = collapsed
+        .trim()
+        .strip_prefix('!')
+        .map_or_else(|| collapsed.trim(), str::trim_start);
+    let stripped = stripped
+        .strip_suffix(".is_empty()")
+        .or_else(|| stripped.strip_suffix(".len()"))
+        .unwrap_or(stripped);
+    stripped.trim().to_owned()
+}
+
+fn span_text(original: &str, (start, end): Span) -> String {
+    original
+        .get(start..end)
+        .unwrap_or_default()
+        .trim()
+        .to_owned()
 }
 
 fn subject_stem(file_path: &str) -> String {
@@ -2735,6 +2887,78 @@ mod tests {
                 .any(|finding| finding.rule == "assertion-removed")
         );
         assert!(!findings.iter().any(|finding| finding.rule == "gutted-test"));
+    }
+
+    #[test]
+    fn diff_findings_given_contains_replaced_by_equal_reports_no_removal() {
+        // given: two weak Contains checks on the same subject become one strict Equal check
+        let old = "func TestReads(t *testing.T) {\n\tassert.Contains(t, result, \"cafe comment\")\n\tassert.Contains(t, result, \"hello\")\n}\n";
+        let new = "func TestReads(t *testing.T) {\n\tassert.Equal(t, content, result)\n}\n";
+
+        // when
+        let findings = diff_findings(old, new, "tests/reader_test.go");
+
+        // then: the subject still has an assertion, so nothing was removed
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "assertion-removed"),
+            "findings: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn diff_findings_given_matcher_replaced_on_the_same_subject_reports_no_removal() {
+        // given: the same expect subject switches matcher
+        let old = "it('x', () => {\n  expect(add(1, 2)).toEqual(3);\n});\n";
+        let new = "it('x', () => {\n  expect(add(1, 2)).toBe(3);\n});\n";
+
+        // when
+        let findings = diff_findings(old, new, "tests/app.test.js");
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "assertion-removed"),
+            "findings: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn diff_findings_given_emptiness_rephrased_as_len_reports_no_removal() {
+        // given: the same collection checks written as is_empty() and as len()
+        let old = "#[test]\nfn t() {\n    assert!(!comments.is_empty());\n    assert!(filtered.is_empty());\n}\n";
+        let new = "#[test]\nfn t() {\n    assert_eq!(comments.len(), 1);\n    assert_eq!(filtered.len(), 0);\n}\n";
+
+        // when
+        let findings = diff_findings(old, new, "tests/app_test.rs");
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "assertion-removed"),
+            "findings: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn diff_findings_given_assertion_subject_absent_reports_high() {
+        // given: a subject with no assertion after the edit
+        let old = "def test_a():\n    assert add(1, 1) == 2\n    assert add(2, 2) == 4\n";
+        let new = "def test_a():\n    assert add(1, 1) == 2\n";
+
+        // when
+        let findings = diff_findings(old, new, "tests/test_app.py");
+        let removed: Vec<_> = findings
+            .iter()
+            .filter(|finding| finding.rule == "assertion-removed")
+            .collect();
+
+        // then
+        assert_eq!(removed.len(), 1, "findings: {findings:?}");
+        assert_eq!(removed[0].confidence, Confidence::High);
     }
 
     #[test]

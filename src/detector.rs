@@ -5,6 +5,7 @@ use std::time::Instant;
 use tree_sitter::{Query, QueryCursor, StreamingIterator};
 
 use crate::engine;
+use crate::filters::is_agent_memo_phrase;
 use crate::language::{
     is_test_callee, is_test_function_name, language_for_path, string_node_kinds,
     string_query_source, test_query,
@@ -124,6 +125,8 @@ struct Body {
     end_byte: usize,
     start_row: usize,
     name: Option<String>,
+    /// The row of the captured test name, used to scope `agent-memo-test` to test-level text.
+    name_row: Option<usize>,
     /// The fragment contains this complete test node (no parse error inside it); whole-test rules
     /// such as `no-assertion` and `echo-test` must not run on an incomplete fragment.
     reliable: bool,
@@ -313,14 +316,19 @@ impl TestDetector {
                     // `test-removed` needs both fragments to contain their complete tests: a
                     // parse error means the fragment is partial, so absence proves nothing.
                     if !tree.root_node().has_error() && !old_tree.root_node().has_error() {
-                        findings.extend(removed_test_findings(
-                            &runtime.name,
+                        let analysis = analyze_removals(RemovalInput {
+                            language: &runtime.name,
                             file_path,
-                            old_string,
-                            &old_bodies,
-                            new_string,
-                            &bodies,
-                        ));
+                            old_content: old_string,
+                            old_bodies: &old_bodies,
+                            new_content: new_string,
+                            new_bodies: &bodies,
+                            added: &added,
+                        });
+                        findings.extend(analysis.findings);
+                        if let Some(reason) = analysis.refactor {
+                            demote_removal_findings(&mut findings, reason);
+                        }
                     }
                 }
             }
@@ -329,43 +337,226 @@ impl TestDetector {
     }
 }
 
-/// A test present before the edit but absent after it (tolerating rename by body signature).
-fn removed_test_findings(
-    language: &str,
-    file_path: &str,
-    old_content: &str,
-    old_bodies: &[Body],
-    new_content: &str,
-    new_bodies: &[Body],
-) -> Vec<Finding> {
+/// Two test bodies are the same test when their normalized token multisets are at least this
+/// percent similar.
+const RENAME_PERCENT: usize = 80;
+/// How many lines apart an old and a new body may start and still be the same renamed test.
+const RENAME_POSITION_ROWS: usize = 3;
+
+/// The line-ratio refactor guard needs a whole-file scale: an `Edit` fragment can be a handful of
+/// lines, where dropping one of two tests is ">40%" without being a mass rewrite.
+const MASS_REWRITE_MIN_LINES: usize = 20;
+
+type TokenCounts = HashMap<String, usize>;
+
+/// Whitespace- and comment-normalized body tokens (the declaration line is skipped, as for
+/// `body_signature`). Tokens are case-folded so a renamed identifier does not dominate the match.
+fn body_token_counts(content: &str, body: &Body, language: &str) -> TokenCounts {
+    let mut counts = TokenCounts::new();
+    for line in body_added_lines(content, body, language).iter().skip(1) {
+        for token in line
+            .text
+            .split(|character: char| !(character.is_alphanumeric() || character == '_'))
+        {
+            if !token.is_empty() {
+                *counts.entry(token.to_ascii_lowercase()).or_insert(0) += 1;
+            }
+        }
+    }
+    counts
+}
+
+/// Whether the multiset Jaccard similarity of two bodies reaches `percent`.
+fn jaccard_at_least(left: &TokenCounts, right: &TokenCounts, percent: usize) -> bool {
+    if left.is_empty() && right.is_empty() {
+        return true;
+    }
+    let intersection: usize = left
+        .iter()
+        .map(|(token, count)| (*count).min(*right.get(token).unwrap_or(&0)))
+        .sum();
+    let union: usize = left
+        .iter()
+        .map(|(token, count)| (*count).max(*right.get(token).unwrap_or(&0)))
+        .sum::<usize>()
+        + right
+            .iter()
+            .filter(|(token, _)| !left.contains_key(*token))
+            .map(|(_, count)| *count)
+            .sum::<usize>();
+    intersection.saturating_mul(100) >= union.saturating_mul(percent)
+}
+
+fn union_counts(all: &[TokenCounts]) -> TokenCounts {
+    let mut union = TokenCounts::new();
+    for counts in all {
+        for (token, count) in counts {
+            *union.entry(token.clone()).or_insert(0) += count;
+        }
+    }
+    union
+}
+
+/// What a removal comparison found, plus whether the edit looks like a broad refactor.
+struct RemovalAnalysis {
+    findings: Vec<Finding>,
+    refactor: Option<&'static str>,
+}
+
+/// Compare old tests to added tests and report only bodies with no equivalent.
+///
+/// A body is matched when it has the same name, when a new body's token multiset is at least
+/// `RENAME_JACCARD` similar (a rename), when it sits in the same line neighborhood with moderate
+/// similarity (a move within the file), or when the union of the new bodies covers it (a test split
+/// in two). A payload carries one file, so a test moved to a *different* file cannot be observed
+/// here; that case still reports, by design, until cross-payload state exists.
+#[derive(Clone, Copy)]
+struct RemovalInput<'a> {
+    language: &'a str,
+    file_path: &'a str,
+    old_content: &'a str,
+    old_bodies: &'a [Body],
+    new_content: &'a str,
+    new_bodies: &'a [Body],
+    added: &'a HashSet<usize>,
+}
+
+fn analyze_removals(input: RemovalInput<'_>) -> RemovalAnalysis {
+    let RemovalInput {
+        language,
+        file_path,
+        old_content,
+        old_bodies,
+        new_content,
+        new_bodies,
+        added,
+    } = input;
+    let old_tokens: Vec<TokenCounts> = old_bodies
+        .iter()
+        .map(|body| body_token_counts(old_content, body, language))
+        .collect();
+    let new_tokens: Vec<TokenCounts> = new_bodies
+        .iter()
+        .map(|body| body_token_counts(new_content, body, language))
+        .collect();
     let new_names: HashSet<&str> = new_bodies
         .iter()
         .filter_map(|body| body.name.as_deref())
         .collect();
-    let new_signatures: HashSet<String> = new_bodies
-        .iter()
-        .map(|body| body_signature(&body_added_lines(new_content, body, language)))
-        .collect();
+    let union = union_counts(&new_tokens);
     let mut findings = Vec::new();
-    for old_body in old_bodies {
-        let signature = body_signature(&body_added_lines(old_content, old_body, language));
+    let mut removed = 0;
+    for (index, old_body) in old_bodies.iter().enumerate() {
         let name_matches = old_body
             .name
             .as_deref()
             .is_some_and(|name| new_names.contains(name));
-        let signature_matches = !signature.is_empty() && new_signatures.contains(&signature);
-        if !name_matches && !signature_matches {
-            findings.push(Finding::new(
-                "test-removed",
-                Confidence::High,
-                "A test present before this edit is gone; deleting a test is a strong tampering signal. STOP and ask the human to add a .test-checker.json entry with a reason if the removal is intended.",
-                1,
-                file_path,
-                old_body.name.as_deref().unwrap_or(""),
-            ));
+        // A rename/move needs both signals: the body tokens must be similar *and* the new body
+        // must start in the old body's line neighborhood. Token similarity alone matches sibling
+        // tests that share scaffolding (the Go multi-language family), hiding a real deletion.
+        let similar = new_tokens.iter().enumerate().any(|(other, tokens)| {
+            jaccard_at_least(&old_tokens[index], tokens, RENAME_PERCENT)
+                && old_body.start_row.abs_diff(new_bodies[other].start_row) <= RENAME_POSITION_ROWS
+        });
+        let split = !old_tokens[index].is_empty()
+            && jaccard_at_least(&old_tokens[index], &union, RENAME_PERCENT)
+            && new_bodies
+                .iter()
+                .any(|body| old_body.start_row.abs_diff(body.start_row) <= RENAME_POSITION_ROWS);
+        if name_matches || similar || split {
+            continue;
+        }
+        removed += 1;
+        findings.push(Finding::new(
+            "test-removed",
+            Confidence::High,
+            "A test present before this edit is gone; deleting a test is a strong tampering signal. STOP and ask the human to add a .test-checker.json entry with a reason if the removal is intended.",
+            1,
+            file_path,
+            old_body.name.as_deref().unwrap_or(""),
+        ));
+    }
+
+    let old_names: HashSet<&str> = old_bodies
+        .iter()
+        .filter_map(|body| body.name.as_deref())
+        .collect();
+    // A new test's attribute line is often byte-identical to an old test's attribute and is not
+    // in the LCS-added set, so test the whole body: any added line means the body was introduced
+    // (or rewritten in place) by this edit.
+    let added_tests = new_bodies
+        .iter()
+        .filter(|body| {
+            body_added_lines(new_content, body, language)
+                .iter()
+                .any(|line| added.contains(&(line.line_number - 1)))
+                && body
+                    .name
+                    .as_deref()
+                    .is_none_or(|name| !old_names.contains(name))
+        })
+        .count();
+    let old_lines = old_content.lines().count();
+    let removed_lines = engine::added_lines(new_content, old_content).len();
+    let refactor = if old_lines >= MASS_REWRITE_MIN_LINES
+        && removed_lines.saturating_mul(100) > old_lines.saturating_mul(40)
+    {
+        Some("more than 40% of the old test file's lines were removed")
+    } else if removed > 0 && added_tests >= removed {
+        Some("the edit renames or adds at least as many tests as it removes")
+    } else {
+        None
+    };
+    RemovalAnalysis { findings, refactor }
+}
+
+/// The lines `agent-memo-test` may read: the test's name and its assertion message.
+///
+/// Fixture text in setup lines or passed to a helper inside an assertion (a raw string, a
+/// `is_agent_memo_phrase("...")` argument) is not a test-level message and must not be reported.
+fn agent_memo_lines(body: &Body, content: &str, language: &str) -> HashSet<usize> {
+    let mut allowed = HashSet::new();
+    if let Some(name) = body
+        .name
+        .as_deref()
+        .filter(|name| is_agent_memo_phrase(name))
+    {
+        let _ = name;
+        if let Some(row) = body.name_row {
+            allowed.insert(row + 1);
         }
     }
-    findings
+    for line in body_added_lines(content, body, language) {
+        if let Some(message) = rules::assertion_message_literal(line.text)
+            && is_agent_memo_phrase(&message)
+        {
+            allowed.insert(line.line_number);
+        }
+    }
+    allowed
+}
+
+fn retain_scoped_agent_memo(findings: &mut Vec<Finding>, allowed: &HashSet<usize>) {
+    findings.retain(|finding| {
+        finding.rule != "agent-memo-test" || allowed.contains(&finding.line_number)
+    });
+}
+
+/// Demote removal findings in a broad refactor.
+///
+/// The hook's default gate is `--min-confidence medium` (`parse_min_confidence`), so a Medium
+/// finding would still exit 2. To keep a refactor from blocking while keeping the finding visible,
+/// this demotes to Low (shown only at `--min-confidence low`); no other rule's confidence changes.
+fn demote_removal_findings(findings: &mut [Finding], reason: &str) {
+    for finding in findings.iter_mut() {
+        if finding.rule == "test-removed" || finding.rule == "assertion-removed" {
+            finding.confidence = Confidence::Low;
+            finding.message = format!(
+                "{} Refactor-shaped edit ({reason}); reported at low confidence so it does not block the default gate. Review it at --min-confidence low.",
+                finding.message
+            );
+        }
+    }
 }
 
 fn runtime_by_name(name: &str) -> Result<Arc<Runtime>, DetectError> {
@@ -654,13 +845,19 @@ fn capture_bodies(
     while let Some(query_match) = matches.get() {
         let mut test_node: Option<tree_sitter::Node> = None;
         let mut name: Option<String> = None;
+        let mut name_row: Option<usize> = None;
         let mut callee: Option<String> = None;
+        let mut callee_row: Option<usize> = None;
         for capture in query_match.captures {
             match capture_names.get(capture.index as usize).copied() {
                 Some("test") => test_node = Some(capture.node),
-                Some("test.name") => name = capture.node.utf8_text(source).ok().map(str::to_owned),
+                Some("test.name") => {
+                    name = capture.node.utf8_text(source).ok().map(str::to_owned);
+                    name_row = Some(capture.node.start_position().row);
+                }
                 Some("test.callee") => {
                     callee = capture.node.utf8_text(source).ok().map(str::to_owned);
+                    callee_row = Some(capture.node.start_position().row);
                 }
                 _ => {}
             }
@@ -670,12 +867,18 @@ fn capture_bodies(
             // `def`), otherwise the declared function name.
             let identifier = callee.as_deref().or(name.as_deref());
             if is_body_candidate(&runtime.name, identifier, node, source) {
+                let literal_name = literal_test_name(node, source);
                 let (start_byte, start_row) = expanded_start(&runtime.name, node, source);
                 bodies.push(Body {
                     start_byte,
                     end_byte: expanded_end(&runtime.name, node, source),
                     start_row,
-                    name: name.or(callee),
+                    name: name
+                        .or_else(|| literal_name.as_ref().map(|(name, _)| name.clone()))
+                        .or(callee),
+                    name_row: name_row
+                        .or_else(|| literal_name.as_ref().map(|(_, row)| *row))
+                        .or(callee_row),
                     reliable: !node.has_error(),
                 });
             }
@@ -683,6 +886,26 @@ fn capture_bodies(
         matches.advance();
     }
     bodies
+}
+
+/// The first string literal argument of a call-shaped test (`it("name", …)`), with its row.
+///
+/// Call-shaped test queries capture the callee (`it`, `test`, `describe`) but not the literal name,
+/// so without this every such body would be named `it` and a rename could never be distinguished
+/// from an unrelated test.
+fn literal_test_name(node: tree_sitter::Node, source: &[u8]) -> Option<(String, usize)> {
+    let arguments = node.child_by_field_name("arguments")?;
+    let mut cursor = arguments.walk();
+    for child in arguments.children(&mut cursor) {
+        if matches!(child.kind(), "string" | "template_string") {
+            let text = child.utf8_text(source).ok()?;
+            return Some((
+                text.trim_matches(['"', '\'', '`']).to_owned(),
+                child.start_position().row,
+            ));
+        }
+    }
+    None
 }
 
 /// Extend a test body upward to include the attribute/marker lines that gate it (Rust
@@ -839,7 +1062,10 @@ fn analyze_new_bodies(
     for body in bodies {
         let lines = body_added_lines(view, body, language);
         let original_lines = body_added_lines(content, body, language);
-        findings.extend(classify_lines(file_path, &lines, &original_lines));
+        let allowed_memo_lines = agent_memo_lines(body, content, language);
+        let mut body_findings = classify_lines(file_path, &lines, &original_lines);
+        retain_scoped_agent_memo(&mut body_findings, &allowed_memo_lines);
+        findings.extend(body_findings);
         findings.extend(rules::classify_test_body_with_original(
             file_path,
             body.start_row + 1,
@@ -914,12 +1140,11 @@ fn analyze_edited_bodies(
             .collect();
         let is_touched = !touched.is_empty();
         if is_touched {
-            findings.extend(classify_diff_lines(
-                file_path,
-                &touched,
-                &touched_original,
-                &diff,
-            ));
+            let allowed_memo_lines = agent_memo_lines(body, content, language);
+            let mut touched_findings =
+                classify_diff_lines(file_path, &touched, &touched_original, &diff);
+            retain_scoped_agent_memo(&mut touched_findings, &allowed_memo_lines);
+            findings.extend(touched_findings);
             if let Some(finding) =
                 rules::classify_echo_body(file_path, &original_lines, body.reliable, Some(added))
             {

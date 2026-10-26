@@ -36,10 +36,48 @@ fn full_pipeline_given_suppression_marker_filters_out() {
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+/// `(rule, confidence)` pairs from the hook's rendered XML.
+fn detected_with_confidence(
+    case: &Case,
+) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+    let payload = payload_for(case).to_string();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_test-checker"))
+        .arg("--min-confidence")
+        .arg("low")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .as_mut()
+        .ok_or("stdin handle unavailable")?
+        .write_all(payload.as_bytes())?;
+    let output = child.wait_with_output()?;
+    let text = String::from_utf8_lossy(&output.stderr);
+    Ok(text
+        .split("<finding ")
+        .skip(1)
+        .filter_map(|chunk| {
+            let rule = chunk.split("rule=\"").nth(1)?.split('"').next()?.to_owned();
+            let confidence = chunk
+                .split("confidence=\"")
+                .nth(1)?
+                .split('"')
+                .next()?
+                .to_owned();
+            Some((rule, confidence))
+        })
+        .collect())
+}
+
 #[derive(serde::Deserialize)]
 struct Case {
     path: String,
     content: String,
+    /// Present for an `Edit` case: the pre-edit fragment to diff against. Absent for a `Write`.
+    #[serde(default)]
+    old_content: Option<String>,
     expected: Option<String>,
 }
 
@@ -48,15 +86,32 @@ fn corpus() -> Result<Vec<Case>, Box<dyn std::error::Error>> {
     Ok(serde_json::from_str(&raw)?)
 }
 
+fn payload_for(case: &Case) -> serde_json::Value {
+    case.old_content.as_ref().map_or_else(
+        || {
+            serde_json::json!({
+                "tool_name": "Write",
+                "tool_input": { "file_path": case.path, "content": case.content },
+            })
+        },
+        |old| {
+            serde_json::json!({
+                "tool_name": "Edit",
+                "tool_input": {
+                    "file_path": case.path,
+                    "old_string": old,
+                    "new_string": case.content,
+                },
+            })
+        },
+    )
+}
+
 /// Run the real hook binary and collect the `rule="..."` ids from its stderr. The corpus spans
 /// every confidence band, so the binary runs at `--min-confidence low`; a clean case must then
 /// still produce no findings.
 fn detected(case: &Case) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let payload = serde_json::json!({
-        "tool_name": "Write",
-        "tool_input": { "file_path": case.path, "content": case.content },
-    })
-    .to_string();
+    let payload = payload_for(case).to_string();
     let mut child = Command::new(env!("CARGO_BIN_EXE_test-checker"))
         .arg("--min-confidence")
         .arg("low")
@@ -107,9 +162,16 @@ fn floor_violations(cases: &[Case], got: &[Vec<String>]) -> Vec<String> {
         if *total < MIN_BUCKET {
             continue;
         }
+        // Removal rules are the precision-sensitive ones: every genuine deletion in the corpus
+        // must still fire, so their floor is 1.0 instead of the shared 0.5.
+        let floor = if rule == "test-removed" || rule == "assertion-removed" {
+            1.0
+        } else {
+            FLOOR
+        };
         let found = hit.get(rule).copied().unwrap_or(0);
         let recall = found as f64 / *total as f64;
-        if recall < FLOOR {
+        if recall < floor {
             violations.push(format!("{rule}: recall {recall:.2}"));
         }
     }
@@ -142,6 +204,7 @@ fn per_rule_floor_trips_on_a_missed_rule() {
     let cases = vec![Case {
         path: "tests/a_test.py".to_owned(),
         content: "def test_a():\n    assert x == 1\n".to_owned(),
+        old_content: None,
         expected: Some("skip-added".to_owned()),
     }];
     let got = vec![Vec::new()];
@@ -151,4 +214,39 @@ fn per_rule_floor_trips_on_a_missed_rule() {
 
     // then
     assert!(!violations.is_empty(), "the floor must catch a missed rule");
+}
+
+#[test]
+fn removal_corpus_cases_fire_at_high_confidence() -> Result<(), Box<dyn std::error::Error>> {
+    // given: every genuine-deletion case (an Edit with old_content) for the removal rules
+    let mut checked = 0;
+    for case in corpus()? {
+        if case.old_content.is_none() {
+            continue;
+        }
+        let Some(expected) = case.expected.as_deref() else {
+            continue;
+        };
+        if expected != "test-removed" && expected != "assertion-removed" {
+            continue;
+        }
+
+        // when
+        let found = detected_with_confidence(&case)?;
+
+        // then: recall must not have been bought with a confidence drop
+        assert!(
+            found
+                .iter()
+                .any(|(rule, confidence)| rule == expected && confidence == "high"),
+            "{}: expected {expected} at high confidence, got {found:?}",
+            case.path
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 10,
+        "expected at least 10 removal cases, saw {checked}"
+    );
+    Ok(())
 }
