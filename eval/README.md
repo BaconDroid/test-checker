@@ -36,3 +36,24 @@ It builds 320 payloads from the two repositories' git history (80 test-file chan
 `Write` of the committed content and an `Edit` of parent -> commit), plus a 58-file audit of every
 tracked `.rs`/`.js`/`.py` source file in both repos (`eval/baseline.py` excluded), all at
 `--min-confidence low`. It prints exit-2 and per-rule finding counts for each binary. Read-only.
+
+## Refactor-guard thresholds
+
+`guard_thresholds.py` recomputes the removal-rule refactor-guard table (20/40/60 %) from the shipped
+binary; no instrumented build is needed. The binary prints one `GUARD_METRICS {json}` line per edit
+when `TEST_CHECKER_GUARD_METRICS=1` is set (the flag is off by default and never changes a finding).
+
+```bash
+cargo build --release
+python3 eval/guard_thresholds.py --binary target/release/test-checker \
+  --truth eval/replay_removal_truth.json
+```
+
+It uses the same 320-payload `replay.py` corpus plus the `old_content` cases in `eval/corpus.json`.
+Per payload it reports `old_lines`, `removed_lines`, `removed_tests`, `added_tests`, and the
+pre-demotion `test_removed`/`assertion_removed` counts; the script applies
+`(old_lines >= 20 and ratio > threshold) or (removed_tests > 0 and added_tests >= removed_tests)`.
+`--truth` lists the replay payloads verified as genuine deletions (`cases[].key` =
+`sha256(kind|path|old|new)[:16]`); without it, replay TP recall prints `n/a`. The recall-corpus part
+uses the expected rule directly, so it always reports 12/12 while the guard keeps every genuine
+deletion High.

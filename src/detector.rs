@@ -108,6 +108,10 @@ pub(crate) enum DetectError {
 /// The detector's findings, or the reason the check could not run.
 pub(crate) type DetectResult = Result<Vec<Finding>, DetectError>;
 
+/// Print one JSON line of refactor-guard inputs per edit when set. Off by default; read only for
+/// `eval/guard_thresholds.py`, never to change a finding.
+const GUARD_METRICS_ENV: &str = "TEST_CHECKER_GUARD_METRICS";
+
 impl std::fmt::Display for DetectError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -326,6 +330,28 @@ impl TestDetector {
                             added: &added,
                         });
                         findings.extend(analysis.findings);
+                        if std::env::var_os(GUARD_METRICS_ENV).is_some() {
+                            let test_removed = findings
+                                .iter()
+                                .filter(|finding| finding.rule == "test-removed")
+                                .count();
+                            let assertion_removed = findings
+                                .iter()
+                                .filter(|finding| finding.rule == "assertion-removed")
+                                .count();
+                            let (old_lines, removed_lines, removed_tests, added_tests) =
+                                analysis.metrics;
+                            let record = serde_json::json!({
+                                "path": file_path,
+                                "old_lines": old_lines,
+                                "removed_lines": removed_lines,
+                                "removed_tests": removed_tests,
+                                "added_tests": added_tests,
+                                "test_removed": test_removed,
+                                "assertion_removed": assertion_removed,
+                            });
+                            eprintln!("GUARD_METRICS {record}");
+                        }
                         if let Some(reason) = analysis.refactor {
                             demote_removal_findings(&mut findings, reason);
                         }
@@ -401,6 +427,8 @@ fn union_counts(all: &[TokenCounts]) -> TokenCounts {
 struct RemovalAnalysis {
     findings: Vec<Finding>,
     refactor: Option<&'static str>,
+    /// `(old_lines, removed_lines, removed_tests, added_tests)` for the threshold script.
+    metrics: (usize, usize, usize, usize),
 }
 
 /// Compare old tests to added tests and report only bodies with no equivalent.
@@ -507,7 +535,11 @@ fn analyze_removals(input: RemovalInput<'_>) -> RemovalAnalysis {
     } else {
         None
     };
-    RemovalAnalysis { findings, refactor }
+    RemovalAnalysis {
+        findings,
+        refactor,
+        metrics: (old_lines, removed_lines, removed, added_tests),
+    }
 }
 
 /// The lines `agent-memo-test` may read: the test's name and its assertion message.
@@ -1144,6 +1176,18 @@ fn analyze_edited_bodies(
             let mut touched_findings =
                 classify_diff_lines(file_path, &touched, &touched_original, &diff);
             retain_scoped_agent_memo(&mut touched_findings, &allowed_memo_lines);
+            // A line that already existed verbatim in the old fragment is pre-existing code, even
+            // if the line LCS marked it as added (a move/reorder in a rewrite).
+            let old_trimmed: HashSet<&str> = old_content.lines().map(str::trim).collect();
+            touched_findings.retain(|finding| {
+                if finding.rule != "conditional-assertion" {
+                    return true;
+                }
+                original_lines
+                    .iter()
+                    .find(|line| line.line_number == finding.line_number)
+                    .is_none_or(|line| !old_trimmed.contains(line.text.trim()))
+            });
             findings.extend(touched_findings);
             if let Some(finding) =
                 rules::classify_echo_body(file_path, &original_lines, body.reliable, Some(added))
