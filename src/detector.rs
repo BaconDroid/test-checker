@@ -108,6 +108,10 @@ pub(crate) enum DetectError {
 /// The detector's findings, or the reason the check could not run.
 pub(crate) type DetectResult = Result<Vec<Finding>, DetectError>;
 
+/// Print one JSON line of refactor-guard inputs per edit when set. Off by default; read only for
+/// `eval/guard_thresholds.py`, never to change a finding.
+const GUARD_METRICS_ENV: &str = "TEST_CHECKER_GUARD_METRICS";
+
 impl std::fmt::Display for DetectError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -326,6 +330,28 @@ impl TestDetector {
                             added: &added,
                         });
                         findings.extend(analysis.findings);
+                        if std::env::var_os(GUARD_METRICS_ENV).is_some() {
+                            let test_removed = findings
+                                .iter()
+                                .filter(|finding| finding.rule == "test-removed")
+                                .count();
+                            let assertion_removed = findings
+                                .iter()
+                                .filter(|finding| finding.rule == "assertion-removed")
+                                .count();
+                            let (old_lines, removed_lines, removed_tests, added_tests) =
+                                analysis.metrics;
+                            let record = serde_json::json!({
+                                "path": file_path,
+                                "old_lines": old_lines,
+                                "removed_lines": removed_lines,
+                                "removed_tests": removed_tests,
+                                "added_tests": added_tests,
+                                "test_removed": test_removed,
+                                "assertion_removed": assertion_removed,
+                            });
+                            eprintln!("GUARD_METRICS {record}");
+                        }
                         if let Some(reason) = analysis.refactor {
                             demote_removal_findings(&mut findings, reason);
                         }
@@ -401,6 +427,8 @@ fn union_counts(all: &[TokenCounts]) -> TokenCounts {
 struct RemovalAnalysis {
     findings: Vec<Finding>,
     refactor: Option<&'static str>,
+    /// `(old_lines, removed_lines, removed_tests, added_tests)` for the threshold script.
+    metrics: (usize, usize, usize, usize),
 }
 
 /// Compare old tests to added tests and report only bodies with no equivalent.
@@ -507,7 +535,11 @@ fn analyze_removals(input: RemovalInput<'_>) -> RemovalAnalysis {
     } else {
         None
     };
-    RemovalAnalysis { findings, refactor }
+    RemovalAnalysis {
+        findings,
+        refactor,
+        metrics: (old_lines, removed_lines, removed, added_tests),
+    }
 }
 
 /// The lines `agent-memo-test` may read: the test's name and its assertion message.
