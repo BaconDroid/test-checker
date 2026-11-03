@@ -24,7 +24,7 @@ Do NOT re-implement the review backlog (R1-R7) - those already landed on main (t
 no-assertion, allow-added, incomplete/unawaited-assertion, broad-exception, --min-confidence,
 gate-weakened). Land each workstream as its own branch -> PR -> squash-merge with CI green.
 
-CURRENT STATE (verified): 24 rules; 15 framework languages; presence-only rules are
+CURRENT STATE (verified): 33 rules; 21 framework languages; presence-only rules are
 weakened-assertion, snapshot-regenerated, tolerance-broadened; engine in src/engine.rs (shared,
 byte-identical with comment-checker); parity harness in parity/ with a CI job.
 
@@ -34,7 +34,8 @@ INVARIANTS (do not violate):
 - cargo fmt --all -- --check clean; cargo clippy -p test-checker --all-targets --all-features -- -D warnings
   clean (note: clippy.toml sets too-many-lines-threshold=120 - split functions rather than relaxing it);
   no unwrap/expect/panic in non-test code.
-- Hook contract unchanged: stdin JSON -> stderr, exit 2 on findings else 0, fail-open, prefix [test-checker].
+- Hook contract: stdin JSON -> stderr, exit 2 on findings, 0 on pass/skip, 1 when the detector could
+  not run (internal failure), prefix [test-checker].
 - PARITY: any change to a shared file (.cargo/config.toml, .gitignore, clippy.toml, deny.toml,
   rustfmt.toml, rust-toolchain.toml, .github/**, npm/**, parity/**, src/cli.rs, src/engine.rs,
   src/main.rs, tests/parity.rs) must land as a coordinated pair: push the SAME branch name to BOTH
@@ -71,7 +72,7 @@ WORKSTREAM B - expand/validate the test-body query set:
 3. Per language: add a test_query arm (src/language.rs: @test + @test.name/@test.callee); extend
    is_body_candidate (src/detector.rs); VALIDATE empirically before trusting (query compiles, captures
    the body, a skip/focus marker inside yields the finding); move the language from NON_FRAMEWORK_CASES
-   to FRAMEWORK_CASES + WEAKEN_CASES in tests/detector.rs, keep the table at exactly 31, clean fixture
+   to FRAMEWORK_CASES + WEAKEN_CASES in tests/detector.rs, keep the table at exactly 35, clean fixture
    -> no findings.
 4. Edge cases: attribute/decorator/macro lines outside the body (mirror expanded_start for Rust/Elixir/
    Python); nested bodies (dedupe already applied); add the language to line_comment_token; reuse the

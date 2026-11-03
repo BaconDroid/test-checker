@@ -60,8 +60,10 @@ implemented in this tree.
 `scripts/cleanup-candidates [root]` feeds each test file to the real binary as a whole-file `Write`
 and aggregates the **file-level** superfluity findings (`duplicate-test`, `near-duplicate-test`,
 `tautological-assertion`, `no-assertion`, `source-grep-test`, `gutted-test`, `echo-test`,
-`mirror-implementation-test`). It prints JSON (`{file, test_name, line, rule, confidence, reason}`)
-sorted by confidence, then a summary on stderr, and always exits 0.
+`mirror-implementation-test`). It prints a JSON report envelope - `root`, `files_scanned`,
+`total_candidates`, `candidates_by_rule`, and a `candidates` array whose entries are shaped
+`{file, test_name, line, rule, confidence, reason}` - sorted by confidence, then a summary on
+stderr. It always exits 0 unless the arguments are invalid: a root that is not a directory exits 2.
 
 It never modifies files. Removal remains a separate, human-approved step. Diff-based integrity rules
 are not part of the report.
@@ -226,10 +228,14 @@ Three rules — `weakened-assertion`, `snapshot-regenerated`, `tolerance-broaden
 > `toBe` > truthiness/definedness; Python `assertEqual`/`==` > `assertIsNotNone`/`assertTrue`/`is
 not None`; snapshot equality → `toMatchSnapshot`; numeric `places`/precision/`delta`/sleep) and fire
 only when a stricter form for the **same assertion subject** was replaced by a looser one. If the
-subject cannot be aligned, no finding is produced (precision over recall). On an `Edit` the finding
-is `medium` (`high` when an exact/deep equality became a truthiness/existence check); on a `Write`
-there is no baseline, so the same patterns report at `low` confidence — below the default gate, so
-a brand-new test is not blocked for using a loose matcher.
+subject cannot be aligned, no finding is produced (precision over recall). On an `Edit` each rule
+reports at its own confidence: `weakened-assertion` is `medium` (`high` when an exact/deep equality
+became a truthiness/existence check), `snapshot-regenerated` is always `high`, and
+`tolerance-broadened` is `medium`. On a `Write` **without** the `TEST_CHECKER_WRITE_BASELINE=1`
+opt-in (see Contract) there is no baseline, so the same patterns report at `low` confidence - below
+the default gate, so a brand-new test is not blocked for using a loose matcher. With the opt-in on,
+the `Write` diffs against `git show HEAD:<path>` and reports at the same `medium`/`high` confidences
+as an `Edit`.
 
 ## Allow-list / suppression
 
@@ -243,6 +249,10 @@ a brand-new test is not blocked for using a loose matcher.
   the reason after `--` has at least 12 characters. A bare marker, an unknown rule, or a short reason
   suppresses nothing and is itself reported as `allow-invalid`. A marker added **in the same change**
   does not suppress it and is reported as `allow-added`.
+- **Markers are inert on a whole-file `Write`.** On a `Write` every line counts as added, so a
+  marker in the written content neither suppresses any finding nor is exempt from reporting: it is
+  itself reported as `allow-added`, and its rule still blocks. Marker suppression only ever applies
+  to `Edit`/`MultiEdit` fragments (above).
 - **File-wide suppression.** Commit a `.test-checker.json` at the repo root. The hook walks up from
   the payload `cwd` to the first directory containing `.git` and reads the config only there, so a
   config in a subdirectory is ignored. Only entries with a glob, at least one rule id, and a non-empty
@@ -263,20 +273,26 @@ banner as well.
 
 ## Limits and false-positive risks
 
-- **Parse failures fail open.** If the grammar cannot load or a parse exceeds the 50 ms budget, the
-  detector returns no findings and the hook prints `Success`. That is a silent pass, not proof the
-  file is clean.
+- **Parse failures never print `Success`.** If the grammar or a query cannot load, the detector
+  fails: the hook exits `1` with `did not run` and nothing was checked (per the exit table above).
+  A parse that exceeds the 50 ms budget aborts that file and exits `0` with a visible
+  `Skipping: Parse budget exceeded` line - a skipped file is not proof it is clean. Neither path is
+  a silent pass, and only a genuinely clean run prints `Success`.
 - **Harness edits always report.** On a sensitive harness path, an added non-blank line yields
   `harness-edited` at `medium`, so routine CI/workflow edits block until the agent justifies them.
-- **Rules are textual.** Markers, matchers, and memo phrases are matched on comment-stripped lines,
-  but string literals are not masked, and several markers are substrings. A test name or message
-  containing a marker-like phrase can be flagged.
+- **Rules are textual.** Body line rules run on comment-stripped lines against the masked view
+  (string literals blanked - see above), but comment-based rules (`commented-out-test`,
+  `agent-memo-test`) read the original text, harness-file lines are matched raw (no parser runs
+  there), and a language with no body query is never masked because no body rule can fire in it.
+  Separately, several markers are substrings: a test name or message containing a marker-like
+  phrase can be flagged.
 - **Body rules need a captured test body.** A test framework whose body is not captured by the 21
   language queries yields no body findings, only `commented-out-test`.
 - **Deletion findings point at line 1.** On the edit-diff path, `test-removed`, `gutted-test`, and
   `assertion-removed` describe a line that no longer exists, so they report line `1` instead of the
   old line.
-- **Suppression is fragment-scoped** for `Edit`/`MultiEdit`; see above.
+- **Suppression is fragment-scoped** for `Edit`/`MultiEdit` and does not apply to a whole-file
+  `Write` (every line counts as added there); see above.
 - **This is a detector.** It does not fix, delete, or rewrite tests.
 
 ## Scope and non-goals

@@ -65,16 +65,16 @@ typescript test query** — the cost is grammar-bound, not source-bound. `get_la
 ## Top cost centres
 
 1. **Query compilation — one fresh process pays it 2–3×.** ≈ 84 % of python's ≈ 13.9 ms, ≈ 29 of
-   ts's 43.7 ms, ≈ 26–35 of large-js. `src/detector.rs:200-222` (`runtime_by_name`) compiles the
+   ts's 43.7 ms, ≈ 26–35 of large-js. `src/detector.rs` (`runtime_by_name`) compiles the
    comment query, the optional test query, and the optional injection query once per language per
-   process; the `RUNTIMES` cache (`detector.rs:19-20`) is per-process, so every invocation pays it.
+   process; the `RUNTIMES` cache is per-process, so every invocation pays it.
 2. **Large-write warm pipeline, dominated by per-line rule classification.** ≈ 45–55 ms of scenario 7
-   (`detector.rs:705-723` runs the full `rules.rs` catalogue per body line over ~60 bodies). Small
+   (`classify_lines` runs the full `rules.rs` catalogue per body line over ~60 bodies). Small
    files are unaffected (warm detect ≈ 0.3 ms).
 3. **Process start ≈ 2.2 ms** (60 MB binary with statically linked grammars) — real but minor.
 
-**Injection query.** `runtime_by_name` compiles it unconditionally when the pack bundles one
-(`detector.rs:211-212`). For 21 of 35 languages `get_injections_query` returns `None` → zero cost;
+**Injection query.** `runtime_by_name` compiles it unconditionally when the pack bundles one.
+For 21 of 35 languages `get_injections_query` returns `None` > zero cost;
 for the 14 that bundle one it is an extra `Query::new` even when the file has no injection site. It
 cannot be deferred in-repo: the query is what discovers the regions (`tests/detector.rs` depends on
 the html `<script>` injection finding).
@@ -82,7 +82,8 @@ the html `<script>` injection finding).
 ## The "generic capture" premise is moot
 
 The code already compiles **one generic test query per language** and classifies candidates in Rust
-(`src/language.rs:16-54`, compiled at `src/detector.rs:210`, classification at `detector.rs:424-470`).
+(`src/language.rs:16-54`, compiled in `runtime_by_name`, candidate classification in
+`is_body_candidate`).
 The remaining cost is the intrinsic grammar-bound `Query::new` cost, so restructuring the query
 sources cannot recover it. The plan's *diagnosis* (query compilation dominates) is correct; its
 *fix* addresses work already done.
@@ -103,7 +104,7 @@ Options, in order of leverage:
    daemon adds lifecycle, security and cross-platform complexity that contradicts the lean goal.
 2. **Behaviour-preserving classification prefilter** for large writes: skip body lines that cannot
    match any rule before running the full catalogue. **Not done** — a safe prefilter would have to
-   encode the triggers of all 29 rules (`src/rules.rs` is ~2.5k lines), far beyond the ~30-line
+   encode the triggers of all 33 rules (`src/rules.rs` is ~4.1k lines), far beyond the ~30-line
    budget set for this option.
 3. **Do not** remove rules, drop the injection query, or shrink query sources: measured savings are
    small and/or change behaviour.
@@ -140,6 +141,8 @@ Checks requested after the first version of this profile:
   `eval/baseline-history.json`), and fails closed when the baseline/tolerance/provenance is
   missing or invalid; the 15 ms value is a warning only. Caveat: the gate is **not wired into
   CI** — it runs manually (`python3 eval/baseline.py <binary>`), and a fresh job has no run history.
-- **Absolute numbers are host-dependent.** The recorded baseline is 18.28 ms; on the reviewer's box
+- **Absolute numbers are host-dependent.** The baseline was measured at 18.28 ms p95 on this host
+  when this profile was written - a one-off measurement with no committed artifact
+  (`eval/baseline.json` stores only the relative ratio, not an absolute latency); on the reviewer's box
   p95 ≈ 14.3–14.7 ms is inside the 15 ms target, while this (un-isolated) box measured ≈ 16.2 ms.
   The relative gate is the one that must pass.
