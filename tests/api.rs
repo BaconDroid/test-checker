@@ -327,6 +327,65 @@ fn check_hook_input_given_short_reason_marker_suppresses_nothing_and_is_reported
 }
 
 #[test]
+fn check_hook_input_given_echo_test_marker_suppresses_and_is_not_invalid() {
+    // given: an edit that introduces the echo pattern. The unmarked payload proves the finding
+    // fires; the marked one carries the same pre-existing marker on the line above the finding,
+    // so it was neither added with this change nor is its rule unknown.
+    let unmarked = r#"{"tool_name":"Edit","tool_input":{"file_path":"tests/app.test.js","old_string":"it('stores', () => {\n  dto.set_name(other);\n  expect(dto.get_name()).toBe(name);\n});\n","new_string":"it('stores', () => {\n  dto.set_name(name);\n  expect(dto.get_name()).toBe(name);\n});\n"}}"#;
+    let marked = r#"{"tool_name":"Edit","tool_input":{"file_path":"tests/app.test.js","old_string":"it('stores', () => {\n  dto.set_name(other);\n  // test-checker: allow echo-test -- echoes its own write back\n  expect(dto.get_name()).toBe(name);\n});\n","new_string":"it('stores', () => {\n  dto.set_name(name);\n  // test-checker: allow echo-test -- echoes its own write back\n  expect(dto.get_name()).toBe(name);\n});\n"}}"#;
+
+    // when: echo-test is low telemetry, so keep the low band to observe it
+    let baseline = check_hook_input_from_reader(unmarked.as_bytes(), &low_confidence_options());
+    let result = check_hook_input_from_reader(marked.as_bytes(), &low_confidence_options());
+
+    // then: the rule fires without the marker, and the marker suppresses it without allow-invalid
+    assert_eq!(baseline.exit_code, 2, "{}", baseline.message);
+    assert!(
+        baseline.message.contains("echo-test"),
+        "{}",
+        baseline.message
+    );
+    assert_eq!(result.exit_code, 0, "{}", result.message);
+    assert!(
+        !result.message.contains("allow-invalid"),
+        "{}",
+        result.message
+    );
+    assert!(!result.message.contains("echo-test"), "{}", result.message);
+}
+
+#[test]
+fn check_hook_input_given_mirror_implementation_marker_suppresses_and_is_not_invalid() {
+    // given: an edit that introduces the mirrored expectation, with a pre-existing marker on the
+    // line above the finding.
+    let unmarked = r#"{"tool_name":"Edit","tool_input":{"file_path":"tests/app.test.js","old_string":"it('adds', () => {\n  expect(add(a, b)).toBe(3);\n});\n","new_string":"it('adds', () => {\n  expect(add(a, b)).toBe(a + b);\n});\n"}}"#;
+    let marked = r#"{"tool_name":"Edit","tool_input":{"file_path":"tests/app.test.js","old_string":"it('adds', () => {\n  // test-checker: allow mirror-implementation-test -- mirrors the implementation exactly\n  expect(add(a, b)).toBe(3);\n});\n","new_string":"it('adds', () => {\n  // test-checker: allow mirror-implementation-test -- mirrors the implementation exactly\n  expect(add(a, b)).toBe(a + b);\n});\n"}}"#;
+
+    // when: mirror-implementation-test is low telemetry, so keep the low band to observe it
+    let baseline = check_hook_input_from_reader(unmarked.as_bytes(), &low_confidence_options());
+    let result = check_hook_input_from_reader(marked.as_bytes(), &low_confidence_options());
+
+    // then: the rule fires without the marker, and the marker suppresses it without allow-invalid
+    assert_eq!(baseline.exit_code, 2, "{}", baseline.message);
+    assert!(
+        baseline.message.contains("mirror-implementation-test"),
+        "{}",
+        baseline.message
+    );
+    assert_eq!(result.exit_code, 0, "{}", result.message);
+    assert!(
+        !result.message.contains("allow-invalid"),
+        "{}",
+        result.message
+    );
+    assert!(
+        !result.message.contains("mirror-implementation-test"),
+        "{}",
+        result.message
+    );
+}
+
+#[test]
 fn check_hook_input_given_clean_run_returns_the_exact_success_line() {
     // given
     let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/test_app.py","content":"def test_sums():\n    assert add(1, 2) == 3\n"}}"#;

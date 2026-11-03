@@ -66,6 +66,8 @@ fn finding_reason(rule: &str) -> &'static str {
         "commented-out-test" => "test commented out",
         "duplicate-test" => "duplicate test",
         "near-duplicate-test" => "near-duplicate test",
+        "echo-test" => "value echoed back unchanged",
+        "mirror-implementation-test" => "expected value mirrors the implementation",
         "test-removed" => "test removed",
         "allow-added" => "opt-out marker added with the finding",
         "allow-invalid" => "invalid opt-out marker",

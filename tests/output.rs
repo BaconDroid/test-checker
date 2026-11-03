@@ -1,3 +1,4 @@
+use test_checker::filters::KNOWN_RULES;
 use test_checker::models::{Confidence, Finding};
 use test_checker::output::{build_findings_xml, format_hook_message};
 
@@ -59,6 +60,100 @@ fn build_findings_xml_given_special_characters_escapes_text_and_attributes() {
         result,
         "<findings file=\"tests/a&amp;b.py\">\n\t<finding line-number=\"1\" rule=\"tautological-assertion\" confidence=\"high\" reason=\"tautological assertion\">assert 1 &lt; 2 &amp;&amp; 3 &gt; 2</finding>\n</findings>",
     );
+}
+
+#[test]
+fn build_findings_xml_given_echo_test_returns_specific_reason() {
+    // given
+    let findings = vec![finding(
+        "The test writes a value and reads it back unchanged through a trivial accessor.",
+        3,
+        "echo-test",
+    )];
+
+    // when
+    let result = build_findings_xml(&findings, "tests/test_app.py");
+
+    // then
+    assert!(
+        result.contains("reason=\"value echoed back unchanged\""),
+        "{result}"
+    );
+    assert!(!result.contains("reason=\"finding\""), "{result}");
+}
+
+#[test]
+fn build_findings_xml_given_mirror_implementation_test_returns_specific_reason() {
+    // given
+    let findings = vec![finding(
+        "The expected value restates the code under test instead of pinning its behaviour.",
+        3,
+        "mirror-implementation-test",
+    )];
+
+    // when
+    let result = build_findings_xml(&findings, "tests/test_app.py");
+
+    // then
+    assert!(
+        result.contains("reason=\"expected value mirrors the implementation\""),
+        "{result}"
+    );
+    assert!(!result.contains("reason=\"finding\""), "{result}");
+}
+
+/// The README `## Rules` paragraph is the documented rule catalog: every id it lists must be
+/// suppressible via a scoped marker (`KNOWN_RULES`) and must render a specific stable reason, and
+/// neither support table may list an id the README does not document.
+#[test]
+fn readme_rule_ids_stay_in_sync_with_the_support_tables() -> Result<(), Box<dyn std::error::Error>>
+{
+    // given: the id paragraph that follows the `## Rules` heading
+    let readme = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))?;
+    let marker = "## Rules\n\n";
+    let start = readme
+        .find(marker)
+        .ok_or("README has no `## Rules` section")?
+        + marker.len();
+    let rest = &readme[start..];
+    let paragraph_end = rest
+        .find("\n\n")
+        .ok_or("the README rules paragraph never ends")?;
+    let paragraph = &rest[..paragraph_end];
+    let ids: Vec<&str> = paragraph.split('`').skip(1).step_by(2).collect();
+    assert!(!ids.is_empty(), "no rule ids parsed from the README");
+
+    // when: comparing the documented catalog against both support tables
+    // then: every documented id is suppressible, and the table documents nothing extra
+    for id in &ids {
+        assert!(
+            KNOWN_RULES.contains(id),
+            "README rule `{id}` missing from KNOWN_RULES"
+        );
+    }
+    for known in KNOWN_RULES {
+        assert!(
+            ids.contains(known),
+            "KNOWN_RULES entry `{known}` missing from the README ## Rules list"
+        );
+    }
+    // and: every documented id renders a specific reason, not the generic fallback
+    for id in &ids {
+        let findings = vec![Finding::new(
+            *id,
+            Confidence::High,
+            "m",
+            1,
+            "tests/test_app.py",
+            "",
+        )];
+        let xml = build_findings_xml(&findings, "tests/test_app.py");
+        assert!(
+            !xml.contains("reason=\"finding\""),
+            "README rule `{id}` renders the generic reason"
+        );
+    }
+    Ok(())
 }
 
 #[test]
