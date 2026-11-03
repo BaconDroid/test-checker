@@ -1174,7 +1174,7 @@ fn analyze_edited_bodies(
         if is_touched {
             let allowed_memo_lines = agent_memo_lines(body, content, language);
             let mut touched_findings =
-                classify_diff_lines(file_path, &touched, &touched_original, &diff);
+                classify_diff_lines(file_path, &touched, &touched_original, &diff, &full);
             retain_scoped_agent_memo(&mut touched_findings, &allowed_memo_lines);
             // A line that already existed verbatim in the old fragment is pre-existing code, even
             // if the line LCS marked it as added (a move/reorder in a rewrite).
@@ -1377,12 +1377,13 @@ fn classify_diff_lines(
     lines: &[AddedLine<'_>],
     original_lines: &[AddedLine<'_>],
     diff: &DiffContext<'_>,
+    body: &[AddedLine<'_>],
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
     for index in 0..lines.len() {
         let original = original_lines.get(index).map_or("", |line| line.text);
         findings.extend(rules::classify_diff_line_with_original(
-            file_path, lines, index, original, diff,
+            file_path, lines, index, original, diff, body,
         ));
     }
     findings

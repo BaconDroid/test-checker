@@ -837,6 +837,7 @@ pub fn classify_added_line(file_path: &str, added: &[AddedLine<'_>], index: usiz
         index,
         &DiffContext::default(),
         added_text(added, index),
+        added,
     )
 }
 
@@ -849,7 +850,14 @@ pub fn classify_diff_line(
     index: usize,
     diff: &DiffContext<'_>,
 ) -> Vec<Finding> {
-    classify_line(file_path, added, index, diff, added_text(added, index))
+    classify_line(
+        file_path,
+        added,
+        index,
+        diff,
+        added_text(added, index),
+        added,
+    )
 }
 
 /// Classify the line against the masked view while reading `original` for the comment/text rules
@@ -861,10 +869,21 @@ pub fn classify_added_line_with_original(
     index: usize,
     original: &str,
 ) -> Vec<Finding> {
-    classify_line(file_path, added, index, &DiffContext::default(), original)
+    classify_line(
+        file_path,
+        added,
+        index,
+        &DiffContext::default(),
+        original,
+        added,
+    )
 }
 
 /// [`classify_added_line_with_original`] with an edit's removed lines, for the diff-aware rules.
+///
+/// `body` is the full new test body the added lines were cut from: a guard newly added around a
+/// pre-existing assertion must still see that assertion, so `conditional-assertion` reads the
+/// block from the whole body while every other rule stays on the added-line slice.
 #[must_use]
 pub fn classify_diff_line_with_original(
     file_path: &str,
@@ -872,8 +891,9 @@ pub fn classify_diff_line_with_original(
     index: usize,
     original: &str,
     diff: &DiffContext<'_>,
+    body: &[AddedLine<'_>],
 ) -> Vec<Finding> {
-    classify_line(file_path, added, index, diff, original)
+    classify_line(file_path, added, index, diff, original, body)
 }
 
 fn added_text<'a>(added: &'a [AddedLine<'a>], index: usize) -> &'a str {
@@ -886,6 +906,7 @@ fn classify_line(
     index: usize,
     diff: &DiffContext<'_>,
     original: &str,
+    body: &[AddedLine<'_>],
 ) -> Vec<Finding> {
     let Some(line) = added.get(index).copied() else {
         return Vec::new();
@@ -927,7 +948,7 @@ fn classify_line(
     if let Some(finding) = classify_swallowed_error(file_path, added, index, text) {
         findings.push(finding);
     }
-    if let Some(finding) = classify_conditional_assertion(file_path, added, index, text) {
+    if let Some(finding) = classify_conditional_assertion(file_path, added, index, text, body) {
         findings.push(finding);
     }
     if let Some(finding) = classify_mock_of_sut(file_path, &line, text, original) {
@@ -1642,16 +1663,28 @@ fn classify_conditional_assertion(
     added: &[AddedLine<'_>],
     index: usize,
     text: &str,
+    body: &[AddedLine<'_>],
 ) -> Option<Finding> {
     let conditional_here = text.starts_with("if ") || text.starts_with("if(");
     if !conditional_here {
         return None;
     }
-    let assertions = block_assertions(added, index);
+    let condition = conditional_text(text);
+    // A guard that matches a scrutinee for availability: the block runs only when the optional
+    // value exists, which is the idiomatic way to assert on it, so it is never a weakening.
+    if is_availability_pattern(&condition) {
+        return None;
+    }
+    // An Edit classifies only its added lines, but the block under a newly added guard can hold
+    // a pre-existing assertion: read the block from the whole body the line was cut from.
+    let (scan, start) = body
+        .iter()
+        .position(|line| line.line_number == added[index].line_number)
+        .map_or((added, index), |position| (body, position));
+    let assertions = block_assertions(scan, start);
     if assertions.is_empty() {
         return None;
     }
-    let condition = conditional_text(text);
     let guard_idents = guard_identifiers(&condition);
     let guard_condition = is_guard_condition(&condition);
     // An error/type guard around assertions that inspect the guarded value is error handling, not
@@ -1690,6 +1723,28 @@ fn conditional_text(text: &str) -> String {
     } else {
         condition.to_owned()
     }
+}
+
+/// Whether a condition matches a scrutinee for availability rather than testing a business value:
+/// Rust/Swift `if let PAT = EXPR` (and let-chains), Swift `if case PAT = EXPR`, or
+/// `if matches!(scrutinee, Some(..)|Ok(..)|..)`. The guarded block runs only when the pattern
+/// matched, so its assertions are the idiomatic check on an optional value, never a weakening.
+fn is_availability_pattern(condition: &str) -> bool {
+    if let Some(rest) = condition.strip_prefix("let ") {
+        // A binding carries ` = EXPR`; a pattern with braces cuts the condition before it and the
+        // pattern-only shorthand (`if let Some(x)`) has no `=` at all. A comparison operator means
+        // the prefix named a variable instead (`if let == 5`).
+        return rest.contains(" = ") || !rest.contains('=');
+    }
+    // Swift's `if case PAT = EXPR` always matches against ` = EXPR`; requiring it keeps a variable
+    // named `case` (`if case in whitelist`) a business condition.
+    if let Some(rest) = condition.strip_prefix("case ") {
+        return rest.contains(" = ");
+    }
+    condition.starts_with("matches!(")
+        && ["Some(", "Ok(", "Err(", "None"]
+            .iter()
+            .any(|form| condition.contains(form))
 }
 
 /// Whether a condition is an error/type/availability guard rather than a business condition.
