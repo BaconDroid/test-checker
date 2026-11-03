@@ -1798,3 +1798,173 @@ fn expected_copied_from_actual_still_sees_string_literals() {
         "findings: {findings:?}"
     );
 }
+
+#[test]
+fn detect_given_idiomatic_error_guards_reports_no_conditional_assertion() {
+    // given: error/type guards whose assertions inspect the guarded value, per language
+    let cases = [
+        (
+            "tests/app_test.go",
+            "func TestGuards(t *testing.T) {\n\tif exitErr, ok := err.(*exec.ExitError); ok {\n\t\tassert.Equal(t, 2, exitErr.ExitCode())\n\t}\n\tif err != nil {\n\t\tassert.Equal(t, \"boom\", err.Error())\n\t}\n}\n",
+        ),
+        (
+            "tests/app.test.ts",
+            "it('guards', () => {\n  if (err) {\n    expect(err.message).toContain('boom');\n  }\n});\n",
+        ),
+        (
+            "tests/test_app.py",
+            "def test_guards():\n    if isinstance(result, Error):\n        assert result.code == 1\n    try:\n        run()\n    except Exception as exc:\n        assert exc.code == 1\n",
+        ),
+        (
+            "tests/app_test.rs",
+            "#[test]\nfn guards() {\n    if let Some(value) = map.get(key) {\n        assert_eq!(value, 1);\n    }\n    if result.is_err() {\n        assert!(result.unwrap_err().to_string().contains(\"x\"));\n    }\n}\n",
+        ),
+        (
+            "src/test/java/GuardsTest.java",
+            "class GuardsTest {\n    @Test\n    void guards() {\n        if (result instanceof Error) {\n            assertTrue(((Error) result).isFatal());\n        }\n    }\n}\n",
+        ),
+    ];
+
+    // when / then
+    for (path, source) in cases {
+        let findings = TestDetector::new().detect(source, path, true, true);
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "conditional-assertion"),
+            "{path}: {findings:?}"
+        );
+    }
+}
+
+#[test]
+fn detect_given_optional_assertion_under_a_business_condition_reports_conditional_assertion() {
+    // given: a non-error condition that makes the assertion optional, per language
+    let cases = [
+        (
+            "tests/app_test.go",
+            "func TestOptional(t *testing.T) {\n\tif enabled {\n\t\tassert.Equal(t, 1, value)\n\t}\n}\n",
+        ),
+        (
+            "tests/app.test.ts",
+            "it('optional', () => {\n  if (featureEnabled) {\n    expect(value).toBe(1);\n  }\n});\n",
+        ),
+        (
+            "tests/test_app.py",
+            "def test_optional():\n    if feature_enabled:\n        assert value == 1\n",
+        ),
+        (
+            // a variable named `case` is a business condition, not a Swift `if case` binding
+            "tests/test_optional.py",
+            "def test_optional():\n    if case in whitelist:\n        assert value == 1\n",
+        ),
+        (
+            "tests/app_test.rs",
+            "#[test]\nfn optional() {\n    if enabled {\n        assert_eq!(value, 1);\n    }\n}\n",
+        ),
+        (
+            "src/test/java/OptionalTest.java",
+            "class OptionalTest {\n    @Test\n    void optional() {\n        if (enabled) {\n            assertEquals(1, value);\n        }\n    }\n}\n",
+        ),
+    ];
+
+    // when / then
+    for (path, source) in cases {
+        let findings = TestDetector::new().detect(source, path, true, true);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "conditional-assertion"),
+            "{path}: {findings:?}"
+        );
+    }
+}
+
+#[test]
+fn detect_given_error_guard_around_unrelated_assertion_reports_conditional_assertion() {
+    // given: an error guard that makes a general assertion optional (it does not inspect the error)
+    let source = "func TestOptional(t *testing.T) {\n\tif err != nil {\n\t\tassert.Equal(t, 1, value)\n\t}\n}\n";
+
+    // when
+    let findings = TestDetector::new().detect(source, "tests/app_test.go", true, true);
+
+    // then
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "conditional-assertion"),
+        "findings: {findings:?}"
+    );
+}
+
+// The payload below carries `{...}` formatting syntax as test-file data, not as a format string.
+#[allow(clippy::literal_string_with_formatting_args)]
+#[test]
+fn detect_given_availability_pattern_guards_reports_no_conditional_assertion() {
+    // given: guards that match a scrutinee for availability - the block runs only when the
+    // optional value exists, which is the idiomatic way to assert on it. The first case is the
+    // `tests/parity.rs` false positive: a multi-line `assert!` whose operands and message are
+    // built from the bound `needle`.
+    let cases = [
+        (
+            "tests/parity.rs",
+            "#[test]\nfn declared_contract_cases_exit_as_specified() {\n    for case in &v.cases {\n        if let Some(needle) = &case.stderr_contains {\n            let text = stderr(&output);\n            let expected = format!(\"{} {}\", v.prefix, needle);\n            assert!(\n                text.contains(&expected),\n                \"case {}: expected stderr to contain {expected:?}, got: {text}\",\n                case.name\n            );\n        }\n    }\n}\n",
+        ),
+        (
+            "tests/app_test.rs",
+            "#[test]\nfn optional_ok() {\n    if let Ok(value) = parse(input) {\n        assert_eq!(expected, 1);\n    }\n}\n",
+        ),
+        (
+            "tests/app_test.rs",
+            "#[test]\nfn optional_while() {\n    while let Some(item) = iter.next() {\n        assert_eq!(item, 1);\n    }\n}\n",
+        ),
+        (
+            "tests/app_test.rs",
+            "#[test]\nfn match_availability() {\n    if matches!(value, Some(_)) {\n        assert_eq!(expected, 1);\n    }\n}\n",
+        ),
+        (
+            "tests/app_test.rs",
+            "#[test]\nfn if_let_shorthand() {\n    if let Some(value) {\n        assert_eq!(expected, 1);\n    }\n}\n",
+        ),
+    ];
+
+    // when / then
+    for (path, source) in cases {
+        let findings = TestDetector::new().detect(source, path, true, true);
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "conditional-assertion"),
+            "{path}: {findings:?}"
+        );
+    }
+}
+
+#[test]
+fn detect_edit_given_guard_added_around_existing_assertion_reports_conditional_assertion() {
+    // given: the guard line is new while the assertion already existed unconditionally, so the
+    // added-line slice alone carries no assertion under the guard
+    let cases = [
+        (
+            "tests/test_app.py",
+            "def test_a():\n    assert x == 1\n",
+            "def test_a():\n    if flag:\n        assert x == 1\n",
+        ),
+        (
+            "tests/app_test.rs",
+            "#[test]\nfn a() {\n    assert_eq!(x, 1);\n}\n",
+            "#[test]\nfn a() {\n    if enabled {\n        assert_eq!(x, 1);\n    }\n}\n",
+        ),
+    ];
+
+    // when / then
+    for (path, old, new) in cases {
+        let findings = TestDetector::new().detect_edit(old, new, path, true, true);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "conditional-assertion"),
+            "{path}: {findings:?}"
+        );
+    }
+}

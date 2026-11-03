@@ -837,6 +837,7 @@ pub fn classify_added_line(file_path: &str, added: &[AddedLine<'_>], index: usiz
         index,
         &DiffContext::default(),
         added_text(added, index),
+        added,
     )
 }
 
@@ -849,7 +850,14 @@ pub fn classify_diff_line(
     index: usize,
     diff: &DiffContext<'_>,
 ) -> Vec<Finding> {
-    classify_line(file_path, added, index, diff, added_text(added, index))
+    classify_line(
+        file_path,
+        added,
+        index,
+        diff,
+        added_text(added, index),
+        added,
+    )
 }
 
 /// Classify the line against the masked view while reading `original` for the comment/text rules
@@ -861,10 +869,21 @@ pub fn classify_added_line_with_original(
     index: usize,
     original: &str,
 ) -> Vec<Finding> {
-    classify_line(file_path, added, index, &DiffContext::default(), original)
+    classify_line(
+        file_path,
+        added,
+        index,
+        &DiffContext::default(),
+        original,
+        added,
+    )
 }
 
 /// [`classify_added_line_with_original`] with an edit's removed lines, for the diff-aware rules.
+///
+/// `body` is the full new test body the added lines were cut from: a guard newly added around a
+/// pre-existing assertion must still see that assertion, so `conditional-assertion` reads the
+/// block from the whole body while every other rule stays on the added-line slice.
 #[must_use]
 pub fn classify_diff_line_with_original(
     file_path: &str,
@@ -872,8 +891,9 @@ pub fn classify_diff_line_with_original(
     index: usize,
     original: &str,
     diff: &DiffContext<'_>,
+    body: &[AddedLine<'_>],
 ) -> Vec<Finding> {
-    classify_line(file_path, added, index, diff, original)
+    classify_line(file_path, added, index, diff, original, body)
 }
 
 fn added_text<'a>(added: &'a [AddedLine<'a>], index: usize) -> &'a str {
@@ -886,6 +906,7 @@ fn classify_line(
     index: usize,
     diff: &DiffContext<'_>,
     original: &str,
+    body: &[AddedLine<'_>],
 ) -> Vec<Finding> {
     let Some(line) = added.get(index).copied() else {
         return Vec::new();
@@ -927,7 +948,7 @@ fn classify_line(
     if let Some(finding) = classify_swallowed_error(file_path, added, index, text) {
         findings.push(finding);
     }
-    if let Some(finding) = classify_conditional_assertion(file_path, added, index, text) {
+    if let Some(finding) = classify_conditional_assertion(file_path, added, index, text, body) {
         findings.push(finding);
     }
     if let Some(finding) = classify_mock_of_sut(file_path, &line, text, original) {
@@ -1642,20 +1663,209 @@ fn classify_conditional_assertion(
     added: &[AddedLine<'_>],
     index: usize,
     text: &str,
+    body: &[AddedLine<'_>],
 ) -> Option<Finding> {
-    let next = added.get(index + 1).map(|line| line.text.trim());
-    let assertion_here = has_marker(text, ASSERTION_MARKERS);
     let conditional_here = text.starts_with("if ") || text.starts_with("if(");
-    let triggers = conditional_here
-        && (assertion_here || next.is_some_and(|line| has_marker(line, ASSERTION_MARKERS)));
-    triggers.then(|| {
-        finish(
-            "conditional-assertion",
-            Confidence::High,
-            "The assertion is guarded by a runtime condition and may never run.",
-            &added[index],
-            file_path,
-        )
+    if !conditional_here {
+        return None;
+    }
+    let condition = conditional_text(text);
+    // A guard that matches a scrutinee for availability: the block runs only when the optional
+    // value exists, which is the idiomatic way to assert on it, so it is never a weakening.
+    if is_availability_pattern(&condition) {
+        return None;
+    }
+    // An Edit classifies only its added lines, but the block under a newly added guard can hold
+    // a pre-existing assertion: read the block from the whole body the line was cut from.
+    let (scan, start) = body
+        .iter()
+        .position(|line| line.line_number == added[index].line_number)
+        .map_or((added, index), |position| (body, position));
+    let assertions = block_assertions(scan, start);
+    if assertions.is_empty() {
+        return None;
+    }
+    let guard_idents = guard_identifiers(&condition);
+    let guard_condition = is_guard_condition(&condition);
+    // An error/type guard around assertions that inspect the guarded value is error handling, not
+    // an optional assertion. A guard around unrelated assertions is still optional and reports.
+    if guard_condition
+        && !guard_idents.is_empty()
+        && assertions
+            .iter()
+            .all(|assertion| guard_idents.iter().any(|ident| has_word(assertion, ident)))
+    {
+        return None;
+    }
+    Some(finish(
+        "conditional-assertion",
+        Confidence::High,
+        "The assertion is guarded by a runtime condition and may never run.",
+        &added[index],
+        file_path,
+    ))
+}
+
+/// The condition text of an `if` line: `if (cond) {`, `if cond {`, `if cond:`.
+fn conditional_text(text: &str) -> String {
+    let rest = text.strip_prefix("if").unwrap_or(text).trim_start();
+    let parenthesized = rest.starts_with('(');
+    let rest = rest.strip_prefix('(').unwrap_or(rest);
+    let end = rest
+        .find('{')
+        .into_iter()
+        .chain(rest.find(':'))
+        .min()
+        .unwrap_or(rest.len());
+    let condition = rest[..end].trim();
+    if parenthesized {
+        condition.trim_end_matches(')').trim().to_owned()
+    } else {
+        condition.to_owned()
+    }
+}
+
+/// Whether a condition matches a scrutinee for availability rather than testing a business value:
+/// Rust/Swift `if let PAT = EXPR` (and let-chains), Swift `if case PAT = EXPR`, or
+/// `if matches!(scrutinee, Some(..)|Ok(..)|..)`. The guarded block runs only when the pattern
+/// matched, so its assertions are the idiomatic check on an optional value, never a weakening.
+fn is_availability_pattern(condition: &str) -> bool {
+    if let Some(rest) = condition.strip_prefix("let ") {
+        // A binding carries ` = EXPR`; a pattern with braces cuts the condition before it and the
+        // pattern-only shorthand (`if let Some(x)`) has no `=` at all. A comparison operator means
+        // the prefix named a variable instead (`if let == 5`).
+        return rest.contains(" = ") || !rest.contains('=');
+    }
+    // Swift's `if case PAT = EXPR` always matches against ` = EXPR`; requiring it keeps a variable
+    // named `case` (`if case in whitelist`) a business condition.
+    if let Some(rest) = condition.strip_prefix("case ") {
+        return rest.contains(" = ");
+    }
+    condition.starts_with("matches!(")
+        && ["Some(", "Ok(", "Err(", "None"]
+            .iter()
+            .any(|form| condition.contains(form))
+}
+
+/// Whether a condition is an error/type/availability guard rather than a business condition.
+fn is_guard_condition(condition: &str) -> bool {
+    const WORDS: &[&str] = &["err", "error", "exitErr", "ok"];
+    const FORMS: &[&str] = &[
+        "isinstance(",
+        "instanceof ",
+        "is None",
+        "is not None",
+        "let Some(",
+        "let Ok(",
+        ".is_err()",
+        ".is_ok()",
+        ".ok()",
+        "!= nil",
+        "== nil",
+        "!= null",
+        "== null",
+    ];
+    WORDS.iter().any(|word| has_word(condition, word))
+        || FORMS.iter().any(|form| condition.contains(form))
+}
+
+/// Identifiers a guard condition carries, used to tell an error-path assertion from an optional
+/// assertion. Calls (`isinstance(`, `get(`) and language keywords are not values.
+fn guard_identifiers(condition: &str) -> Vec<String> {
+    const KEYWORDS: &[&str] = &[
+        "if",
+        "let",
+        "mut",
+        "else",
+        "is",
+        "not",
+        "and",
+        "or",
+        "in",
+        "case",
+        "new",
+        "instanceof",
+        "nil",
+        "none",
+        "null",
+        "undefined",
+        "true",
+        "false",
+        "self",
+        "this",
+    ];
+    let mut identifiers = Vec::new();
+    let bytes = condition.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index].is_ascii_alphabetic() || bytes[index] == b'_' {
+            let start = index;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+            {
+                index += 1;
+            }
+            let ident = &condition[start..index];
+            let next = condition[index..].trim_start();
+            if !next.starts_with('(') && !KEYWORDS.contains(&ident.to_ascii_lowercase().as_str()) {
+                identifiers.push(ident.to_owned());
+            }
+        } else {
+            index += 1;
+        }
+    }
+    identifiers
+}
+
+/// Assertion texts in the `if` block that starts at `index`.
+fn block_assertions<'a>(added: &'a [AddedLine<'a>], index: usize) -> Vec<&'a str> {
+    let first = added.get(index).map_or("", |line| line.text);
+    let mut assertions = Vec::new();
+    if has_marker(first.trim(), ASSERTION_MARKERS) {
+        assertions.push(first.trim());
+    }
+    let colon_style = first.trim_end().ends_with(':');
+    let mut depth = brace_delta(first);
+    if !colon_style && depth == 0 {
+        if assertions.is_empty()
+            && let Some(next) = added.get(index + 1)
+            && has_marker(next.text.trim(), ASSERTION_MARKERS)
+        {
+            assertions.push(next.text.trim());
+        }
+        return assertions;
+    }
+    let indent = indentation(first);
+    for line in added.iter().skip(index + 1) {
+        let text = line.text;
+        if text.trim().is_empty() {
+            continue;
+        }
+        if depth <= 0 && indentation(text) <= indent && !text.trim_start().starts_with('}') {
+            break;
+        }
+        if has_marker(text.trim(), ASSERTION_MARKERS) {
+            assertions.push(text.trim());
+        }
+        depth += brace_delta(text);
+        if depth <= 0 {
+            break;
+        }
+    }
+    assertions
+}
+
+fn indentation(line: &str) -> usize {
+    line.chars()
+        .take_while(|character| character.is_whitespace())
+        .count()
+}
+
+fn brace_delta(line: &str) -> i32 {
+    line.chars().fold(0, |depth, character| match character {
+        '{' => depth + 1,
+        '}' => depth - 1,
+        _ => depth,
     })
 }
 

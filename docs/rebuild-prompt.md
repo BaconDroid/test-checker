@@ -182,7 +182,10 @@ Each finding carries a `rule` id and a `confidence` (high/medium/low). Rules are
 13. `snapshot-regenerated` — a snapshot/approval fixture updated to match new output without review.
 14. `tolerance-broadened` — an epsilon/tolerance/delta widened, or a timeout/sleep raised, to hide
     flakiness.
-15. `conditional-assertion` — assertions guarded by a runtime condition / env flag so they may not run.
+15. `conditional-assertion` - an assertion a newly added runtime condition / env flag makes
+    optional, so it may not run. Availability pattern guards (`if let`, `if case`,
+    `matches!(.., Some(..))`) and error/type guards whose block inspects the guarded value
+    are not reported.
 16. `retry-added` — `@retry`/`flaky`/`rerun` introduced to make a failing test pass.
 
 ### 3b. Signals adapted from `comment-checker` (reuse its patterns)
