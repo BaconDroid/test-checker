@@ -46,8 +46,12 @@ never grant it to itself.
 - **Guards (spared)**: tests that pin behavior, regressions of real bugs, boundary and
   contract tests, with the intent readable from the test name.
 - **Never weaken a test to get green.** If the test is wrong, stop and tell the human.
+- **One test per behavior, not per incident.** Regressions of the same invariant pile into
+  a table of cases, not into sibling test functions; merge the bodies, never the assertions.
+  `near-duplicate-test`, `echo-test` and `test-volume` are merge mandates, not telemetry to
+  leave hidden behind the default confidence gate.
 - **Lean, not zero**: tests are also the oracle that keeps an agent honest. Fewer tests
-  must never mean weaker checks.
+  must never mean weaker checks: lean shrinks the lines around the checks, never the checks.
 
 ## Removal policy
 
