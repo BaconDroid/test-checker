@@ -1,7 +1,7 @@
 # Prompt plan — diff-aware presence rules + test-body query expansion
 
 > **Status: completed.** Workstreams A and B landed on `main` (#34, #35), followed by
-> review-driven hardening/simplification (#36–#44). Shipped state: **25 rules** and **21 framework
+> review-driven hardening/simplification (#36–#44). Shipped state: **33 rules** and **21 framework
 > languages**. This document is retained as the historical plan; do not re-run it as pending work.
 
 Handoff prompt for a fresh session working in `BaconDroid/test-checker`. It covers the two requested
@@ -17,7 +17,7 @@ workstreams (A, B) and a prioritized backlog distilled from the external review 
   `parity/check.py` (CI job `parity`). Shared files: `.cargo/config.toml`, `.gitignore`, `clippy.toml`,
   `deny.toml`, `rustfmt.toml`, `rust-toolchain.toml`, `.github/**`, `npm/**`, `parity/**`,
   `src/cli.rs`, `src/engine.rs`, `src/main.rs`, `tests/parity.rs`.
-- Domain layer: `src/rules.rs` (18-rule catalog), `src/detector.rs` (capture + edit diff), `src/api.rs`,
+- Domain layer: `src/rules.rs` (33-rule catalog), `src/detector.rs` (capture + edit diff), `src/api.rs`,
   `src/language.rs` (`test_query`, `is_test_callee`, `is_test_function_name`, `is_test_path`),
   `src/models.rs`, `src/output.rs`, `src/filters.rs`.
 - **15 framework languages** at plan time (`python`, `javascript`, `typescript`, `tsx`, `go`, `rust`, `ruby`,
@@ -36,8 +36,8 @@ workstreams (A, B) and a prioritized backlog distilled from the external review 
   crates, no workspace, single-package manifest.
 - `cargo fmt --all -- --check` clean; `cargo clippy -p test-checker --all-targets --all-features -- -D warnings`
   clean; no `unwrap`/`expect`/`panic` in non-test code.
-- Hook contract unchanged: stdin JSON → stderr message, exit 2 on findings else 0, fail-open, prefix
-  `[test-checker]`.
+- Hook contract: stdin JSON > stderr message, exit `2` on findings, `0` on pass/skip, `1` when the
+  detector could not run (internal failure), prefix `[test-checker]`.
 - **Parity:** a change to any shared file must land as a coordinated pair (same branch name in both
   repos) or not at all. `test_query`/`is_body_candidate` are `pub(crate)` and not shape-checked, so A
   and B are test-checker-only unless they touch the engine.
@@ -118,7 +118,7 @@ with `benches/`.
 3. **Validate empirically** with a fixture before trusting it (compiles, captures, marker inside →
    finding).
 4. Extend the coverage table in `tests/detector.rs`: move the language from `NON_FRAMEWORK_CASES` to
-   `FRAMEWORK_CASES` + `WEAKEN_CASES`; keep the table at exactly 31; clean fixture → no findings.
+   `FRAMEWORK_CASES` + `WEAKEN_CASES`; keep the table at exactly 35; clean fixture > no findings.
 
 ### B3. Edge cases
 - Attribute/decorator/macro lines outside the body — mirror `expanded_start` (Rust/Elixir/Python).
@@ -134,7 +134,14 @@ with `benches/`.
 
 ## 4. Backlog distilled from the review (prioritized, separate PRs)
 
-Each is a distinct feature; do not bundle with A/B unless asked.
+> **Status: all eight items below (R1-R8) are implemented on `main`** - R1 `test-removed`, R2
+> `no-assertion`, R3 line-scoped `test-checker: allow <rule> -- <reason>` markers with `allow-added`
+> and human `.test-checker.json` config, R4 `incomplete-assertion`/`unawaited-assertion`, R5
+> `broad-exception`, R6 `--min-confidence`, R7 `harness-edited`/`gate-weakened`, and R8's
+> non-goals documented in the README's "Scope and non-goals". The list is kept for history; do not
+> re-open it as pending work.
+
+Each was a distinct feature; do not bundle with A/B unless asked.
 
 - **R1 — `test-removed` (high).** A test present in `old` but absent in `new` (by `@test` name, tolerate
   rename by body similarity). Today a deleted *assertionless* test produces nothing. Sources: S3/S5/S6/S8/S9.
@@ -169,7 +176,8 @@ Each is a distinct feature; do not bundle with A/B unless asked.
 - The three rules are diff-aware (or Low-confidence on `Write` per A1), documented and tested, with a
   control test proving a brand-new test no longer fires.
 - Framework language set is **≥20**, every new language validated in the coverage table.
-- fmt / clippy / test / parity all green; landed via branch → PR → squash-merge; no new deps; fail-open.
+- fmt / clippy / test / parity all green; landed via branch > PR > squash-merge; no new deps; degraded
+  paths surface as an explicit `Skipping:` line or exit `1`, never a silent `Success`.
 
 ## 6. Landing
 

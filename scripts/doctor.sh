@@ -17,8 +17,9 @@ bin_path="$(command -v test-checker 2>/dev/null || true)"
 if [ -z "$bin_path" ]; then
     printf '%s\n' \
         "doctor: FAIL: 'test-checker' was not found on PATH." \
-        "  Install it with 'npm install -g @bacondroid/test-checker' or a Homebrew tap," \
-        "  or add the directory containing the binary to PATH." \
+        "  Build it from source: this fork publishes no npm package or Homebrew formula, so" \
+        "  run 'git clone https://github.com/BaconDroid/test-checker && cd test-checker &&" \
+        "  cargo install --path . --locked', or add the directory containing the binary to PATH." \
         "  Verify with: command -v test-checker && test-checker --version" >&2
     exit 1
 fi
@@ -33,8 +34,8 @@ if [ "$version_status" -ne 0 ]; then
     printf 'doctor: FAIL: --version exited %s.\n' "$version_status" >&2
     printf '%s\n' "$version_output" >&2
     printf '%s\n' \
-        "  Reinstall the binary ('npm install -g @bacondroid/test-checker') or rebuild it" \
-        "  ('cargo build --release') and make sure the resulting binary is on PATH." >&2
+        "  Rebuild it from source ('cargo build --release' or 'cargo install --path . --locked')" \
+        " and make sure the resulting binary is on PATH." >&2
     exit 1
 fi
 printf '%s\n' "$version_output"
@@ -106,8 +107,8 @@ run_gate() {
             "$label" "$expected" "$gate_status" >&2
         printf '%s\n' \
             "  Inspect the gate output above. test-checker must exit 2 when it reports" \
-            "  findings and 0 for clean input. Rebuild ('cargo build --release') or" \
-            "  reinstall ('npm install -g @bacondroid/test-checker') the binary, then" \
+            "  findings and 0 for clean input. Rebuild it from source ('cargo build --release'" \
+            "  or 'cargo install --path . --locked'), then" \
             "  rerun this doctor from the same directory." >&2
         return 1
     fi
