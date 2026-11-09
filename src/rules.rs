@@ -320,6 +320,15 @@ const INCOMPLETE_ASSERTION_MATCHERS: &[&str] = &[
     ".rejects",
     ".anything(",
     ".not.to",
+    ".toBeInTheDocument(",
+    ".toBeVisible(",
+    ".toContainElement(",
+    ".toHaveAttribute(",
+    ".toHaveClass(",
+    ".toHaveFocus(",
+    ".toHaveStyle(",
+    ".toHaveTextContent(",
+    ".toHaveValue(",
 ];
 
 /// A rule that fires when an added line contains any of its markers.
@@ -3875,6 +3884,36 @@ mod tests {
                 .any(|finding| finding.rule == "incomplete-assertion"),
             "{findings:?}"
         );
+    }
+
+    #[test]
+    fn classify_added_line_given_testing_library_dom_matcher_is_a_complete_assertion() {
+        // given: DOM assertions whose matcher is supplied by @testing-library/jest-dom
+        let sources = [
+            "expect(getByTestId('menu')).toBeInTheDocument();",
+            "expect(element).toHaveAttribute('href', '/credits');",
+            "expect(element).toHaveTextContent('2026');",
+            "expect(input).toHaveValue('x');",
+            "expect(element).toHaveClass('active');",
+            "expect(element).toBeVisible();",
+            "expect(element).toHaveStyle({ color: 'red' });",
+            "expect(element).toContainElement(child);",
+            "expect(element).toHaveFocus();",
+        ];
+        let added = lines(&sources);
+
+        // when
+        for (index, source) in sources.iter().enumerate() {
+            let findings = classify_added_line("tests/app.test.js", &added, index);
+
+            // then
+            assert!(
+                !findings
+                    .iter()
+                    .any(|finding| finding.rule == "incomplete-assertion"),
+                "{source}: {findings:?}"
+            );
+        }
     }
 
     #[test]
