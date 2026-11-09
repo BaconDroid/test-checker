@@ -1184,6 +1184,132 @@ fn detect_given_exact_duplicate_reports_duplicate_not_near_duplicate() {
 }
 
 #[test]
+fn detect_given_identical_tests_in_different_python_classes_reports_no_duplicate() {
+    // given: the same method body in two TestCase classes (the netbox corpus shape)
+    let source = concat!(
+        "class FirstTest(TestCase):\n",
+        "    def test_export(self):\n",
+        "        self.assertEqual(response.status_code, 200)\n",
+        "class SecondTest(TestCase):\n",
+        "    def test_export(self):\n",
+        "        self.assertEqual(response.status_code, 200)\n",
+    );
+
+    // when
+    let findings = TestDetector::new().detect(source, "tests/test_app.py", true, true);
+
+    // then
+    assert!(
+        !findings.iter().any(
+            |finding| finding.rule == "duplicate-test" || finding.rule == "near-duplicate-test"
+        ),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_given_identical_tests_in_one_python_class_reports_duplicate() {
+    // given: two methods with the same body in one class
+    let source = concat!(
+        "class OnlyTest(TestCase):\n",
+        "    def test_one(self):\n",
+        "        self.assertEqual(response.status_code, 200)\n",
+        "    def test_two(self):\n",
+        "        self.assertEqual(response.status_code, 200)\n",
+    );
+
+    // when
+    let findings = TestDetector::new().detect(source, "tests/test_app.py", true, true);
+
+    // then
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "duplicate-test"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_given_comment_only_difference_in_different_python_classes_reports_no_near_duplicate() {
+    // given: near-duplicate bodies split across two classes
+    let source = concat!(
+        "class FirstTest(TestCase):\n",
+        "    def test_export(self):\n",
+        "        # explains the check\n",
+        "        self.assertEqual(response.status_code, 200)\n",
+        "class SecondTest(TestCase):\n",
+        "    def test_export(self):\n",
+        "        self.assertEqual(response.status_code, 200)\n",
+    );
+
+    // when
+    let findings = TestDetector::new().detect(source, "tests/test_app.py", true, true);
+
+    // then
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "near-duplicate-test"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_given_identical_tests_in_different_describes_reports_no_duplicate() {
+    // given: the same test body nested under different describe blocks
+    let source = concat!(
+        "describe('first', () => {\n",
+        "  it('one', () => {\n",
+        "    expect(add(1, 2)).toBe(3);\n",
+        "  });\n",
+        "});\n",
+        "describe('second', () => {\n",
+        "  it('two', () => {\n",
+        "    expect(add(1, 2)).toBe(3);\n",
+        "  });\n",
+        "});\n",
+    );
+
+    // when
+    let findings = TestDetector::new().detect(source, "tests/app.test.js", true, true);
+
+    // then
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "duplicate-test"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_given_identical_tests_in_one_describe_reports_duplicate() {
+    // given: two bodies with the same content under one describe block
+    let source = concat!(
+        "describe('one', () => {\n",
+        "  it('first', () => {\n",
+        "    expect(add(1, 2)).toBe(3);\n",
+        "  });\n",
+        "  it('second', () => {\n",
+        "    expect(add(1, 2)).toBe(3);\n",
+        "  });\n",
+        "});\n",
+    );
+
+    // when
+    let findings = TestDetector::new().detect(source, "tests/app.test.js", true, true);
+
+    // then
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "duplicate-test"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
 fn detect_edit_given_added_comment_only_variant_of_unchanged_test_reports_near_duplicate() {
     // given: an edit appends a test that matches an existing, untouched test except for a comment;
     // the unchanged test must still act as the near-duplicate baseline (duplicate-test contract).

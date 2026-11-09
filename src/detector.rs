@@ -132,6 +132,8 @@ struct Body {
     name: Option<String>,
     /// The row of the captured test name, used to scope `agent-memo-test` to test-level text.
     name_row: Option<usize>,
+    /// The enclosing class/module path, so duplicate bodies in different scopes do not collide.
+    scope: Option<String>,
     /// The fragment contains this complete test node (no parse error inside it); whole-test rules
     /// such as `no-assertion` and `echo-test` must not run on an incomplete fragment.
     reliable: bool,
@@ -955,6 +957,7 @@ fn capture_bodies(
                     name_row: name_row
                         .or_else(|| literal_name.as_ref().map(|(_, row)| *row))
                         .or(callee_row),
+                    scope: body_scope(&runtime.name, node, source),
                     reliable: !node.has_error(),
                 });
             }
@@ -962,6 +965,142 @@ fn capture_bodies(
         matches.advance();
     }
     bodies
+}
+
+/// The enclosing class/module path of a test node, outermost first.
+///
+/// `duplicate-test` and `near-duplicate-test` key on the body, so without this an identical body
+/// in two classes would collide. Joining the named ancestors keeps same-scope duplicates and
+/// separates different scopes; an unnamed/unsupported ancestor contributes nothing.
+fn body_scope(language: &str, node: tree_sitter::Node, source: &[u8]) -> Option<String> {
+    let mut parts = Vec::new();
+    let mut current = node.parent();
+    while let Some(ancestor) = current {
+        if let Some(part) = scope_component(language, ancestor, source) {
+            parts.push(part);
+        }
+        current = ancestor.parent();
+    }
+    parts.reverse();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("::"))
+    }
+}
+
+fn scope_component(language: &str, node: tree_sitter::Node, source: &[u8]) -> Option<String> {
+    let kind = node.kind();
+    match language {
+        "python" => (kind == "class_definition")
+            .then(|| node_name(node, source))
+            .flatten(),
+        "javascript" | "typescript" | "tsx" => match kind {
+            "class_declaration" => node_name(node, source),
+            "call_expression" => {
+                let callee = node
+                    .child_by_field_name("function")?
+                    .utf8_text(source)
+                    .ok()?;
+                matches!(
+                    callee,
+                    "describe" | "xdescribe" | "fdescribe" | "context" | "suite"
+                )
+                .then(|| literal_test_name(node, source).map(|(name, _)| name))
+                .flatten()
+            }
+            _ => None,
+        },
+        "rust" => match kind {
+            "mod_item" => node_name(node, source),
+            "impl_item" => node
+                .child_by_field_name("type")
+                .and_then(|name| name.utf8_text(source).ok())
+                .map(str::to_owned),
+            _ => None,
+        },
+        "php" => matches!(
+            kind,
+            "class_declaration"
+                | "trait_declaration"
+                | "interface_declaration"
+                | "enum_declaration"
+        )
+        .then(|| node_name(node, source))
+        .flatten(),
+        "java" => matches!(
+            kind,
+            "class_declaration"
+                | "interface_declaration"
+                | "enum_declaration"
+                | "record_declaration"
+        )
+        .then(|| node_name(node, source))
+        .flatten(),
+        "csharp" => matches!(
+            kind,
+            "namespace_declaration"
+                | "class_declaration"
+                | "struct_declaration"
+                | "interface_declaration"
+                | "record_declaration"
+        )
+        .then(|| node_name(node, source))
+        .flatten(),
+        "kotlin" => matches!(kind, "class_declaration" | "object_declaration")
+            .then(|| node_name(node, source))
+            .flatten(),
+        "swift" => matches!(
+            kind,
+            "class_declaration"
+                | "struct_declaration"
+                | "extension_declaration"
+                | "protocol_declaration"
+                | "enum_declaration"
+        )
+        .then(|| node_name(node, source))
+        .flatten(),
+        "scala" => matches!(
+            kind,
+            "class_definition" | "object_definition" | "trait_definition"
+        )
+        .then(|| node_name(node, source))
+        .flatten(),
+        "ruby" => matches!(kind, "class" | "module")
+            .then(|| node_name(node, source))
+            .flatten(),
+        "cpp" => matches!(
+            kind,
+            "namespace_definition" | "class_specifier" | "struct_specifier"
+        )
+        .then(|| node_name(node, source))
+        .flatten(),
+        _ => None,
+    }
+}
+
+fn node_name(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
+    if let Some(name) = node
+        .child_by_field_name("name")
+        .and_then(|name| name.utf8_text(source).ok())
+        .filter(|name| !name.is_empty())
+    {
+        return Some(name.to_owned());
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if matches!(
+            child.kind(),
+            "type_identifier" | "simple_identifier" | "identifier"
+        ) {
+            if let Ok(name) = child.utf8_text(source) {
+                if !name.is_empty() {
+                    return Some(name.to_owned());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// The first string literal argument of a call-shaped test (`it("name", ...)`), with its row.
@@ -1158,6 +1297,7 @@ fn analyze_new_bodies(
                 &mut seen,
                 file_path,
                 body.start_row + 1,
+                body.scope.as_deref(),
                 &exact_lines,
                 &original_lines,
             )
@@ -1249,6 +1389,7 @@ fn analyze_edited_bodies(
                 &mut seen,
                 file_path,
                 body.start_row + 1,
+                body.scope.as_deref(),
                 &exact_lines,
                 &original_lines,
             )
@@ -1310,6 +1451,7 @@ fn push_duplicate(
     seen: &mut DuplicateSignatures,
     file_path: &str,
     start_line: usize,
+    scope: Option<&str>,
     exact_lines: &[AddedLine<'_>],
     comment_lines: &[AddedLine<'_>],
 ) -> Option<Finding> {
@@ -1317,6 +1459,7 @@ fn push_duplicate(
     if signature.is_empty() {
         return None;
     }
+    let signature = scoped_signature(scope, signature);
     if let Some(first_line) = seen.exact.get(&signature) {
         return Some(Finding::new(
             "duplicate-test",
@@ -1333,6 +1476,7 @@ fn push_duplicate(
     if comment_signature.is_empty() {
         return None;
     }
+    let comment_signature = scoped_signature(scope, comment_signature);
     if let Some(first_line) = seen.comments.get(&comment_signature) {
         return Some(Finding::new(
             "near-duplicate-test",
@@ -1431,6 +1575,15 @@ fn classify_diff_lines(
         ));
     }
     findings
+}
+
+/// Prefix the body signature with its enclosing scope so identical bodies in different classes or
+/// modules are different tests. The separator cannot occur in parsed source text.
+fn scoped_signature(scope: Option<&str>, signature: String) -> String {
+    match scope {
+        Some(scope) => format!("{scope}\u{1f}{signature}"),
+        None => signature,
+    }
 }
 
 fn body_signature(lines: &[AddedLine<'_>]) -> String {
