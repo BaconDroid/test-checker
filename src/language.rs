@@ -8,6 +8,15 @@ pub fn language_for_path(file_path: &str) -> Option<&'static str> {
     tree_sitter_language_pack::detect_language(file_path)
 }
 
+/// The language for a path only when this build ships its grammar.
+///
+/// [`language_for_path`] follows the pack's extension map, which also names languages this binary
+/// does not compile (markdown, json, make, ini, ...). Those files are not analyzable code here, so
+/// a caller that would otherwise run the parser must treat them as non-code instead of failing.
+pub(crate) fn analyzable_language_for_path(file_path: &str) -> Option<&'static str> {
+    language_for_path(file_path).filter(|name| tree_sitter_language_pack::has_language(name))
+}
+
 /// Test-body query for a language with a test framework.
 ///
 /// Returns `None` for languages with no test framework/test-body query: those parse cleanly but

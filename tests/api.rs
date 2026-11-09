@@ -138,6 +138,24 @@ fn detect_findings_json_given_non_test_path_returns_empty_array() -> serde_json:
 }
 
 #[test]
+fn detect_findings_json_given_unshipped_language_returns_empty_array() -> serde_json::Result<()> {
+    // given: a test-shaped path whose extension maps to an uncompiled grammar
+    let content = "# hi\n";
+
+    // when
+    let json: Value = serde_json::from_str(&detect_findings_json(
+        content,
+        "docs/test-notes.md",
+        true,
+        true,
+    ))?;
+
+    // then: the detector's own entry path treats it as non-code instead of a failure payload
+    assert_eq!(json.as_array().map(Vec::len), Some(0));
+    Ok(())
+}
+
+#[test]
 fn detect_findings_json_given_body_tests_disabled_returns_empty_array() -> serde_json::Result<()> {
     // given
     let content = "def test_sums():\n    @pytest.mark.skip\n    assert add(1, 2) == 3\n";
@@ -466,6 +484,55 @@ fn check_hook_input_given_unsupported_language_fails_open() {
 }
 
 #[test]
+fn check_hook_input_given_mapped_but_unshipped_language_skips_as_non_code() {
+    // given: test-shaped paths whose extensions map to grammars this build does not compile
+    for (file_path, content) in [
+        ("docs/test-signal-research.md", "# hi\n"),
+        ("tests/test-data.json", "{}\n"),
+        ("tests/build.mk", "all:\n\techo hi\n"),
+    ] {
+        let input = serde_json::json!({
+            "tool_name": "Write",
+            "tool_input": { "file_path": file_path, "content": content },
+        })
+        .to_string();
+
+        // when
+        let result = check_hook_input(&input, "");
+
+        // then: not analyzable code, so a visible skip instead of a did-not-run failure
+        assert_eq!(result.exit_code, 0, "{file_path}: {}", result.message);
+        assert!(
+            result.message.contains("Skipping: Non-code file"),
+            "{file_path}: {}",
+            result.message
+        );
+        assert!(
+            !result.message.contains("did not run"),
+            "{file_path}: {}",
+            result.message
+        );
+    }
+}
+
+#[test]
+fn check_hook_input_given_makefile_with_test_hint_reaches_the_harness_gate() {
+    // given: a harness Makefile marked as a test file by the payload hint
+    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"Makefile","content":"all:\n\techo hi\n"},"is_test_file":true}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then: the harness path wins, so the unshipped make grammar is never resolved
+    assert_eq!(result.exit_code, 0, "{}", result.message);
+    assert!(
+        !result.message.contains("did not run"),
+        "{}",
+        result.message
+    );
+}
+
+#[test]
 fn check_hook_input_given_harness_gate_weakened_exits_two() {
     // given
     let input = r#"{"tool_name":"Edit","tool_input":{"file_path":".github/workflows/ci.yml","old_string":"      - run: cargo test\n","new_string":"      - run: cargo test || true\n"}}"#;
@@ -488,6 +555,51 @@ fn check_hook_input_given_non_sensitive_harness_edit_returns_success() {
 
     // then: harness-edited stays low on a non-sensitive path, so it does not block by default
     assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn check_hook_input_given_harness_file_inside_a_test_directory_reports_harness_edit() {
+    // given: a harness path that also matches the test-path glob (`tests/` segment)
+    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/pytest.ini","content":"[pytest]\n"}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then: harness recognition wins over the test branch, so the non-code extension never
+    // reaches the language gate
+    assert_eq!(result.exit_code, 2);
+    assert!(
+        result.message.contains("harness-edited"),
+        "{}",
+        result.message
+    );
+    assert!(
+        !result.message.contains("did not run"),
+        "{}",
+        result.message
+    );
+}
+
+#[test]
+fn check_hook_input_given_harness_hint_true_reports_harness_edit() {
+    // given: the payload marks `tests/conftest.py` as a test file, but it is a harness path
+    let input = r#"{"tool_name":"Edit","tool_input":{"file_path":"tests/conftest.py","old_string":"import os\n","new_string":"import os\nimport sys\n"},"is_test_file":true}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then: harness recognition wins over the payload hint
+    assert_eq!(result.exit_code, 2);
+    assert!(
+        result.message.contains("harness-edited"),
+        "{}",
+        result.message
+    );
+    assert!(
+        !result.message.contains("did not run"),
+        "{}",
+        result.message
+    );
 }
 
 #[test]
