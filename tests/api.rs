@@ -491,6 +491,51 @@ fn check_hook_input_given_non_sensitive_harness_edit_returns_success() {
 }
 
 #[test]
+fn check_hook_input_given_harness_file_inside_a_test_directory_reports_harness_edit() {
+    // given: a harness path that also matches the test-path glob (`tests/` segment)
+    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/pytest.ini","content":"[pytest]\n"}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then: harness recognition wins over the test branch, so the non-code extension never
+    // reaches the language gate
+    assert_eq!(result.exit_code, 2);
+    assert!(
+        result.message.contains("harness-edited"),
+        "{}",
+        result.message
+    );
+    assert!(
+        !result.message.contains("did not run"),
+        "{}",
+        result.message
+    );
+}
+
+#[test]
+fn check_hook_input_given_harness_hint_true_reports_harness_edit() {
+    // given: the payload marks `tests/conftest.py` as a test file, but it is a harness path
+    let input = r#"{"tool_name":"Edit","tool_input":{"file_path":"tests/conftest.py","old_string":"import os\n","new_string":"import os\nimport sys\n"},"is_test_file":true}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then: harness recognition wins over the payload hint
+    assert_eq!(result.exit_code, 2);
+    assert!(
+        result.message.contains("harness-edited"),
+        "{}",
+        result.message
+    );
+    assert!(
+        !result.message.contains("did not run"),
+        "{}",
+        result.message
+    );
+}
+
+#[test]
 fn check_hook_input_given_harness_comment_with_gate_marker_is_ignored() {
     // given: a comment in a workflow mentions `|| true`, not a real weakening
     let input = r##"{"tool_name":"Write","tool_input":{"file_path":".github/workflows/ci.yml","content":"# run tests with: cargo test || true\n"}}"##;

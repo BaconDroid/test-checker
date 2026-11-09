@@ -246,13 +246,17 @@ fn evaluate(
         )];
         return gate_and_format(&findings, custom_prompt, min_confidence);
     }
+    // A harness path is recognised by its path and is checked without language resolution, so it
+    // wins over the test gate. Otherwise a harness file that also matches a test path (for example
+    // `tests/pytest.ini` or `tests/conftest.py`) would be routed to the language gate, where its
+    // non-code extension is not a language this binary parses.
+    if is_harness_path(file_path) {
+        return harness_result(tool, hook_input, file_path, custom_prompt, min_confidence);
+    }
     let is_test = hook_input
         .is_test_file
         .unwrap_or_else(|| is_test_path(file_path));
     if !is_test {
-        if is_harness_path(file_path) {
-            return harness_result(tool, hook_input, file_path, custom_prompt, min_confidence);
-        }
         if language_for_path(file_path).is_none() {
             return skip("Non-code file");
         }
