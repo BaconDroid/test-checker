@@ -7,7 +7,7 @@ use tree_sitter::{Query, QueryCursor, StreamingIterator};
 use crate::engine;
 use crate::filters::is_agent_memo_phrase;
 use crate::language::{
-    is_test_callee, is_test_function_name, language_for_path, string_node_kinds,
+    analyzable_language_for_path, is_test_callee, is_test_function_name, string_node_kinds,
     string_query_source, test_query,
 };
 use crate::models::{Confidence, Finding};
@@ -191,7 +191,7 @@ impl TestDetector {
         if !(include_commented_out_tests || include_body_tests) {
             return Ok(Vec::new());
         }
-        let Some(name) = language_for_path(file_path) else {
+        let Some(name) = analyzable_language_for_path(file_path) else {
             return Ok(Vec::new());
         };
         let runtime = runtime_by_name(name)?;
@@ -234,7 +234,7 @@ impl TestDetector {
         content: &str,
         file_path: &str,
     ) -> Result<Vec<TestSpan>, DetectError> {
-        let Some(name) = language_for_path(file_path) else {
+        let Some(name) = analyzable_language_for_path(file_path) else {
             return Ok(Vec::new());
         };
         let runtime = runtime_by_name(name)?;
@@ -293,7 +293,7 @@ impl TestDetector {
         if !(include_commented_out_tests || include_body_tests) {
             return Ok(Vec::new());
         }
-        let Some(name) = language_for_path(file_path) else {
+        let Some(name) = analyzable_language_for_path(file_path) else {
             return Ok(Vec::new());
         };
         let runtime = runtime_by_name(name)?;
@@ -782,7 +782,7 @@ fn masked_view(runtime: &Runtime, tree: &tree_sitter::Tree, content: &str) -> Op
 /// in a comment from the same text inside a string literal.
 #[must_use]
 pub(crate) fn comment_ranges(content: &str, file_path: &str) -> Vec<(usize, usize)> {
-    let Some(name) = language_for_path(file_path) else {
+    let Some(name) = analyzable_language_for_path(file_path) else {
         return Vec::new();
     };
     let Ok(runtime) = runtime_by_name(name) else {
