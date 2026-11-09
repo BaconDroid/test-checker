@@ -228,6 +228,13 @@ A path that is not a test file but is a harness/config file is checked without l
 `codecov.yml`, `jest.config.*`, `vitest.config.*`, `karma.conf.*`, `.nycrc*`,
 `.github/workflows/**`, `.gitlab-ci*`.
 
+The test-path and harness-path tables are the constants in `src/language.rs`.
+`eval/path-predicates.json` is generated from them and committed;
+`scripts/generate-path-predicates` rewrites it, and the
+`path_predicates_contract_matches_language_tables` unit test fails on any drift. The cleanup
+scripts and `eval/replay.py` read that committed JSON, so their file selection follows the binary
+instead of keeping a private regex copy.
+
 An added non-blank line of a harness file yields one `harness-edited` finding on the first such line
 (`medium` on CI workflows, `.gitlab-ci*`, `pytest.ini`, `tox.ini`, `conftest.py`, `jest.config.*`,
 and `vitest.config.*`; `low` on the other harness files). A non-comment added line that matches a

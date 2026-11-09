@@ -142,6 +142,52 @@ pub(crate) fn is_test_callee(callee: &str) -> bool {
     )
 }
 
+// The path predicates below are one table each. `eval/path-predicates.json` is generated from these
+// constants (see `path_predicates_contract_matches_language_tables`) and the Python tooling reads
+// that committed file instead of keeping its own regex copies.
+
+pub(crate) const TEST_PATH_SEGMENTS: &[&str] = &["tests", "test", "__tests__", "spec", "specs"];
+
+pub(crate) const TEST_FILENAME_PREFIXES: &[&str] = &["test_", "test-"];
+
+pub(crate) const TEST_FILENAME_INFIXES: &[&str] = &["_test.", ".test.", ".spec.", "_spec."];
+
+/// Extension-scoped filename rules for languages whose test convention is a class-name prefix or
+/// suffix (`TestParser.java`, `ParserTest.kt`) rather than a path segment or a `test_` prefix.
+pub(crate) struct ExtensionTestNameRule {
+    pub(crate) extensions: &'static [&'static str],
+    pub(crate) filename_prefixes: &'static [&'static str],
+    pub(crate) filename_suffixes: &'static [&'static str],
+}
+
+pub(crate) const EXTENSION_TEST_NAME_RULES: &[ExtensionTestNameRule] = &[ExtensionTestNameRule {
+    extensions: &["java", "kt"],
+    filename_prefixes: &["test"],
+    filename_suffixes: &["test"],
+}];
+
+pub(crate) const HARNESS_PATH_SUBSTRINGS: &[&str] = &[".github/workflows/", ".gitlab-ci"];
+
+pub(crate) const HARNESS_BASENAMES: &[&str] = &[
+    "pytest.ini",
+    "tox.ini",
+    "conftest.py",
+    "setup.cfg",
+    "pyproject.toml",
+    "package.json",
+    "makefile",
+    "codecov.yml",
+];
+
+pub(crate) const HARNESS_FILENAME_PREFIXES: &[&str] =
+    &["jest.config", "vitest.config", "karma.conf", ".nycrc"];
+
+pub(crate) const SENSITIVE_HARNESS_PATH_SUBSTRINGS: &[&str] = &[".github/workflows/", ".gitlab-ci"];
+
+pub(crate) const SENSITIVE_HARNESS_BASENAMES: &[&str] = &["pytest.ini", "tox.ini", "conftest.py"];
+
+pub(crate) const SENSITIVE_HARNESS_FILENAME_PREFIXES: &[&str] = &["jest.config", "vitest.config"];
+
 /// Test-path globs, the extension-independent half of the test gate.
 ///
 /// The payload's explicit `is_test_file` wins when present; this is the fallback.
@@ -149,17 +195,27 @@ pub(crate) fn is_test_callee(callee: &str) -> bool {
 pub fn is_test_path(file_path: &str) -> bool {
     let normalized = file_path.replace('\\', "/").to_lowercase();
     let file = normalized.rsplit('/').next().unwrap_or("");
-    let in_test_dir = normalized
+    let (stem, extension) = file.rsplit_once('.').unwrap_or((file, ""));
+    normalized
         .split('/')
-        .any(|segment| matches!(segment, "tests" | "test" | "__tests__" | "spec" | "specs"));
-
-    in_test_dir
-        || file.starts_with("test_")
-        || file.starts_with("test-")
-        || file.contains("_test.")
-        || file.contains(".test.")
-        || file.contains(".spec.")
-        || file.contains("_spec.")
+        .any(|segment| TEST_PATH_SEGMENTS.contains(&segment))
+        || TEST_FILENAME_PREFIXES
+            .iter()
+            .any(|prefix| file.starts_with(prefix))
+        || TEST_FILENAME_INFIXES
+            .iter()
+            .any(|infix| file.contains(infix))
+        || EXTENSION_TEST_NAME_RULES.iter().any(|rule| {
+            rule.extensions.contains(&extension)
+                && (rule
+                    .filename_prefixes
+                    .iter()
+                    .any(|prefix| file.starts_with(prefix))
+                    || rule
+                        .filename_suffixes
+                        .iter()
+                        .any(|suffix| stem.ends_with(suffix)))
+        })
 }
 
 /// Harness/config paths that carry a test gate but are not test files themselves.
@@ -167,23 +223,13 @@ pub fn is_test_path(file_path: &str) -> bool {
 pub fn is_harness_path(file_path: &str) -> bool {
     let normalized = file_path.replace('\\', "/").to_lowercase();
     let file = normalized.rsplit('/').next().unwrap_or("");
-    normalized.contains(".github/workflows/")
-        || normalized.contains(".gitlab-ci")
-        || matches!(
-            file,
-            "pytest.ini"
-                | "tox.ini"
-                | "conftest.py"
-                | "setup.cfg"
-                | "pyproject.toml"
-                | "package.json"
-                | "makefile"
-                | "codecov.yml"
-        )
-        || file.starts_with("jest.config")
-        || file.starts_with("vitest.config")
-        || file.starts_with("karma.conf")
-        || file.starts_with(".nycrc")
+    HARNESS_PATH_SUBSTRINGS
+        .iter()
+        .any(|substring| normalized.contains(substring))
+        || HARNESS_BASENAMES.contains(&file)
+        || HARNESS_FILENAME_PREFIXES
+            .iter()
+            .any(|prefix| file.starts_with(prefix))
 }
 
 /// Harness paths whose edit directly decides what CI runs.
@@ -199,19 +245,72 @@ pub(crate) fn is_sensitive_harness_path(file_path: &str) -> bool {
     }
     let normalized = file_path.replace('\\', "/").to_lowercase();
     let file = normalized.rsplit('/').next().unwrap_or("");
-    normalized.contains(".github/workflows/")
-        || normalized.contains(".gitlab-ci")
-        || matches!(file, "pytest.ini" | "tox.ini" | "conftest.py")
-        || file.starts_with("jest.config")
-        || file.starts_with("vitest.config")
+    SENSITIVE_HARNESS_PATH_SUBSTRINGS
+        .iter()
+        .any(|substring| normalized.contains(substring))
+        || SENSITIVE_HARNESS_BASENAMES.contains(&file)
+        || SENSITIVE_HARNESS_FILENAME_PREFIXES
+            .iter()
+            .any(|prefix| file.starts_with(prefix))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        is_harness_path, is_sensitive_harness_path, is_test_callee, is_test_function_name,
-        is_test_path,
+        EXTENSION_TEST_NAME_RULES, HARNESS_BASENAMES, HARNESS_FILENAME_PREFIXES,
+        HARNESS_PATH_SUBSTRINGS, SENSITIVE_HARNESS_BASENAMES, SENSITIVE_HARNESS_FILENAME_PREFIXES,
+        SENSITIVE_HARNESS_PATH_SUBSTRINGS, TEST_FILENAME_INFIXES, TEST_FILENAME_PREFIXES,
+        TEST_PATH_SEGMENTS, is_harness_path, is_sensitive_harness_path, is_test_callee,
+        is_test_function_name, is_test_path,
     };
+
+    const PATH_PREDICATES_JSON: &str =
+        concat!(env!("CARGO_MANIFEST_DIR"), "/eval/path-predicates.json");
+
+    fn path_predicates_document() -> serde_json::Value {
+        let extension_test_name_rules = EXTENSION_TEST_NAME_RULES
+            .iter()
+            .map(|rule| {
+                serde_json::json!({
+                    "extensions": rule.extensions,
+                    "filename_prefixes": rule.filename_prefixes,
+                    "filename_suffixes": rule.filename_suffixes,
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "generated_from": "src/language.rs",
+            "test_path_segments": TEST_PATH_SEGMENTS,
+            "test_filename_prefixes": TEST_FILENAME_PREFIXES,
+            "test_filename_infixes": TEST_FILENAME_INFIXES,
+            "extension_test_name_rules": extension_test_name_rules,
+            "harness_path_substrings": HARNESS_PATH_SUBSTRINGS,
+            "harness_basenames": HARNESS_BASENAMES,
+            "harness_filename_prefixes": HARNESS_FILENAME_PREFIXES,
+            "sensitive_harness_path_substrings": SENSITIVE_HARNESS_PATH_SUBSTRINGS,
+            "sensitive_harness_basenames": SENSITIVE_HARNESS_BASENAMES,
+            "sensitive_harness_filename_prefixes": SENSITIVE_HARNESS_FILENAME_PREFIXES,
+        })
+    }
+
+    #[test]
+    fn path_predicates_contract_matches_language_tables() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let rendered = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&path_predicates_document())?
+        );
+        let path = std::path::Path::new(PATH_PREDICATES_JSON);
+        if std::env::var_os("UPDATE_PATH_PREDICATES").is_some() {
+            std::fs::write(path, &rendered)?;
+        }
+        let committed = std::fs::read_to_string(path)?;
+        assert_eq!(
+            committed, rendered,
+            "eval/path-predicates.json is stale; run scripts/generate-path-predicates"
+        );
+        Ok(())
+    }
 
     #[test]
     fn is_harness_path_given_config_or_ci_returns_true() {
@@ -258,6 +357,8 @@ mod tests {
         assert!(is_test_path("pkg/parser_test.go"));
         assert!(is_test_path("src/widget.test.ts"));
         assert!(is_test_path("src/widget.spec.tsx"));
+        assert!(is_test_path("src/ParserTest.java"));
+        assert!(is_test_path("src/TestHelpers.kt"));
     }
 
     #[test]
@@ -265,6 +366,8 @@ mod tests {
         // then
         assert!(!is_test_path("src/app.py"));
         assert!(!is_test_path("src/testing_utils.rs"));
+        assert!(!is_test_path("src/App.java"));
+        assert!(!is_test_path("src/ContestHelper.java"));
     }
 
     #[test]

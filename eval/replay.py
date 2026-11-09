@@ -28,13 +28,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from path_predicates import is_test_path
+
 COMMITS_PER_REPO = 80
 AUDIT_EXCLUDES = {"eval/baseline.py"}
-TEST_PATH = re.compile(
-    r"(^|/)(tests?|__tests__|spec|specs)/"
-    r"|(^|/)test[_-][^/]*\.[^.]+$"
-    r"|_test\.[^.]+$|\.test\.[^.]+$|\.spec\.[^.]+$|_spec\.[^.]+$"
-)
+
 RULE = re.compile(r'rule="([^"]+)"')
 
 
@@ -71,7 +69,7 @@ def replay_payloads(repo: Path) -> list[tuple[str, str, dict[str, object]]]:
         for chosen in changed:
             if events >= COMMITS_PER_REPO:
                 break
-            if not TEST_PATH.search(chosen):
+            if not is_test_path(chosen):
                 continue
             if chosen.rsplit(".", 1)[-1] not in {
                 "py", "js", "ts", "tsx", "jsx", "go", "rs", "java", "rb", "php", "c",
