@@ -1,8 +1,9 @@
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::detector::{DetectError, DetectResult, TestDetector, comment_ranges};
+use crate::detector::{DetectError, DetectResult, TestDetector, TestSpan, comment_ranges};
 use crate::engine::{self, null_default};
 use crate::filters::{
     SuppressionConfig, SuppressionIndex, apply_filters_without_suppression, has_marker_in_comments,
@@ -19,6 +20,25 @@ const EXIT_BLOCK: i32 = 2;
 
 /// Content above this size is skipped rather than parsed, so a huge write cannot hang the hook.
 const MAX_CONTENT_BYTES: usize = 2 * 1024 * 1024;
+
+/// File-level superfluity rules a cleanup pass may remove once a human approves them.
+///
+/// Keep in sync with `CANDIDATE_RULES` in `scripts/cleanup-candidates`; the diff-based integrity
+/// rules are never cleanup candidates.
+const REMOVABLE_RULES: &[&str] = &[
+    "duplicate-test",
+    "near-duplicate-test",
+    "tautological-assertion",
+    "no-assertion",
+    "source-grep-test",
+    "gutted-test",
+    "echo-test",
+    "mirror-implementation-test",
+];
+
+fn is_removable_rule(rule: &str) -> bool {
+    REMOVABLE_RULES.contains(&rule)
+}
 
 /// The hook tool that produced a change. Claude Code sends `Write`/`Edit`/`MultiEdit`; the
 /// `OpenCode` plugin normalizes to the same names but also forwards `apply_patch`, so matching is
@@ -75,6 +95,8 @@ impl HookCheckResult {
 pub(crate) enum HookOutcome {
     /// The check ran and found nothing.
     Clean,
+    /// The check ran and found nothing, but the cleanup pass has context to report.
+    CleanWith(String),
     /// The check ran and found weakening; the payload is the rendered block message.
     Findings(String),
     /// The check did not apply to this write (unsupported language, non-edit tool, bad input).
@@ -88,7 +110,7 @@ impl HookOutcome {
     #[must_use]
     pub(crate) const fn exit_code(&self) -> i32 {
         match self {
-            Self::Clean | Self::Skipped(_) => EXIT_PASS,
+            Self::Clean | Self::CleanWith(_) | Self::Skipped(_) => EXIT_PASS,
             Self::Findings(_) => EXIT_BLOCK,
             Self::Failed(_) => EXIT_INTERNAL_FAILURE,
         }
@@ -99,7 +121,7 @@ impl HookOutcome {
     pub(crate) fn message(&self) -> String {
         match self {
             Self::Clean => "[test-checker] Success: No problematic tests found\n".to_owned(),
-            Self::Findings(message) => message.clone(),
+            Self::CleanWith(message) | Self::Findings(message) => message.clone(),
             Self::Skipped(reason) => format!("[test-checker] Skipping: {reason}\n"),
             Self::Failed(reason) => {
                 format!("[test-checker] did not run — nothing checked this write.\n{reason}\n")
@@ -170,6 +192,7 @@ pub fn check_hook_input_with_options(
                 Confidence::Medium,
                 include_commented_out_tests,
                 include_body_tests,
+                false,
             )
             .into_result()
         },
@@ -190,6 +213,7 @@ pub fn check_hook_input_from_reader<R: std::io::Read>(
                 parse_min_confidence(options.min_confidence.as_deref()),
                 true,
                 true,
+                options.strip,
             )
             .into_result()
         },
@@ -202,6 +226,7 @@ fn evaluate(
     min_confidence: Confidence,
     include_commented_out_tests: bool,
     include_body_tests: bool,
+    strip: bool,
 ) -> HookOutcome {
     let Some(tool) = classify_tool(&hook_input.tool_name) else {
         return skip("Unsupported tool");
@@ -243,6 +268,20 @@ fn evaluate(
     let cwd = Some(hook_input.cwd.as_str()).filter(|value| !value.is_empty());
     let suppression_config = SuppressionConfig::load(cwd);
     let detector = TestDetector::new();
+    if strip {
+        return evaluate_strip(
+            tool,
+            hook_input,
+            &detector,
+            file_path,
+            cwd,
+            &suppression_config,
+            custom_prompt,
+            min_confidence,
+            include_commented_out_tests,
+            include_body_tests,
+        );
+    }
     let marker_added = marker_added_in_change(tool, hook_input, file_path);
     let ChangeFindings {
         mut findings,
@@ -277,6 +316,398 @@ fn evaluate(
         gate_and_format(&findings, custom_prompt, min_confidence),
         baseline_note,
     )
+}
+
+/// Resolve the cleanup target against the payload `cwd`, falling back to the process cwd.
+fn resolve_target_path(file_path: &str, cwd: Option<&str>) -> Option<PathBuf> {
+    let path = Path::new(file_path);
+    if path.is_absolute() {
+        return Some(path.to_path_buf());
+    }
+    let base = cwd
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())?;
+    Some(base.join(path))
+}
+
+fn read_target(path: &Path) -> Option<String> {
+    if path.is_file() {
+        std::fs::read_to_string(path).ok()
+    } else {
+        None
+    }
+}
+
+/// Run the cleanup pass: analyze the file on disk as a whole, then remove only the candidates a
+/// committed `.test-checker.json` `remove` entry approves.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_strip(
+    tool: ToolKind,
+    hook_input: &HookInput,
+    detector: &TestDetector,
+    file_path: &str,
+    cwd: Option<&str>,
+    suppression_config: &SuppressionConfig,
+    custom_prompt: &str,
+    min_confidence: Confidence,
+    include_commented_out_tests: bool,
+    include_body_tests: bool,
+) -> HookOutcome {
+    let resolved = resolve_target_path(file_path, cwd);
+    let disk_content = resolved.as_deref().and_then(read_target);
+    if let Some(content) = disk_content.as_deref() {
+        if content.len() > MAX_CONTENT_BYTES {
+            return skip("File too large");
+        }
+        let match_path = resolved.as_deref().map_or_else(
+            || file_path.to_owned(),
+            |path| path.to_string_lossy().into_owned(),
+        );
+        let findings = match analyze_whole_file(
+            content,
+            file_path,
+            &match_path,
+            detector,
+            suppression_config,
+            include_commented_out_tests,
+            include_body_tests,
+        ) {
+            Ok(findings) => findings,
+            Err(outcome) => return outcome,
+        };
+        return strip_report(
+            &findings,
+            Some(content),
+            resolved.as_deref(),
+            file_path,
+            &match_path,
+            detector,
+            suppression_config,
+            custom_prompt,
+            min_confidence,
+        );
+    }
+
+    if tool == ToolKind::Write {
+        let content = get_content_to_check(hook_input);
+        if content.len() > MAX_CONTENT_BYTES {
+            return skip("File too large");
+        }
+        let findings = match analyze_whole_file(
+            content,
+            file_path,
+            file_path,
+            detector,
+            suppression_config,
+            include_commented_out_tests,
+            include_body_tests,
+        ) {
+            Ok(findings) => findings,
+            Err(outcome) => return outcome,
+        };
+        return strip_report(
+            &findings,
+            Some(content),
+            None,
+            file_path,
+            file_path,
+            detector,
+            suppression_config,
+            custom_prompt,
+            min_confidence,
+        );
+    }
+
+    // A fragment payload names a file that is not on disk: analyze the fragment, never rewrite.
+    let marker_added = marker_added_in_change(tool, hook_input, file_path);
+    let ChangeFindings {
+        mut findings,
+        invalid_markers,
+        ..
+    } = match analyze_change(
+        tool,
+        hook_input,
+        detector,
+        file_path,
+        include_commented_out_tests,
+        include_body_tests,
+    ) {
+        Ok(change) => change,
+        Err(skip_result) => return skip_result,
+    };
+    findings.retain(|finding| !suppression_config.suppresses(file_path, &finding.rule));
+    findings.extend(invalid_markers);
+    if marker_added {
+        findings.push(Finding::new(
+            "allow-added",
+            Confidence::Medium,
+            "A test-checker opt-out marker was added in this change; suppressing findings you just introduced is suspicious.",
+            1,
+            file_path,
+            "",
+        ));
+    }
+    strip_report(
+        &findings,
+        None,
+        None,
+        file_path,
+        file_path,
+        detector,
+        suppression_config,
+        custom_prompt,
+        min_confidence,
+    )
+}
+
+/// Whole-file analysis for the cleanup pass: every line counts as added and markers are inert.
+#[allow(clippy::too_many_arguments)]
+fn analyze_whole_file(
+    content: &str,
+    file_path: &str,
+    match_path: &str,
+    detector: &TestDetector,
+    suppression_config: &SuppressionConfig,
+    include_commented_out_tests: bool,
+    include_body_tests: bool,
+) -> Result<Vec<Finding>, HookOutcome> {
+    let mut findings = detector
+        .detect_checked(
+            content,
+            file_path,
+            include_commented_out_tests,
+            include_body_tests,
+        )
+        .map_err(detect_failure)?;
+    let added: HashSet<usize> = (0..content.lines().count()).collect();
+    let index =
+        SuppressionIndex::from_content(content, &added, &comment_ranges(content, file_path));
+    findings.retain(|finding| !index.is_suppressed(finding));
+    let invalid_markers = index.invalid_findings(file_path);
+    findings.retain(|finding| !suppression_config.suppresses(match_path, &finding.rule));
+    findings.extend(invalid_markers);
+    if has_marker_in_comments(content, None, &comment_ranges(content, file_path)) {
+        findings.push(Finding::new(
+            "allow-added",
+            Confidence::Medium,
+            "A test-checker opt-out marker was added in this change; suppressing findings you just introduced is suspicious.",
+            1,
+            file_path,
+            "",
+        ));
+    }
+    Ok(findings)
+}
+
+/// Build the normal report, apply approved removals, and append the cleanup summary.
+#[allow(clippy::too_many_arguments)]
+fn strip_report(
+    findings: &[Finding],
+    content: Option<&str>,
+    target: Option<&Path>,
+    file_path: &str,
+    match_path: &str,
+    detector: &TestDetector,
+    suppression_config: &SuppressionConfig,
+    custom_prompt: &str,
+    min_confidence: Confidence,
+) -> HookOutcome {
+    let candidates: Vec<&Finding> = findings
+        .iter()
+        .filter(|finding| is_removable_rule(&finding.rule))
+        .collect();
+    let mut spans = Vec::new();
+    let mut span_error = None;
+    if let Some(content) = content
+        && !candidates.is_empty()
+    {
+        match detector.test_spans(content, file_path) {
+            Ok(found) => spans = found,
+            Err(error) => span_error = Some(error.to_string()),
+        }
+    }
+
+    let mut removable_spans = Vec::new();
+    let mut removed = Vec::new();
+    let mut kept = Vec::new();
+    let mut seen_spans = HashSet::new();
+    for candidate in &candidates {
+        let approved = suppression_config.removable(match_path, &candidate.rule);
+        let span = enclosing_span(&spans, candidate.line_number);
+        let name = span
+            .and_then(|span| span.name.clone())
+            .unwrap_or_else(|| candidate.text.trim().to_owned());
+        if approved && target.is_some() {
+            let Some(span) = span else {
+                let reason = span_error.as_deref().unwrap_or("no enclosing test block");
+                return HookOutcome::Failed(format!(
+                    "cleanup pass could not locate the {} finding at line {} ({reason}); nothing was changed",
+                    candidate.rule, candidate.line_number
+                ));
+            };
+            removable_spans.push((span.start_byte, span.end_byte));
+            if seen_spans.insert((span.start_byte, span.end_byte)) {
+                removed.push((display_name(&name), candidate.rule.clone()));
+            }
+        } else {
+            kept.push((display_name(&name), candidate.rule.clone()));
+        }
+    }
+
+    let approved_without_file = target.is_none()
+        && candidates
+            .iter()
+            .any(|candidate| suppression_config.removable(match_path, &candidate.rule));
+    if let (Some(target), Some(content)) = (target, content)
+        && !removable_spans.is_empty()
+    {
+        let merged = merge_spans(removable_spans);
+        let Some(updated) = remove_spans(content, &merged) else {
+            return HookOutcome::Failed(
+                "cleanup pass produced an invalid byte range; nothing was changed".to_owned(),
+            );
+        };
+        if updated != content
+            && let Err(error) = std::fs::write(target, updated.as_bytes())
+        {
+            return HookOutcome::Failed(format!(
+                "cleanup pass could not write {}: {error}",
+                target.display()
+            ));
+        }
+    }
+
+    let note =
+        approved_without_file.then_some("the target file is not on disk; nothing was rewritten");
+    let summary = strip_summary(&removed, &kept, note);
+    append_strip_summary(
+        gate_and_format(findings, custom_prompt, min_confidence),
+        &summary,
+    )
+}
+
+/// The innermost captured test block containing `line` (1-based), if it is unambiguous.
+fn enclosing_span(spans: &[TestSpan], line: usize) -> Option<&TestSpan> {
+    let mut best: Option<&TestSpan> = None;
+    for span in spans {
+        if line < span.start_row + 1 || line > span.end_row + 1 {
+            continue;
+        }
+        let length = span.end_byte.saturating_sub(span.start_byte);
+        match best {
+            None => best = Some(span),
+            Some(current) => {
+                let current_length = current.end_byte.saturating_sub(current.start_byte);
+                if length < current_length {
+                    best = Some(span);
+                } else if length == current_length
+                    && (span.start_byte != current.start_byte || span.end_byte != current.end_byte)
+                {
+                    return None;
+                }
+            }
+        }
+    }
+    best
+}
+
+/// Sort and union overlapping spans; each removal is still one test block.
+fn merge_spans(mut spans: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    spans.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(spans.len());
+    for (start, end) in spans {
+        if let Some((_, current_end)) = merged.last_mut()
+            && start < *current_end
+        {
+            *current_end = (*current_end).max(end);
+            continue;
+        }
+        merged.push((start, end));
+    }
+    merged
+}
+
+/// Remove every byte range in `spans`, leaving the rest of the file byte-identical.
+fn remove_spans(content: &str, spans: &[(usize, usize)]) -> Option<String> {
+    let mut output = String::with_capacity(content.len());
+    let mut cursor = 0;
+    for &(start, end) in spans {
+        if start < cursor || end < start || end > content.len() {
+            return None;
+        }
+        output.push_str(content.get(cursor..start)?);
+        cursor = end;
+    }
+    output.push_str(content.get(cursor..)?);
+    Some(output)
+}
+
+fn display_name(name: &str) -> String {
+    if name.trim().is_empty() {
+        "(unnamed)".to_owned()
+    } else {
+        name.trim().to_owned()
+    }
+}
+
+fn strip_summary(
+    removed: &[(String, String)],
+    kept: &[(String, String)],
+    note: Option<&str>,
+) -> String {
+    let mut summary = format!(
+        "[test-checker] cleanup pass: {} removed, {} kept awaiting approval.\n",
+        removed.len(),
+        kept.len()
+    );
+    for (name, rule) in removed {
+        summary.push_str("  removed: ");
+        summary.push_str(name);
+        summary.push_str(" [");
+        summary.push_str(rule);
+        summary.push_str("]\n");
+    }
+    for (name, rule) in kept {
+        summary.push_str("  kept awaiting approval: ");
+        summary.push_str(name);
+        summary.push_str(" [");
+        summary.push_str(rule);
+        summary.push_str("]\n");
+    }
+    if let Some(note) = note {
+        summary.push_str("  note: ");
+        summary.push_str(note);
+        summary.push('\n');
+    }
+    summary.push_str(
+        "  approve a removal with a \"remove\" entry ({\"glob\",\"rules\",\"reason\"}) in .test-checker.json\n",
+    );
+    summary
+}
+
+fn append_strip_summary(outcome: HookOutcome, summary: &str) -> HookOutcome {
+    match outcome {
+        HookOutcome::Clean => HookOutcome::CleanWith(format!(
+            "[test-checker] Success: No problematic tests found\n{summary}"
+        )),
+        HookOutcome::Findings(mut message) => {
+            if !message.ends_with('\n') {
+                message.push('\n');
+            }
+            message.push_str(summary);
+            HookOutcome::Findings(message)
+        }
+        other => other,
+    }
+}
+
+/// Map a detector failure onto a hook outcome: a parse-budget abort is a visible skip, and any
+/// other detector failure is an internal failure (exit 1), never a clean pass.
+fn detect_failure(error: DetectError) -> HookOutcome {
+    match error {
+        DetectError::BudgetExceeded => skip("Parse budget exceeded"),
+        DetectError::Internal(reason) => HookOutcome::Failed(reason),
+    }
 }
 
 /// Fold the Write-baseline skip note into the outcome: a clean result becomes a visible skip, and a

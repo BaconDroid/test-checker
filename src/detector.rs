@@ -128,12 +128,23 @@ struct Body {
     start_byte: usize,
     end_byte: usize,
     start_row: usize,
+    end_row: usize,
     name: Option<String>,
     /// The row of the captured test name, used to scope `agent-memo-test` to test-level text.
     name_row: Option<usize>,
     /// The fragment contains this complete test node (no parse error inside it); whole-test rules
     /// such as `no-assertion` and `echo-test` must not run on an incomplete fragment.
     reliable: bool,
+}
+
+/// A captured test block's byte and line span, including its attribute/marker lines.
+#[derive(Clone, Debug)]
+pub(crate) struct TestSpan {
+    pub(crate) start_byte: usize,
+    pub(crate) end_byte: usize,
+    pub(crate) start_row: usize,
+    pub(crate) end_row: usize,
+    pub(crate) name: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -211,6 +222,37 @@ impl TestDetector {
             }
         }
         Ok(dedupe(findings))
+    }
+
+    /// The test blocks in `content`, each with the attribute/marker lines that gate it.
+    ///
+    /// The cleanup pass maps a removable finding's line back to the block it sits in, so it can
+    /// delete the whole block instead of a single line. A language with no test query yields none.
+    #[allow(clippy::unused_self)]
+    pub(crate) fn test_spans(
+        &self,
+        content: &str,
+        file_path: &str,
+    ) -> Result<Vec<TestSpan>, DetectError> {
+        let Some(name) = language_for_path(file_path) else {
+            return Ok(Vec::new());
+        };
+        let runtime = runtime_by_name(name)?;
+        let source = content.as_bytes();
+        let tree = parse_with_runtime(&runtime, source, file_path)?;
+        let Some(query) = &runtime.test_query else {
+            return Ok(Vec::new());
+        };
+        Ok(capture_bodies(&runtime, query, &tree, source)
+            .into_iter()
+            .map(|body| TestSpan {
+                start_byte: body.start_byte,
+                end_byte: body.end_byte,
+                start_row: body.start_row,
+                end_row: body.end_row,
+                name: body.name,
+            })
+            .collect())
     }
 
     /// Analyze an edit: report only weakening newly introduced by `new_string`.
@@ -901,10 +943,12 @@ fn capture_bodies(
             if is_body_candidate(&runtime.name, identifier, node, source) {
                 let literal_name = literal_test_name(node, source);
                 let (start_byte, start_row) = expanded_start(&runtime.name, node, source);
+                let (end_byte, end_row) = expanded_end(&runtime.name, node, source);
                 bodies.push(Body {
                     start_byte,
-                    end_byte: expanded_end(&runtime.name, node, source),
+                    end_byte,
                     start_row,
+                    end_row,
                     name: name
                         .or_else(|| literal_name.as_ref().map(|(name, _)| name.clone()))
                         .or(callee),
@@ -920,7 +964,7 @@ fn capture_bodies(
     bodies
 }
 
-/// The first string literal argument of a call-shaped test (`it("name", …)`), with its row.
+/// The first string literal argument of a call-shaped test (`it("name", ...)`), with its row.
 ///
 /// Call-shaped test queries capture the callee (`it`, `test`, `describe`) but not the literal name,
 /// so without this every such body would be named `it` and a rename could never be distinguished
@@ -997,7 +1041,7 @@ fn expanded_start(language: &str, node: tree_sitter::Node, source: &[u8]) -> (us
 
 /// Extend a test body downward where the grammar splits the body from its declaration: a bats
 /// `@test "…" { … }` parses as sibling commands closed by a standalone `}` command.
-fn expanded_end(language: &str, node: tree_sitter::Node, source: &[u8]) -> usize {
+fn expanded_end(language: &str, node: tree_sitter::Node, source: &[u8]) -> (usize, usize) {
     if language == "bash" {
         let mut sibling = node.next_sibling();
         while let Some(current) = sibling {
@@ -1005,12 +1049,12 @@ fn expanded_end(language: &str, node: tree_sitter::Node, source: &[u8]) -> usize
                 .utf8_text(source)
                 .is_ok_and(|text| text.trim() == "}")
             {
-                return current.end_byte();
+                return (current.end_byte(), current.end_position().row);
             }
             sibling = current.next_sibling();
         }
     }
-    node.end_byte()
+    (node.end_byte(), node.end_position().row)
 }
 
 fn is_body_candidate(

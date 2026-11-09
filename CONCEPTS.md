@@ -35,10 +35,10 @@ bump**, not a boundary: the agent has a shell and can edit the file again, disab
 hook, or write a suppression entry, so a determined agent can always get past it. That is accepted.
 The product promise is visibility and a human in the loop, not enforcement.
 
-An intended removal is approved by a **human** through a committed `.test-checker.json` entry with a
-reason. The agent's job on a removal finding is to stop and ask for that entry; adding it itself is
-exactly the behaviour the findings exist to expose, and editing the config is itself a high
-`config-edited` finding.
+An intended removal is approved by a **human** through a committed `.test-checker.json` `remove`
+entry with a reason of at least 12 characters. The agent's job on a removal finding is to stop and
+ask for that entry; adding it itself is exactly the behaviour the findings exist to expose, and
+editing the config is itself a high `config-edited` finding.
 
 ## Verdict and kind
 
