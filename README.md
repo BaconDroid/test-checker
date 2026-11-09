@@ -129,9 +129,11 @@ cargo install --path . --locked
 
 Rust 1.85+ and a C compiler are required (the tree-sitter grammars are C).
 
-The `v0.2.0` release binaries predate the Rust rebuild of the detector and are not current. The npm
-packages under `npm/` are current packaging sources, but they are not published. Build from source
-unless you specifically want that older release.
+GitHub Releases carry prebuilt binaries for the five platforms (`v0.3.1` at the time of writing);
+they can lag the source tree, so build from source when you want the latest behavior. The older
+`v0.2.0` binaries predate the Rust rebuild of the detector, and the `v0.3.0` release failed to
+build assets - neither is current. The npm packages under `npm/` are current packaging sources,
+but they are not published.
 
 ## Setup
 
