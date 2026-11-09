@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::filters::is_agent_memo_phrase;
-use crate::language::is_sensitive_harness_path;
+use crate::language::{is_sensitive_harness_path, language_for_path};
 use crate::models::{Confidence, Finding};
 
 /// A single added line with its real (1-based) line number in the file.
@@ -485,8 +485,14 @@ fn py_assert_statement_form_views(view: &str, original: &str) -> Option<MatcherF
     None
 }
 
-fn matcher_form_views(view: &str, original: &str) -> Option<MatcherForm> {
-    py_matcher_form_views(view, original).or_else(|| js_matcher_form_views(view, original))
+/// The strictness form for a line. JavaScript matchers are Jest/Vitest syntax, so they are only
+/// read for the JavaScript-family grammars: a Rust `Result::expect("...")` is not an assertion.
+fn matcher_form_views(view: &str, original: &str, javascript: bool) -> Option<MatcherForm> {
+    py_matcher_form_views(view, original).or_else(|| {
+        javascript
+            .then(|| js_matcher_form_views(view, original))
+            .flatten()
+    })
 }
 
 /// Extract the subject a snapshot/approval assertion supersedes.
@@ -617,8 +623,9 @@ fn classify_weakening(
     view: &str,
     original: &str,
     diff: &DiffContext<'_>,
+    javascript: bool,
 ) -> Vec<Finding> {
-    let weakened = matcher_form_views(view, original);
+    let weakened = matcher_form_views(view, original, javascript);
     let snapshot = snapshot_subject_views(view, original);
     let tolerance = tolerance_form_views(view, original);
     if diff.removed.is_empty() {
@@ -633,8 +640,13 @@ fn classify_weakening(
 
     let mut findings = Vec::new();
     if let Some(new_form) = &weakened
-        && let Some(old_strength) =
-            weaker_match(&new_form.subject, new_form.kind, new_form.strength, diff)
+        && let Some(old_strength) = weaker_match(
+            &new_form.subject,
+            new_form.kind,
+            new_form.strength,
+            diff,
+            javascript,
+        )
     {
         let confidence = if old_strength >= EXACT_MIN && new_form.strength <= LOOSE_MAX {
             Confidence::High
@@ -655,7 +667,7 @@ fn classify_weakening(
             .iter()
             .zip(diff.removed_original)
             .any(|(view, original)| {
-                matcher_form_views(view, original)
+                matcher_form_views(view, original, javascript)
                     .is_some_and(|old| old.subject == snapshot_subject && old.strength >= EXACT_MIN)
             });
         if superseded {
@@ -700,12 +712,13 @@ fn weaker_match(
     kind: MatcherKind,
     strength: u8,
     diff: &DiffContext<'_>,
+    javascript: bool,
 ) -> Option<u8> {
     diff.removed
         .iter()
         .zip(diff.removed_original)
         .find_map(|(view, original)| {
-            matcher_form_views(view, original).and_then(|old| {
+            matcher_form_views(view, original, javascript).and_then(|old| {
                 (old.kind == kind && old.subject == subject && old.strength > strength)
                     .then_some(old.strength)
             })
@@ -770,6 +783,14 @@ fn has_marker(line: &str, markers: &[&str]) -> bool {
         }
         false
     })
+}
+
+/// Whether the line carries an assertion marker, with `expect(` counted only for the languages
+/// whose test framework provides it.
+fn has_assertion_marker(text: &str, expect_assertion: bool) -> bool {
+    ASSERTION_MARKERS
+        .iter()
+        .any(|marker| (expect_assertion || *marker != "expect(") && has_marker(text, &[*marker]))
 }
 
 fn has_word(text: &str, word: &str) -> bool {
@@ -913,6 +934,8 @@ fn classify_line(
     };
     let text = line.text.trim();
     let original = original.trim();
+    let javascript = is_javascript_language(file_path);
+    let expect_assertion = expect_is_assertion(file_path);
     let mut findings = Vec::new();
 
     for rule in MARKER_RULES {
@@ -938,7 +961,9 @@ fn classify_line(
             file_path,
         ));
     }
-    findings.extend(classify_weakening(file_path, &line, text, original, diff));
+    findings.extend(classify_weakening(
+        file_path, &line, text, original, diff, javascript,
+    ));
     if let Some(finding) = classify_assertion(file_path, &line, text, original) {
         findings.push(finding);
     }
@@ -948,7 +973,9 @@ fn classify_line(
     if let Some(finding) = classify_swallowed_error(file_path, added, index, text) {
         findings.push(finding);
     }
-    if let Some(finding) = classify_conditional_assertion(file_path, added, index, text, body) {
+    if let Some(finding) =
+        classify_conditional_assertion(file_path, added, index, text, body, expect_assertion)
+    {
         findings.push(finding);
     }
     if let Some(finding) = classify_mock_of_sut(file_path, &line, text, original) {
@@ -957,10 +984,10 @@ fn classify_line(
     if let Some(finding) = classify_agent_memo(file_path, &line, original) {
         findings.push(finding);
     }
-    if let Some(finding) = classify_incomplete_assertion(file_path, &line, text) {
+    if let Some(finding) = classify_incomplete_assertion(file_path, &line, text, javascript) {
         findings.push(finding);
     }
-    if let Some(finding) = classify_unawaited_assertion(file_path, &line, text) {
+    if let Some(finding) = classify_unawaited_assertion(file_path, &line, text, javascript) {
         findings.push(finding);
     }
     if let Some(finding) = classify_broad_exception(file_path, &line, text) {
@@ -969,11 +996,33 @@ fn classify_line(
     findings
 }
 
+/// Whether the path is one of the JavaScript-family grammars whose test framework uses
+/// Jasmine-style `expect(...)` assertions.
+fn is_javascript_language(file_path: &str) -> bool {
+    matches!(
+        language_for_path(file_path),
+        Some("javascript" | "typescript" | "tsx")
+    )
+}
+
+/// Whether `expect(...)` is an assertion call in this language. Besides the JavaScript family,
+/// both PHP Pest and Ruby `RSpec` provide it; a Rust `Result::expect` does not.
+fn expect_is_assertion(file_path: &str) -> bool {
+    matches!(
+        language_for_path(file_path),
+        Some("javascript" | "typescript" | "tsx" | "php" | "ruby")
+    )
+}
+
 fn classify_incomplete_assertion(
     file_path: &str,
     line: &AddedLine<'_>,
     text: &str,
+    javascript: bool,
 ) -> Option<Finding> {
+    if !javascript {
+        return None;
+    }
     // The `expect(...)` call must close on this line; a prettier-wrapped
     // `expect(\n  …\n).toBe(3)` is complete, just split across lines.
     inner_args(text, "expect(")?;
@@ -996,7 +1045,11 @@ fn classify_unawaited_assertion(
     file_path: &str,
     line: &AddedLine<'_>,
     text: &str,
+    javascript: bool,
 ) -> Option<Finding> {
+    if !javascript {
+        return None;
+    }
     // The promise matcher only counts on an `expect(...)` line; `.resolves.` in a string
     // (a test name, a doc) is not an unawaited assertion.
     let promise_matcher = text.contains(".resolves.") || text.contains(".rejects.");
@@ -1664,6 +1717,7 @@ fn classify_conditional_assertion(
     index: usize,
     text: &str,
     body: &[AddedLine<'_>],
+    expect_assertion: bool,
 ) -> Option<Finding> {
     let conditional_here = text.starts_with("if ") || text.starts_with("if(");
     if !conditional_here {
@@ -1681,7 +1735,7 @@ fn classify_conditional_assertion(
         .iter()
         .position(|line| line.line_number == added[index].line_number)
         .map_or((added, index), |position| (body, position));
-    let assertions = block_assertions(scan, start);
+    let assertions = block_assertions(scan, start, expect_assertion);
     if assertions.is_empty() {
         return None;
     }
@@ -1818,10 +1872,14 @@ fn guard_identifiers(condition: &str) -> Vec<String> {
 }
 
 /// Assertion texts in the `if` block that starts at `index`.
-fn block_assertions<'a>(added: &'a [AddedLine<'a>], index: usize) -> Vec<&'a str> {
+fn block_assertions<'a>(
+    added: &'a [AddedLine<'a>],
+    index: usize,
+    expect_assertion: bool,
+) -> Vec<&'a str> {
     let first = added.get(index).map_or("", |line| line.text);
     let mut assertions = Vec::new();
-    if has_marker(first.trim(), ASSERTION_MARKERS) {
+    if has_assertion_marker(first.trim(), expect_assertion) {
         assertions.push(first.trim());
     }
     let colon_style = first.trim_end().ends_with(':');
@@ -1829,7 +1887,7 @@ fn block_assertions<'a>(added: &'a [AddedLine<'a>], index: usize) -> Vec<&'a str
     if !colon_style && depth == 0 {
         if assertions.is_empty()
             && let Some(next) = added.get(index + 1)
-            && has_marker(next.text.trim(), ASSERTION_MARKERS)
+            && has_assertion_marker(next.text.trim(), expect_assertion)
         {
             assertions.push(next.text.trim());
         }
@@ -1844,7 +1902,7 @@ fn block_assertions<'a>(added: &'a [AddedLine<'a>], index: usize) -> Vec<&'a str
         if depth <= 0 && indentation(text) <= indent && !text.trim_start().starts_with('}') {
             break;
         }
-        if has_marker(text.trim(), ASSERTION_MARKERS) {
+        if has_assertion_marker(text.trim(), expect_assertion) {
             assertions.push(text.trim());
         }
         depth += brace_delta(text);
@@ -2915,6 +2973,45 @@ mod tests {
     }
 
     #[test]
+    fn classify_added_line_given_rust_expect_under_a_condition_reports_no_conditional_assertion() {
+        // given: a Result::expect panic path guarded by a runtime condition is not an assertion
+        let added = lines(&[
+            "    if cfg!(unix) {",
+            r#"        result.expect("failed");"#,
+            "    }",
+        ]);
+
+        // when
+        let findings = classify_added_line("tests/tests.rs", &added, 0);
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "conditional-assertion"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_javascript_expect_under_a_condition_reports_conditional_assertion()
+    {
+        // given: the same shape in a JavaScript file is a real guarded assertion
+        let added = lines(&["    if (flag) {", "        expect(value).toBe(3);", "    }"]);
+
+        // when
+        let findings = classify_added_line("tests/app.test.js", &added, 0);
+
+        // then
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "conditional-assertion"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
     fn classify_added_line_given_clean_line_reports_nothing() {
         // given
         let added = lines(&["    result = add(1, 2)"]);
@@ -3217,6 +3314,57 @@ mod tests {
             findings
                 .iter()
                 .any(|finding| finding.rule == "incomplete-assertion")
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_rust_expect_reports_no_incomplete_assertion() {
+        // given: Rust's Result::expect takes a panic message and has no matcher
+        let added = lines(&[r#"    .expect("Failed to create broken symlink.");"#]);
+
+        // when
+        let findings = classify_added_line("tests/tests.rs", &added, 0);
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "incomplete-assertion"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_rust_expect_with_matcher_name_reports_no_weakening() {
+        // given: a call chain that contains both a Rust Result::expect and a JS matcher token
+        let added = lines(&[r#"    let value = result.expect("boom").toEqual(3);"#]);
+
+        // when
+        let findings = classify_added_line("tests/tests.rs", &added, 0);
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "weakened-assertion"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn classify_added_line_given_php_pest_expect_reports_no_incomplete_assertion() {
+        // given: PHP Pest's expect(...)->toBe(...) carries its matcher outside the parentheses
+        let added = lines(&["    expect($value)->toBe(3);"]);
+
+        // when
+        let findings = classify_added_line("tests/ExampleTest.php", &added, 0);
+
+        // then
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule == "incomplete-assertion"),
+            "{findings:?}"
         );
     }
 

@@ -1671,6 +1671,47 @@ fn reads_payloads() {
 }
 
 #[test]
+fn detect_given_rust_expect_call_does_not_report_incomplete_assertion() {
+    // given: a Rust test whose only "expect" is the Result unwrap helper
+    let source = concat!(
+        "#[test]\n",
+        "fn creates_symlink() {\n",
+        "    std::os::unix::fs::symlink(\"a\", \"b\")\n",
+        "        .expect(\"Failed to create broken symlink.\");\n",
+        "    assert_eq!(1, 1);\n",
+        "}\n",
+    );
+
+    // when
+    let findings = TestDetector::new().detect(source, "tests/tests.rs", true, true);
+
+    // then
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "incomplete-assertion"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
+fn detect_given_javascript_bare_expect_still_reports_incomplete_assertion() {
+    // given: the same call shape in a JavaScript test is a real assertion
+    let source = "it('sums', () => {\n  expect(add(1, 2));\n});\n";
+
+    // when
+    let findings = TestDetector::new().detect(source, "tests/app.test.js", true, true);
+
+    // then
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule == "incomplete-assertion"),
+        "findings: {findings:?}"
+    );
+}
+
+#[test]
 fn detect_given_distinct_literal_operands_does_not_report_tautology() {
     // given: masking the string content collapses both operands' text
     let detector = TestDetector::new();
