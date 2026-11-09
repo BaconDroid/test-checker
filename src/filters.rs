@@ -326,6 +326,8 @@ struct ConfigAllow {
 struct ConfigFile {
     #[serde(default)]
     allow: Vec<ConfigEntry>,
+    #[serde(default)]
+    remove: Vec<ConfigEntry>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -342,6 +344,7 @@ struct ConfigEntry {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SuppressionConfig {
     entries: Vec<ConfigAllow>,
+    remove_entries: Vec<ConfigAllow>,
     cwd: Option<String>,
 }
 
@@ -377,24 +380,33 @@ impl SuppressionConfig {
         if !path.is_file() {
             return Self {
                 entries: Vec::new(),
+                remove_entries: Vec::new(),
                 cwd: Some(root),
             };
         }
         let Ok(raw) = std::fs::read_to_string(&path) else {
             return Self {
                 entries: Vec::new(),
+                remove_entries: Vec::new(),
                 cwd: Some(root),
             };
         };
         let Ok(config) = serde_json::from_str::<ConfigFile>(&raw) else {
             return Self {
                 entries: Vec::new(),
+                remove_entries: Vec::new(),
                 cwd: Some(root),
             };
         };
         let entries = config.allow.iter().filter_map(valid_config_entry).collect();
+        let remove_entries = config
+            .remove
+            .iter()
+            .filter_map(valid_remove_entry)
+            .collect();
         Self {
             entries,
+            remove_entries,
             cwd: Some(root),
         }
     }
@@ -402,15 +414,26 @@ impl SuppressionConfig {
     /// Whether a matching committed entry suppresses `rule` for `file_path`.
     #[must_use]
     pub(crate) fn suppresses(&self, file_path: &str, rule: &str) -> bool {
-        let relative = relative_to_cwd(file_path, self.cwd.as_deref());
-        self.entries.iter().any(|entry| {
-            entry
-                .rules
-                .iter()
-                .any(|allowed| allowed.eq_ignore_ascii_case(rule))
-                && glob_matches(&entry.glob, &relative)
-        })
+        matches_entry(&self.entries, self.cwd.as_deref(), file_path, rule)
     }
+
+    /// Whether a human-approved `remove` entry allows removing a `rule` finding from `file_path`.
+    #[must_use]
+    pub(crate) fn removable(&self, file_path: &str, rule: &str) -> bool {
+        matches_entry(&self.remove_entries, self.cwd.as_deref(), file_path, rule)
+    }
+}
+
+/// Whether one validated entry list matches `rule` for `file_path`.
+fn matches_entry(entries: &[ConfigAllow], cwd: Option<&str>, file_path: &str, rule: &str) -> bool {
+    let relative = relative_to_cwd(file_path, cwd);
+    entries.iter().any(|entry| {
+        entry
+            .rules
+            .iter()
+            .any(|listed| listed.eq_ignore_ascii_case(rule))
+            && glob_matches(&entry.glob, &relative)
+    })
 }
 
 /// The first ancestor of `start` (inclusive) that contains a `.git` entry.
@@ -442,6 +465,14 @@ fn valid_config_entry(entry: &ConfigEntry) -> Option<ConfigAllow> {
         glob: glob.to_owned(),
         rules,
     })
+}
+
+/// A `remove` entry additionally needs a reason at least as long as an in-file marker's.
+fn valid_remove_entry(entry: &ConfigEntry) -> Option<ConfigAllow> {
+    if entry.reason.trim().chars().count() < MIN_REASON_CHARS {
+        return None;
+    }
+    valid_config_entry(entry)
 }
 
 /// Whether `file_path` names the committed suppression config.

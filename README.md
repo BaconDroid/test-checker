@@ -23,7 +23,9 @@ trustworthy.
 
 `PostToolUse` runs **after** the tool has written the file. On a finding the binary exits `2` and
 writes its message to stderr; Claude Code feeds that message back to the agent, which is expected
-to revise the file. The hook cannot prevent or undo the write, and it never edits the file itself.
+to revise the file. The default hook cannot prevent or undo the write, and it never edits the file
+itself. The explicit `--strip` cleanup pass is the one exception: it removes only candidates a human
+approved in `.test-checker.json` (see [Removal policy](#removal-policy)).
 
 This is a **speed bump, not a security boundary**. The agent has a shell: it can edit files
 directly, disarm or remove the hook, or write its own suppression, and any of those bypasses the
@@ -36,8 +38,8 @@ never grant it to itself.
 |---|---|
 | Detect and report weakened or superfluous tests | works today (PostToolUse, exit `2`) |
 | Prevent or undo the write | not possible from `PostToolUse`; exit `2` is feedback after the write |
-| Remove: cleanup pass over approved candidates | planned (plugin) |
-| Plug in: one plugin combining this and comment-checker | planned |
+| Remove: cleanup pass over approved candidates | works today (`--strip` + a committed `.test-checker.json` `remove` entry) |
+| Plug in: one plugin combining this and comment-checker | works today (BaconDroid/opencode-comments-plugin) |
 
 ## Philosophy: scaffolding vs guard
 
@@ -55,9 +57,39 @@ never grant it to itself.
 
 ## Removal policy
 
-test-checker reports; it does not delete tests by itself. Removal is meant to happen in a
-cleanup pass driven by the plugin, on a list a human approves. No cleanup or stripping feature is
-implemented in this tree.
+The hook reports; it does not delete tests by itself. Removal writes happen only in the explicit
+`--strip` cleanup pass, and only for candidates a **human** approved in a committed
+`.test-checker.json` entry with a reason at least 12 characters long. An agent can never grant
+removal to itself: it must stop and ask for the entry, and editing the config is itself reported as
+a high `config-edited` finding.
+
+- **Candidates**: only the file-level superfluity rules `duplicate-test`,
+  `near-duplicate-test`, `tautological-assertion`, `no-assertion`, `source-grep-test`,
+  `gutted-test`, `echo-test`, and `mirror-implementation-test`. Integrity rules (`skip-added`,
+  `weakened-assertion`, `assertion-removed`, `test-removed`, ...) are never removable.
+- **Approval**: a candidate is removable only when its file matches the glob and its rule is listed
+  in a valid `remove` entry. No matching entry means no removal, always. For a duplicate pair, the
+  flagged copy (the later body) is the one removed.
+- **Unit**: the whole enclosing test block, including its attribute/marker lines (Rust `#[test]`,
+  Python decorators, Elixir tags, Groovy decorators). Overlapping removals collapse into one span;
+  every other byte of the file stays identical.
+- **Write**: the new content is built in memory and written once. On an ambiguous span or a write
+  error nothing is touched, and the message says why.
+- **Output**: the normal report is followed by a cleanup summary listing removed items
+  (`test name [rule]`) and candidates kept awaiting approval, plus the `.test-checker.json`
+  `remove` pointer. Exit codes are unchanged: `0` clean, `2` findings, `1` did not run.
+
+```json
+{
+  "remove": [
+    {
+      "glob": "tests/**",
+      "rules": ["duplicate-test", "near-duplicate-test"],
+      "reason": "legacy suite merged into the table-driven cases in #123"
+    }
+  ]
+}
+```
 
 ## Cleanup candidates
 
@@ -69,8 +101,21 @@ and aggregates the **file-level** superfluity findings (`duplicate-test`, `near-
 `{file, test_name, line, rule, confidence, reason}` - sorted by confidence, then a summary on
 stderr. It always exits 0 unless the arguments are invalid: a root that is not a directory exits 2.
 
-It never modifies files. Removal remains a separate, human-approved step. Diff-based integrity rules
-are not part of the report.
+It never modifies files. Diff-based integrity rules are not part of the report.
+
+`scripts/cleanup-pass --binary path/to/test-checker [root]` is the driver for the removal step. It
+walks the same test files, feeds each one to the binary with `--strip --min-confidence low`, and
+prints what was removed and what was kept awaiting approval. It never edits files itself; only the
+binary writes, and only for approved candidates. Like `cleanup-candidates`, it exits 0 unless the
+arguments are invalid.
+
+The workflow keeps the human in the loop:
+
+1. Report: run `scripts/cleanup-candidates --binary path/to/test-checker`.
+2. Approve: a human adds a `remove` entry (`glob`, `rules`, `reason`) to `.test-checker.json` and
+   commits it. The reason must be at least 12 characters.
+3. Remove: run `scripts/cleanup-pass --binary path/to/test-checker`. Anything without a matching
+   `remove` entry is reported as kept and left in place.
 
 ## install
 
@@ -145,8 +190,11 @@ command text does not claim native Windows support.
   hook only exits `2` for findings at or above that level. An unrecognised value silently falls back
   to `medium`.
 - `--version` prints `test-checker <version>` and exits `0`.
-- `--strip` is accepted for forward compatibility but is **inert**: a notice is printed to stderr and
-  the file is never rewritten.
+- `--strip` runs the cleanup pass. It resolves `tool_input.file_path`/`filePath` against the payload
+  `cwd` (the process cwd when absent). If the file exists, the whole file on disk is analyzed - the
+  payload only names it; if the file is missing, the payload content is analyzed and never rewritten.
+  Only candidates approved by a `remove` entry in `<git root>/.test-checker.json` are removed; the
+  message appends a cleanup summary, and exit codes stay `0`/`2`/`1` as below.
 - **Write baseline (opt-in, off by default)**: set `TEST_CHECKER_WRITE_BASELINE=1` in the `env` block
   of `.claude/settings.json` (or the hook's environment) to let a whole-file `Write` diff against
   `git show HEAD:<path>`. Enabling it adds about **7 ms p95** to a `Write`; nothing is spawned when it
@@ -269,6 +317,12 @@ as an `Edit`.
   A file whose path matches a glob and whose rule is listed is suppressed. Editing `.test-checker.json`
   itself is reported as a **high** `config-edited` finding. The reason is the human's approval of an
   intended removal; the agent must ask for the entry instead of adding one.
+
+  A second top-level array, `"remove"`, is the human approval for the `--strip` cleanup pass. Its
+  entries have the same `{glob, rules, reason}` shape and the same git-root-only discovery, but the
+  reason must be at least **12 characters**; an entry that fails validation is dropped. A cleanup
+  candidate is removed only when its file matches the glob and its rule is listed there. See
+  [Removal policy](#removal-policy).
 - `scripts/doctor.sh` lists old bare `test-checker: allow` markers that no longer suppress.
 
 `agent-memo-test` findings are additionally summarised under a dedicated banner, pointing at the test
@@ -297,7 +351,8 @@ banner as well.
   old line.
 - **Suppression is fragment-scoped** for `Edit`/`MultiEdit` and does not apply to a whole-file
   `Write` (every line counts as added there); see above.
-- **This is a detector.** It does not fix, delete, or rewrite tests.
+- **This is a detector by default.** It does not fix or rewrite tests unless invoked explicitly with
+  `--strip`, which only removes candidates a human approved in `.test-checker.json`.
 
 ## Scope and non-goals
 

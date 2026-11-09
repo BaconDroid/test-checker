@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""Run the test-checker cleanup pass over a repository's test files.
+
+For each test file this feeds the real `test-checker` binary a whole-file `Write` payload with
+`--strip --min-confidence low`. The binary analyzes the file on disk and removes only the
+candidates a committed `.test-checker.json` `remove` entry approves; it is the only writer.
+
+The driver itself never edits files. It always exits 0 unless the arguments are invalid (exit 2),
+the same contract as `scripts/cleanup-candidates`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+SKIP_DIRS = {
+    ".git",
+    "target",
+    "node_modules",
+    "dist",
+    "build",
+    ".venv",
+    "__pycache__",
+    ".next",
+    "coverage",
+}
+TEST_NAME = re.compile(
+    r"(^test_.*\.(py|rb|js|ts|tsx|jsx)$)"
+    r"|(_test\.(py|rb|go)$)"
+    r"|(\.(test|spec)\.(js|ts|tsx|jsx)$)"
+    r"|(^test.*\.(java|kt)$)"
+    r"|(^.*Test\.(java|kt)$)",
+    re.IGNORECASE,
+)
+REMOVED = re.compile(r"^\s+removed: (.+) \[([^\]]+)\]\s*$")
+KEPT = re.compile(r"^\s+kept awaiting approval: (.+) \[([^\]]+)\]\s*$")
+
+
+def is_test_file(path: Path, root: Path) -> bool:
+    if TEST_NAME.search(path.name):
+        return True
+    parts = set(path.relative_to(root).parts[:-1])
+    return bool(parts & {"tests", "test", "__tests__", "spec"})
+
+
+def cleanup_file(binary: str, root: Path, path: Path) -> tuple[list, list, str]:
+    relative = str(path.relative_to(root))
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as error:
+        return [], [], f"{relative}: could not read: {error}"
+    payload = json.dumps(
+        {
+            "tool_name": "Write",
+            "is_test_file": True,
+            "cwd": str(root),
+            "tool_input": {"file_path": relative, "content": content},
+        }
+    ).encode()
+    proc = subprocess.run(
+        [binary, "--strip", "--min-confidence", "low"],
+        input=payload,
+        capture_output=True,
+    )
+    stderr = proc.stderr.decode("utf-8", errors="replace")
+    removed = [match.groups() for match in map(REMOVED.match, stderr.splitlines()) if match]
+    kept = [match.groups() for match in map(KEPT.match, stderr.splitlines()) if match]
+    if proc.returncode not in (0, 2):
+        return removed, kept, f"{relative}: test-checker exited {proc.returncode}\n{stderr}"
+    return removed, kept, ""
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("root", nargs="?", default=".", help="repository to clean (default: .)")
+    parser.add_argument(
+        "--binary", default="test-checker", help="test-checker binary (default: PATH)"
+    )
+    args = parser.parse_args()
+    root = Path(args.root).resolve()
+    if not root.is_dir():
+        print(f"cleanup-pass: {root} is not a directory", file=sys.stderr)
+        return 2
+
+    files: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames if name not in SKIP_DIRS]
+        for name in filenames:
+            path = Path(dirpath) / name
+            if is_test_file(path, root):
+                files.append(path)
+    files.sort()
+
+    removed_total = 0
+    kept_total = 0
+    for path in files:
+        removed, kept, error = cleanup_file(args.binary, root, path)
+        relative = path.relative_to(root)
+        for name, rule in removed:
+            print(f"{relative}: removed {name} [{rule}]")
+        for name, rule in kept:
+            print(f"{relative}: kept {name} [{rule}] (needs a remove entry)")
+        if error:
+            print(error, file=sys.stderr)
+        removed_total += len(removed)
+        kept_total += len(kept)
+
+    print(
+        f"cleanup-pass: {removed_total} removed, {kept_total} kept awaiting approval "
+        f"across {len(files)} test file(s).",
+        file=sys.stderr,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
