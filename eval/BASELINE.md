@@ -7,6 +7,18 @@ machine for the tightest gate).
 
 Every exit-code case in `baseline.py` passes (`0` pass/skip, `2` findings).
 
+## Release policy
+
+The gate is authoritative for the tagged release tree. A pull request does not re-record the
+baseline; a source commit that leaves `built_from` stale is not a reason to edit
+`eval/baseline.json`.
+
+Re-recording happens in the release block (`docs/roadmap.md`) immediately before tagging, on the
+merge commit, and the recorded tree is the one shipped.
+
+When the gate refuses for provenance, rebuild from the release tag's merge commit, re-record once,
+and commit `eval/baseline.json` in the release PR. Do not re-record on the feature branch.
+
 ## Relative perf gate
 
 Absolute p95 drifts with machine load, so the gate is the **ratio of the analysis-case p95 to the
@@ -48,7 +60,7 @@ repeated regressions.
 
 ## Re-record
 
-On an idle machine, from the commit you will test:
+In the release block, on the tag's merge commit and an idle machine:
 
 ```bash
 cargo build --release
