@@ -2,8 +2,8 @@
   "tolerance_percent": 35.0,
   "profiles": {
     "release": {
-      "ratio": 9.9874
+      "ratio": 10.7931
     }
   },
-  "built_from": "836d45f6e4e168d24be70b70ba6e021394687898"
+  "built_from": "f6ed7c2e92de85ca9dddc536fc6e8cea3a1dacf6"
 }
