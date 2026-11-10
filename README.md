@@ -39,7 +39,7 @@ never grant it to itself.
 | Detect and report weakened or superfluous tests | works today (PostToolUse, exit `2`) |
 | Prevent or undo the write | not possible from `PostToolUse`; exit `2` is feedback after the write |
 | Remove: cleanup pass over approved candidates | works today (`--strip` + a committed `.test-checker.json` `remove` entry) |
-| Plug in: one plugin combining this and comment-checker | works today (BaconDroid/opencode-comments-plugin) |
+| Plug in: one plugin combining this and comment-checker | works today (BaconDroid/opencode-guard-plugin) |
 
 ## Philosophy: scaffolding vs guard
 
