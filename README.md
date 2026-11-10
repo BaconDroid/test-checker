@@ -226,7 +226,7 @@ class name starting or ending with `Test`. A file outside every one of those pat
 admitted when the change contains at least one detected test body (for example the tests inside an
 inline `#[cfg(test)] mod tests`, or a `describe`/`it` block in a production JavaScript file). The
 semantic probe runs only after the hint and the path table both decline, so a normal test-path edit
-pays no parse; a probe that exceeds the 50 ms parse budget is a visible skip, not a block.
+pays no parse; a probe that exceeds the deterministic parse budget is a visible skip, not a block.
 
 A file whose extension maps to a grammar this build does not ship is skipped as `Non-code file`
 before the test gate, even if the payload hint says it is a test file. A path that is not a test file
@@ -349,9 +349,11 @@ banner as well.
 
 - **Parse failures never print `Success`.** If the grammar or a query cannot load, the detector
   fails: the hook exits `1` with `did not run` and nothing was checked (per the exit table above).
-  A parse that exceeds the 50 ms budget aborts that file and exits `0` with a visible
-  `Skipping: Parse budget exceeded` line - a skipped file is not proof it is clean. Neither path is
-  a silent pass, and only a genuinely clean run prints `Success`.
+  A parse that exceeds the deterministic operation budget aborts that file and exits `0` with a
+  visible `Skipping: Parse budget exceeded` line - a skipped file is not proof it is clean. The
+  budget counts parser operations rather than wall-clock time, so identical bytes always reach the
+  same analyze-or-skip decision regardless of machine load. Neither path is a silent pass, and only
+  a genuinely clean run prints `Success`.
 - **Harness edits always report.** On a sensitive harness path, an added non-blank line yields
   `harness-edited` at `medium`, so routine CI/workflow edits block until the agent justifies them.
 - **Rules are textual.** Body line rules run on comment-stripped lines against the masked view

@@ -1,8 +1,9 @@
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::ops::ControlFlow;
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::Instant;
 
-use tree_sitter::{Query, QueryCursor, StreamingIterator};
+use tree_sitter::{ParseOptions, ParseState, Parser, Query, QueryCursor, StreamingIterator};
 
 use crate::engine;
 use crate::filters::is_agent_memo_phrase;
@@ -85,9 +86,10 @@ thread_local! {
     pub(crate) static FORCE_BUDGET_EXCEEDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-// Unit-test seam that disables the shared parse budget for tests that assert on masked-view work
-// counters. A budget abort leaves the counters at zero and makes the measurement meaningless, so
-// those tests parse without the 50 ms limit; production always keeps the engine's budget.
+// Unit-test seam that disables the deterministic parse budget for tests that assert on masked-view
+// work counters. A debug build's 200 KB parse can exhaust the production operation budget, and an
+// abort leaves the counters at zero, so those tests parse unbounded; production always keeps the
+// budget.
 #[cfg(test)]
 thread_local! {
     pub(crate) static IGNORE_PARSE_BUDGET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -190,6 +192,7 @@ impl TestDetector {
         include_commented_out_tests: bool,
         include_body_tests: bool,
     ) -> DetectResult {
+        reset_parse_budget();
         if !(include_commented_out_tests || include_body_tests) {
             return Ok(Vec::new());
         }
@@ -236,6 +239,7 @@ impl TestDetector {
         content: &str,
         file_path: &str,
     ) -> Result<Vec<TestSpan>, DetectError> {
+        reset_parse_budget();
         let Some(name) = analyzable_language_for_path(file_path) else {
             return Ok(Vec::new());
         };
@@ -292,6 +296,7 @@ impl TestDetector {
         include_commented_out_tests: bool,
         include_body_tests: bool,
     ) -> DetectResult {
+        reset_parse_budget();
         if !(include_commented_out_tests || include_body_tests) {
             return Ok(Vec::new());
         }
@@ -676,17 +681,37 @@ fn runtime_by_name(name: &str) -> Result<Arc<Runtime>, DetectError> {
     Ok(runtime)
 }
 
-/// Parse `source`, classifying a failure by how long the attempt took.
+/// Progress callbacks (each covering a fixed 100 parser operations) allowed per top-level
+/// detection call.
 ///
-/// `engine::parse_cached` returns `None` both when the per-parse time budget aborts and when the
-/// parser cannot be configured, and it exposes no flag distinguishing the two. A precise abort flag
-/// would change `engine.rs` (shared byte-for-byte with `comment-checker`).
+/// The shared engine aborts on a 50 ms wall clock, so identical bytes near that boundary are
+/// sometimes analyzed and sometimes skipped depending on machine load. A budget of parser
+/// operations is a deterministic function of the input: the same bytes always consume the same
+/// number of operations and therefore always reach the same decision. 5,000 callbacks is enough
+/// for the largest file the corpus analyzes (a 385 KB Python `Write` completes in 3,331) while the
+/// same file as an `Edit` parses its two sides cumulatively (6,616) and is skipped consistently.
+const PARSE_OPERATION_BUDGET: u64 = 5_000;
+
+thread_local! {
+    static PARSE_OPERATIONS_USED: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Start a new budget window. Every public detection entry point begins a call, so one call's
+/// parses share the budget while a later call starts fresh.
+fn reset_parse_budget() {
+    PARSE_OPERATIONS_USED.with(|used| used.set(0));
+}
+
+/// Parse `source` against a deterministic operation budget.
 ///
-/// Ambiguity resolves toward skipping: only a `None` that arrives **before half** the budget is
-/// provably a fast failure, because a budget abort needs the progress callback to fire and the
-/// engine only stops once it observes `elapsed > PARSE_TIME_BUDGET`. A `None` at or after half the
-/// budget could be either a late hard failure or an abort observed on an earlier tick, so it is
-/// reported as `BudgetExceeded` (visible exit 0) instead of `Internal` (exit 1).
+/// The engine's wall-clock abort is deliberately not used here: its outcome depends on host load,
+/// so the same bytes could analyze on one run and skip on the next. `engine.rs` is byte-identical
+/// with `comment-checker` and cannot grow the abort flag this needs, so the parse is performed here
+/// with the same `tree_sitter` API and a fresh parser. A fresh parser also avoids the engine cache's
+/// resume-after-abort state, where a cancelled parse leaves the cached parser mid-document.
+///
+/// `None` with the abort flag set is a deterministic [`DetectError::BudgetExceeded`]; any other
+/// `None` is a genuine parse failure.
 fn parse_with_runtime(
     runtime: &Runtime,
     source: &[u8],
@@ -700,18 +725,47 @@ fn parse_with_runtime(
     if IGNORE_PARSE_BUDGET.with(std::cell::Cell::get) {
         return parse_unbounded(runtime, source, file_path);
     }
-    let started = Instant::now();
-    match engine::parse_cached(&runtime.name, &runtime.language, source) {
+    let used = PARSE_OPERATIONS_USED.with(Cell::get);
+    if used >= PARSE_OPERATION_BUDGET {
+        return Err(DetectError::BudgetExceeded);
+    }
+    let mut parser = Parser::new();
+    parser
+        .set_language(&runtime.language)
+        .map_err(|_| DetectError::Internal(format!("parse failed: {file_path}")))?;
+    let ticks = Cell::new(0_u64);
+    let aborted = Cell::new(false);
+    let len = source.len();
+    let tree = {
+        let mut progress = |_state: &ParseState| {
+            ticks.set(ticks.get() + 1);
+            if used + ticks.get() >= PARSE_OPERATION_BUDGET {
+                aborted.set(true);
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        };
+        let options = ParseOptions::new().progress_callback(&mut progress);
+        let mut read = |offset: usize, _: tree_sitter::Point| {
+            if offset < len {
+                &source[offset..]
+            } else {
+                Default::default()
+            }
+        };
+        parser.parse_with_options(&mut read, None, Some(options))
+    };
+    PARSE_OPERATIONS_USED.with(|used_cell| used_cell.set(used + ticks.get()));
+    match tree {
         Some(tree) => Ok(tree),
-        None if started.elapsed() >= engine::PARSE_TIME_BUDGET / 2 => {
-            Err(DetectError::BudgetExceeded)
-        }
+        None if aborted.get() => Err(DetectError::BudgetExceeded),
         None => Err(DetectError::Internal(format!("parse failed: {file_path}"))),
     }
 }
 
-/// Parse without the shared time budget, for unit tests that measure work counters. Test-only:
-/// production parsing always goes through [`engine::parse_cached`] and its 50 ms budget.
+/// Parse without any budget, for unit tests that measure work counters. Test-only: production
+/// parsing always goes through [`parse_with_runtime`] and its deterministic operation budget.
 #[cfg(test)]
 fn parse_unbounded(
     runtime: &Runtime,
@@ -784,6 +838,7 @@ fn masked_view(runtime: &Runtime, tree: &tree_sitter::Tree, content: &str) -> Op
 /// in a comment from the same text inside a string literal.
 #[must_use]
 pub(crate) fn comment_ranges(content: &str, file_path: &str) -> Vec<(usize, usize)> {
+    reset_parse_budget();
     let Some(name) = analyzable_language_for_path(file_path) else {
         return Vec::new();
     };
