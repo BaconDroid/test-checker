@@ -54,7 +54,6 @@ Misfires found by the secondary corpus (`eval/README.md`).
 | # | Item | Status |
 |:-:|:-----|:------|
 | **[cc+tc]** X1 | Marker grammar for `comment-checker` gains rule and reason validation, comment-node anchoring, and inert-if-added; `parity/vectors.json`'s `suppression-marker` case changes with it. | later |
-| **[cc+tc]** X2 | Deterministic parse-budget outcome: identical bytes must always produce the same verdict. Needs an outcome decision inside `src/detector.rs` or a shared-surface change in `src/engine.rs`. | now |
 
 ## Not adopted
 
