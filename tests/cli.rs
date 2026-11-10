@@ -79,7 +79,7 @@ fn cli_given_weakening_edit_exits_two() -> std::io::Result<()> {
 #[test]
 fn cli_given_non_test_file_exits_zero_with_skip() -> std::io::Result<()> {
     // given
-    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"src/app.py","content":"def test_sums():\n    @pytest.mark.skip\n    assert add(1, 2) == 3\n"}}"#;
+    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"src/app.py","content":"def add(a, b):\n    return a + b\n"}}"#;
 
     // when
     let output = run_checker(input, &[])?;

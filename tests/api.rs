@@ -46,9 +46,9 @@ fn check_hook_input_given_weakening_write_exits_two() {
 }
 
 #[test]
-fn check_hook_input_given_non_test_file_skips() {
-    // given
-    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"src/app.py","content":"def test_sums():\n    @pytest.mark.skip\n    assert add(1, 2) == 3\n"}}"#;
+fn check_hook_input_given_non_test_file_without_a_test_body_skips() {
+    // given: production code with no test body anywhere in the change
+    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"src/app.py","content":"def add(a, b):\n    return a + b\n"}}"#;
 
     // when
     let result = check_hook_input(input, "");
@@ -56,6 +56,49 @@ fn check_hook_input_given_non_test_file_skips() {
     // then
     assert_eq!(result.exit_code, 0);
     assert!(result.message.contains("Non-test file"));
+}
+
+#[test]
+fn check_hook_input_given_production_file_with_inline_test_is_admitted() {
+    // given: production code that carries a test body, so the path table alone would skip it
+    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"src/app.py","content":"def add(a, b):\n    return a + b\n\n\ndef test_sums():\n    @pytest.mark.skip\n    assert add(1, 2) == 3\n"}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then: the semantic probe admits the file and the skip marker is reported
+    assert_eq!(result.exit_code, 2, "{}", result.message);
+    assert!(result.message.contains("skip-added"), "{}", result.message);
+}
+
+#[test]
+fn check_hook_input_given_production_file_with_inline_describe_is_admitted() {
+    // given: a JavaScript source file with a nested describe/it block
+    let input = r#"{"tool_name":"Write","tool_input":{"file_path":"src/widget.js","content":"export function widget() { return 1; }\n\ndescribe('widget', () => {\n  it.skip('adds', () => {\n    expect(widget()).toBeDefined();\n  });\n});\n"}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then: the test body is detected and the skip marker is reported
+    assert_eq!(result.exit_code, 2, "{}", result.message);
+    assert!(result.message.contains("skip-added"), "{}", result.message);
+}
+
+#[test]
+fn check_hook_input_given_comment_only_test_file_still_uses_the_path_gate() {
+    // given: a test-path file whose only test signal is a commented-out test body
+    let input = r##"{"tool_name":"Write","tool_input":{"file_path":"tests/legacy.py","content":"# def test_sums():\n#     assert add(1, 2) == 3\n"}}"##;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then: the path admits the file, so the comment-only population is still analyzed
+    assert_eq!(result.exit_code, 2, "{}", result.message);
+    assert!(
+        result.message.contains("commented-out-test"),
+        "{}",
+        result.message
+    );
 }
 
 #[test]
@@ -72,7 +115,7 @@ fn check_hook_input_given_is_test_file_override_true_checks_nonstandard_path() {
 
 #[test]
 fn check_hook_input_given_is_test_file_override_false_skips_test_path() {
-    // given
+    // given: a test-path file the payload explicitly marks as not a test
     let input = r#"{"tool_name":"Edit","is_test_file":false,"tool_input":{"file_path":"tests/test_app.py","old_string":"assert x == 1","new_string":"assert x == x"}}"#;
 
     // when
@@ -80,6 +123,28 @@ fn check_hook_input_given_is_test_file_override_false_skips_test_path() {
 
     // then
     assert_eq!(result.exit_code, 0);
+    assert!(
+        result.message.contains("Non-test file"),
+        "{}",
+        result.message
+    );
+}
+
+#[test]
+fn check_hook_input_given_is_test_file_override_false_beats_semantic_admission() {
+    // given: a production path with a test body the semantic probe would otherwise admit
+    let input = r#"{"tool_name":"Write","is_test_file":false,"tool_input":{"file_path":"src/app.py","content":"def add(a, b):\n    return a + b\n\n\ndef test_sums():\n    @pytest.mark.skip\n    assert add(1, 2) == 3\n"}}"#;
+
+    // when
+    let result = check_hook_input(input, "");
+
+    // then: the explicit false wins over the semantic probe, exactly as it does over the path table
+    assert_eq!(result.exit_code, 0);
+    assert!(
+        result.message.contains("Non-test file"),
+        "{}",
+        result.message
+    );
 }
 
 #[test]
@@ -109,6 +174,7 @@ fn detect_findings_json_given_python_weakening_returns_finding_payload() -> serd
     let json: Value = serde_json::from_str(&detect_findings_json(
         content,
         "tests/test_app.py",
+        None,
         true,
         true,
     ))?;
@@ -124,16 +190,90 @@ fn detect_findings_json_given_python_weakening_returns_finding_payload() -> serd
 }
 
 #[test]
-fn detect_findings_json_given_non_test_path_returns_empty_array() -> serde_json::Result<()> {
-    // given
-    let content = "def test_sums():\n    @pytest.mark.skip\n    assert add(1, 2) == 3\n";
+fn detect_findings_json_given_production_path_with_inline_test_returns_findings()
+-> serde_json::Result<()> {
+    // given: a production path carrying a test body
+    let content = "def add(a, b):\n    return a + b\n\n\ndef test_sums():\n    @pytest.mark.skip\n    assert add(1, 2) == 3\n";
 
     // when
-    let json: Value =
-        serde_json::from_str(&detect_findings_json(content, "src/app.py", true, true))?;
+    let json: Value = serde_json::from_str(&detect_findings_json(
+        content,
+        "src/app.py",
+        None,
+        true,
+        true,
+    ))?;
+
+    // then: the same admission rule as the hook analyzes it
+    let findings = json.as_array().cloned().unwrap_or_default();
+    assert!(
+        findings
+            .iter()
+            .any(|finding| { finding.get("rule").and_then(Value::as_str) == Some("skip-added") })
+    );
+    Ok(())
+}
+
+#[test]
+fn detect_findings_json_given_non_test_path_without_a_test_body_returns_empty_array()
+-> serde_json::Result<()> {
+    // given: production code with no test body
+    let content = "def add(a, b):\n    return a + b\n";
+
+    // when
+    let json: Value = serde_json::from_str(&detect_findings_json(
+        content,
+        "src/app.py",
+        None,
+        true,
+        true,
+    ))?;
 
     // then
     assert_eq!(json.as_array().map(Vec::len), Some(0));
+    Ok(())
+}
+
+#[test]
+fn detect_findings_json_given_hint_false_returns_empty_array() -> serde_json::Result<()> {
+    // given: a test-path file the payload explicitly marks as not a test
+    let content = "def test_sums():\n    @pytest.mark.skip\n    assert add(1, 2) == 3\n";
+
+    // when
+    let json: Value = serde_json::from_str(&detect_findings_json(
+        content,
+        "tests/test_app.py",
+        Some(false),
+        true,
+        true,
+    ))?;
+
+    // then: the hint wins over the path, as it does in the hook gate
+    assert_eq!(json.as_array().map(Vec::len), Some(0));
+    Ok(())
+}
+
+#[test]
+fn detect_findings_json_given_hint_true_checks_nonstandard_path() -> serde_json::Result<()> {
+    // given: a non-test path the payload explicitly marks as a test
+    let content = "def test_sums():\n    @pytest.mark.skip\n    assert add(1, 2) == 3\n";
+
+    // when
+    let json: Value = serde_json::from_str(&detect_findings_json(
+        content,
+        "src/app.py",
+        Some(true),
+        true,
+        true,
+    ))?;
+
+    // then
+    let findings = json.as_array().cloned().unwrap_or_default();
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.get("rule").and_then(Value::as_str) == Some("skip-added"))
+    );
     Ok(())
 }
 
@@ -146,6 +286,7 @@ fn detect_findings_json_given_unshipped_language_returns_empty_array() -> serde_
     let json: Value = serde_json::from_str(&detect_findings_json(
         content,
         "docs/test-notes.md",
+        None,
         true,
         true,
     ))?;
@@ -164,6 +305,7 @@ fn detect_findings_json_given_body_tests_disabled_returns_empty_array() -> serde
     let json: Value = serde_json::from_str(&detect_findings_json(
         content,
         "tests/test_app.py",
+        None,
         true,
         false,
     ))?;
@@ -733,6 +875,38 @@ fn check_hook_input_given_write_with_head_baseline_reports_removed_assertion() -
     let output = run_binary(&input, true)?;
 
     // then: the diff rules ran against HEAD
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "stderr: {stderr}");
+    assert!(
+        stderr.contains("assertion-removed") || stderr.contains("gutted-test"),
+        "stderr: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+#[test]
+fn check_hook_input_given_semantically_admitted_write_uses_the_head_baseline() -> std::io::Result<()>
+{
+    // given: a committed production path that carries an inline test
+    let dir = baseline_dir("semantic-head")?;
+    std::fs::create_dir_all(dir.join("src"))?;
+    std::fs::write(
+        dir.join("src/app.py"),
+        "def add(a, b):\n    return a + b\n\n\ndef test_a():\n    assert add(1, 2) == 3\n",
+    )?;
+    git(&dir, &["init", "-q"])?;
+    git(&dir, &["add", "."])?;
+    git(&dir, &["commit", "-q", "-m", "init"])?;
+    let input = format!(
+        r#"{{"tool_name":"Write","cwd":{:?},"tool_input":{{"file_path":"src/app.py","content":"def add(a, b):\n    return a + b\n\n\ndef test_a():\n    pass\n"}}}}"#,
+        dir.to_string_lossy()
+    );
+
+    // when: the opt-in baseline is enabled
+    let output = run_binary(&input, true)?;
+
+    // then: the write baseline follows the same admission decision as the hook gate
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(2), "stderr: {stderr}");
     assert!(

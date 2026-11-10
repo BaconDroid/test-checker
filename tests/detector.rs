@@ -253,6 +253,22 @@ fn detect_edit_given_brand_new_loose_test_does_not_weaken_at_medium_or_higher() 
 }
 
 #[test]
+fn detect_given_inline_module_test_in_production_path_reports_weakening() {
+    // given: a production source file whose tests live in an inline `#[cfg(test)]` module
+    let detector = TestDetector::new();
+    let source = "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn sums() {\n        #[ignore]\n        assert_eq!(add(1, 2), 3);\n    }\n}\n";
+
+    // when
+    let findings = detector.detect(source, "src/lib.rs", true, true);
+
+    // then: the inline test body is detected, which is what lets the gate admit the file
+    assert!(
+        findings.iter().any(|finding| finding.rule == "skip-added"),
+        "{findings:?}"
+    );
+}
+
+#[test]
 fn detect_given_commented_out_test_reports_commented_out_test() {
     // given
     let detector = TestDetector::new();
