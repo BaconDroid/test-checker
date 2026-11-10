@@ -13,8 +13,8 @@ implementation.
 
 ## Module map
 `src/api.rs` owns the hook models, the test gate, `evaluate`, and the JSON API. `src/detector.rs`
-owns tree-sitter parsing (per-language `Runtime` + per-thread `Parser` caches, a ~50 ms parse
-budget), test-body capture, comment capture (host + injected), and the edit diff. `src/rules.rs`
+owns tree-sitter parsing (per-language `Runtime` + a deterministic parser-operation budget),
+test-body capture, comment capture (host + injected), and the edit diff. `src/rules.rs`
 owns the rule catalog: one classifier per rule over the added lines / diff. `src/language.rs` owns
 the extension→grammar map, the per-language test-body query, and the test-path globs.
 `src/filters.rs` owns the BDD/directive/shebang allow-lists, the `test-checker: allow` suppression

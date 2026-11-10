@@ -590,6 +590,71 @@ fn check_hook_input_given_no_file_path_skips_with_the_exact_reason() {
     );
 }
 
+/// Dense JavaScript whose parse work grows with `target_bytes`. At ~150 KB it needs ~3,000 progress
+/// ticks (well under the 5,000-tick operation budget); at ~300 KB it needs ~5,900 (over it).
+fn dense_javascript(target_bytes: usize) -> String {
+    use std::fmt::Write as _;
+
+    let mut content = String::with_capacity(target_bytes + 128);
+    let mut index = 0;
+    while content.len() < target_bytes {
+        let _ = writeln!(
+            content,
+            "it(\"case {index}\", () => {{ expect(outer(inner({index}))).toBe({index}); }});"
+        );
+        index += 1;
+    }
+    content.push_str("it.skip(\"skipped\", () => { expect(add(1, 2)).toBe(3); });\n");
+    content
+}
+
+#[test]
+fn check_hook_input_given_parse_over_operation_budget_skips_deterministically() {
+    // given: dense JavaScript above the operation budget, whose parse outcome used to depend on
+    // whether the shared wall clock happened to abort first
+    let content = dense_javascript(300_000);
+    let payload = serde_json::json!({
+        "tool_name": "Write",
+        "tool_input": { "file_path": "tests/bulk.test.js", "content": content },
+    })
+    .to_string();
+
+    // when: identical bytes go through the hook five times
+    let results: Vec<_> = (0..5).map(|_| check_hook_input(&payload, "")).collect();
+
+    // then: every run reports the same visible skip, never a finding and never a clean pass
+    for result in &results {
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.message,
+            "[test-checker] Skipping: Parse budget exceeded\n"
+        );
+    }
+}
+
+#[test]
+fn check_hook_input_given_parse_under_operation_budget_analyzes_deterministically() {
+    // given: dense JavaScript of the same shape but below the operation budget
+    let content = dense_javascript(150_000);
+    let payload = serde_json::json!({
+        "tool_name": "Write",
+        "tool_input": { "file_path": "tests/bulk.test.js", "content": content },
+    })
+    .to_string();
+
+    // when: identical bytes go through the hook five times
+    let results: Vec<_> = (0..5).map(|_| check_hook_input(&payload, "")).collect();
+
+    // then: the file is analyzed every time with the same complete result
+    let first = &results[0];
+    assert_eq!(first.exit_code, 2, "{}", first.message);
+    assert!(first.message.contains("skip-added"), "{}", first.message);
+    for result in &results[1..] {
+        assert_eq!(result.exit_code, first.exit_code);
+        assert_eq!(result.message, first.message);
+    }
+}
+
 #[test]
 fn check_hook_input_given_oversize_write_skips_as_file_too_large() {
     // given: a test file whose content exceeds the 2 MiB parse limit
