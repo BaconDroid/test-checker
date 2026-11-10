@@ -253,17 +253,17 @@ fn evaluate(
     if is_harness_path(file_path) {
         return harness_result(tool, hook_input, file_path, custom_prompt, min_confidence);
     }
-    let is_test = hook_input
-        .is_test_file
-        .unwrap_or_else(|| is_test_path(file_path));
-    if !is_test {
-        if analyzable_language_for_path(file_path).is_none() {
-            return skip("Non-code file");
-        }
-        return skip("Non-test file");
-    }
     if analyzable_language_for_path(file_path).is_none() {
         return skip("Non-code file");
+    }
+    match admit_test_file(
+        file_path,
+        hook_input.is_test_file,
+        &admission_fragments(hook_input),
+    ) {
+        TestAdmission::Admitted => {}
+        TestAdmission::NotTest => return skip("Non-test file"),
+        TestAdmission::ProbeSkipped => return skip("Parse budget exceeded"),
     }
     if exceeds_content_limit(tool, hook_input) {
         return skip("File too large");
@@ -320,6 +320,64 @@ fn evaluate(
         gate_and_format(&findings, custom_prompt, min_confidence),
         baseline_note,
     )
+}
+
+/// The test gate's admission decision.
+///
+/// The payload hint is authoritative in both directions. Without it a matching path admits the
+/// file before any parse; only a file outside every test-path pattern is parsed to look for a test
+/// body.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TestAdmission {
+    Admitted,
+    NotTest,
+    ProbeSkipped,
+}
+
+/// Decide whether a change belongs to the test gate.
+///
+/// This is the single admission rule for the hook, the write baseline, and
+/// [`detect_findings_json`]. A semantic probe runs only after the hint and path table both decline,
+/// and it stops at the first fragment with a detected test body. A parse-budget abort fails open so
+/// a large production file cannot turn into a block or an internal failure.
+fn admit_test_file(file_path: &str, hint: Option<bool>, fragments: &[&str]) -> TestAdmission {
+    match hint {
+        Some(true) => return TestAdmission::Admitted,
+        Some(false) => return TestAdmission::NotTest,
+        None => {}
+    }
+    if is_test_path(file_path) {
+        return TestAdmission::Admitted;
+    }
+    if analyzable_language_for_path(file_path).is_none() {
+        return TestAdmission::NotTest;
+    }
+    let detector = TestDetector::new();
+    for fragment in fragments.iter().filter(|fragment| !fragment.is_empty()) {
+        match detector.test_spans(fragment, file_path) {
+            Ok(spans) if !spans.is_empty() => return TestAdmission::Admitted,
+            Ok(_) => {}
+            Err(DetectError::BudgetExceeded) => return TestAdmission::ProbeSkipped,
+            Err(DetectError::Internal(_)) => return TestAdmission::NotTest,
+        }
+    }
+    TestAdmission::NotTest
+}
+
+/// Every change fragment the semantic probe may inspect: a Write's whole content, an Edit's two
+/// sides, and every `edits[]` entry. Deletion edits carry only `old_string`, so leaving it out would
+/// hide a removed inline test.
+fn admission_fragments(hook_input: &HookInput) -> Vec<&str> {
+    let mut fragments = vec![
+        hook_input.tool_input.content.as_str(),
+        hook_input.tool_input.new_string.as_str(),
+        hook_input.tool_input.old_string.as_str(),
+    ];
+    for edit in &hook_input.tool_input.edits {
+        fragments.push(edit.old_string.as_str());
+        fragments.push(edit.new_string.as_str());
+    }
+    fragments
 }
 
 /// Resolve the cleanup target against the payload `cwd`, falling back to the process cwd.
@@ -729,12 +787,17 @@ fn apply_baseline_note(outcome: HookOutcome, baseline_note: Option<&'static str>
     }
 }
 
-/// The baseline a `Write` should compare against: HEAD only for test files in supported languages.
-/// The baseline is opt-in (`TEST_CHECKER_WRITE_BASELINE`) and only runs for a test file in a
-/// supported language inside a git work tree (checked without spawning).
+/// The baseline a `Write` should compare against: HEAD only for an admitted test file in a
+/// supported language. The baseline is opt-in (`TEST_CHECKER_WRITE_BASELINE`); admission uses the
+/// hook gate's rule, including the payload hint, so an inline-test production file gets the same
+/// baseline treatment as a test-path file.
 fn write_baseline(hook_input: &HookInput, file_path: &str) -> Baseline {
     if !baseline_enabled()
-        || !is_test_path(file_path)
+        || admit_test_file(
+            file_path,
+            hook_input.is_test_file,
+            &admission_fragments(hook_input),
+        ) != TestAdmission::Admitted
         || analyzable_language_for_path(file_path).is_none()
         || hook_input.cwd.is_empty()
         || !has_git_ancestor(&hook_input.cwd)
@@ -1106,14 +1169,21 @@ pub fn check_hook_input_json(input: &str, custom_prompt: &str) -> String {
     engine::result_json(&check_hook_input(input, custom_prompt))
 }
 
+/// Findings for a whole-file content as JSON, with the payload's `is_test_file` hint.
+///
+/// Admission is [`admit_test_file`], the same decision the hook gate uses. `None` means the payload
+/// carried no hint, so the test-path table and the semantic probe decide.
 #[must_use]
 pub fn detect_findings_json(
     content: &str,
     file_path: &str,
+    is_test_file: Option<bool>,
     include_commented_out_tests: bool,
     include_body_tests: bool,
 ) -> String {
-    if analyzable_language_for_path(file_path).is_none() || !is_test_path(file_path) {
+    if analyzable_language_for_path(file_path).is_none()
+        || admit_test_file(file_path, is_test_file, &[content]) != TestAdmission::Admitted
+    {
         return "[]".to_string();
     }
     let detector = TestDetector::new();

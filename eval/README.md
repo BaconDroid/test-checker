@@ -36,6 +36,8 @@ It builds 320 payloads from the two repositories' git history (80 test-file chan
 `Write` of the committed content and an `Edit` of parent -> commit), plus a 58-file audit of every
 tracked `.rs`/`.js`/`.py` source file in both repos (`eval/baseline.py` excluded), all at
 `--min-confidence low`. It prints exit-2 and per-rule finding counts for each binary. Read-only.
+Payload selection reads the committed `eval/path-predicates.json` test-path table (generated from
+`src/language.rs`), so the audit corpus classifies files exactly as the binary does.
 
 ## Refactor-guard thresholds
 

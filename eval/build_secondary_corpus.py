@@ -42,6 +42,7 @@ import statistics
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -93,9 +94,15 @@ class RepoSpec:
     target_payloads: int
     clone_args: tuple[str, ...]
     pathspecs: tuple[str, ...]
-    test_path: re.Pattern[str]
+    test_path: Callable[[str], bool]
+    test_path_source: str
     excludes: re.Pattern[str] | None
     caveats: tuple[str, ...]
+
+
+def netbox_test_path(path: str) -> bool:
+    name = path.rsplit("/", 1)[-1]
+    return replay.is_test_path(path) and name.startswith("test_") and name.endswith(".py")
 
 
 REPOS = (
@@ -108,7 +115,8 @@ REPOS = (
         target_payloads=120,
         clone_args=(),
         pathspecs=("tests",),
-        test_path=replay.TEST_PATH,
+        test_path=replay.is_test_path,
+        test_path_source="eval/path-predicates.json",
         excludes=None,
         caveats=(
             "low diversity: tests/tests.rs supplies almost every modified test file",
@@ -124,7 +132,8 @@ REPOS = (
         target_payloads=120,
         clone_args=(),
         pathspecs=(":(glob)**/test_*.py",),
-        test_path=re.compile(r"(^|/)test_[^/]*\.py$"),
+        test_path=netbox_test_path,
+        test_path_source="eval/path-predicates.json narrowed to basename test_*.py",
         excludes=None,
         caveats=(
             "only test_*.py is sampled; tests/ helpers and non-test paths are excluded",
@@ -140,7 +149,8 @@ REPOS = (
         target_payloads=110,
         clone_args=("--filter=blob:none",),
         pathspecs=CALDIY_PATHSPECS,
-        test_path=replay.TEST_PATH,
+        test_path=replay.is_test_path,
+        test_path_source="eval/path-predicates.json",
         excludes=CALDIY_EXCLUDES,
         caveats=(
             "blobless clone; git fetches blobs on demand",
@@ -240,7 +250,7 @@ def select_repo(spec: RepoSpec, repo: Path) -> dict:
             break
         if per_commit[commit] >= MAX_FILES_PER_COMMIT:
             continue
-        if not spec.test_path.search(path):
+        if not spec.test_path(path):
             continue
         if spec.excludes is not None and spec.excludes.search(path):
             skipped["excluded_artifact"] += 1
@@ -280,7 +290,7 @@ def select_repo(spec: RepoSpec, repo: Path) -> dict:
         "selection": {
             "target_payloads": spec.target_payloads,
             "pathspecs": list(spec.pathspecs),
-            "test_path_regex": spec.test_path.pattern,
+            "test_path_source": spec.test_path_source,
             "excludes_regex": spec.excludes.pattern if spec.excludes else None,
             "order": "newest-first, modified files only",
             "max_files_per_commit": MAX_FILES_PER_COMMIT,

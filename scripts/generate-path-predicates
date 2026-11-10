@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Regenerate eval/path-predicates.json from the predicate tables in src/language.rs.
+# The same unit test without UPDATE_PATH_PREDICATES is the --check mode.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+UPDATE_PATH_PREDICATES=1 cargo test -p test-checker --lib \
+  language::tests::path_predicates_contract_matches_language_tables

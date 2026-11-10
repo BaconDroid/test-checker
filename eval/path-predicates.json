@@ -1,0 +1,67 @@
+{
+  "extension_test_name_rules": [
+    {
+      "extensions": [
+        "java",
+        "kt"
+      ],
+      "filename_prefixes": [
+        "test"
+      ],
+      "filename_suffixes": [
+        "test"
+      ]
+    }
+  ],
+  "generated_from": "src/language.rs",
+  "harness_basenames": [
+    "pytest.ini",
+    "tox.ini",
+    "conftest.py",
+    "setup.cfg",
+    "pyproject.toml",
+    "package.json",
+    "makefile",
+    "codecov.yml"
+  ],
+  "harness_filename_prefixes": [
+    "jest.config",
+    "vitest.config",
+    "karma.conf",
+    ".nycrc"
+  ],
+  "harness_path_substrings": [
+    ".github/workflows/",
+    ".gitlab-ci"
+  ],
+  "sensitive_harness_basenames": [
+    "pytest.ini",
+    "tox.ini",
+    "conftest.py"
+  ],
+  "sensitive_harness_filename_prefixes": [
+    "jest.config",
+    "vitest.config"
+  ],
+  "sensitive_harness_path_substrings": [
+    ".github/workflows/",
+    ".gitlab-ci"
+  ],
+  "test_filename_infixes": [
+    "_test.",
+    ".test.",
+    ".spec.",
+    "_spec."
+  ],
+  "test_filename_prefixes": [
+    "test_",
+    "test-"
+  ],
+  "test_path_segments": [
+    "tests",
+    "test",
+    "__tests__",
+    "spec",
+    "specs"
+  ]
+}

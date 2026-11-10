@@ -218,15 +218,29 @@ not caught: release builds use `panic = "abort"`, so a crash aborts with a non-z
 
 ## Test gate
 
-A test file is checked when its language resolves **and** the test gate matches. The payload's
-explicit `is_test_file` wins when present (including `false`), otherwise test-path globs apply: a
-path segment `tests`, `test`, `__tests__`, `spec`, or `specs`; a file starting with `test_` or
-`test-`; or a file containing `_test.`, `.test.`, `.spec.`, or `_spec.`.
+A test file is checked when its language resolves **and** the test gate admits it. The payload's
+explicit `is_test_file` wins when present in either direction. Without it, a test-path match admits
+the file: a path segment `tests`, `test`, `__tests__`, `spec`, or `specs`; a file starting with
+`test_` or `test-`; a file containing `_test.`, `.test.`, `.spec.`, or `_spec.`; or a Java/Kotlin
+class name starting or ending with `Test`. A file outside every one of those patterns is still
+admitted when the change contains at least one detected test body (for example the tests inside an
+inline `#[cfg(test)] mod tests`, or a `describe`/`it` block in a production JavaScript file). The
+semantic probe runs only after the hint and the path table both decline, so a normal test-path edit
+pays no parse; a probe that exceeds the 50 ms parse budget is a visible skip, not a block.
 
-A path that is not a test file but is a harness/config file is checked without language resolution:
+A file whose extension maps to a grammar this build does not ship is skipped as `Non-code file`
+before the test gate, even if the payload hint says it is a test file. A path that is not a test file
+but is a harness/config file is checked without language resolution:
 `pytest.ini`, `tox.ini`, `conftest.py`, `setup.cfg`, `pyproject.toml`, `package.json`, `Makefile`,
 `codecov.yml`, `jest.config.*`, `vitest.config.*`, `karma.conf.*`, `.nycrc*`,
 `.github/workflows/**`, `.gitlab-ci*`.
+
+The test-path and harness-path tables are the constants in `src/language.rs`.
+`eval/path-predicates.json` is generated from them and committed;
+`scripts/generate-path-predicates` rewrites it, and the
+`path_predicates_contract_matches_language_tables` unit test fails on any drift. The cleanup
+scripts and `eval/replay.py` read that committed JSON, so their file selection follows the binary
+instead of keeping a private regex copy.
 
 An added non-blank line of a harness file yields one `harness-edited` finding on the first such line
 (`medium` on CI workflows, `.gitlab-ci*`, `pytest.ini`, `tox.ini`, `conftest.py`, `jest.config.*`,
@@ -378,14 +392,16 @@ fail-open and a silent pass) is in [`CONCEPTS.md`](CONCEPTS.md).
 ```rust
 use test_checker::api::detect_findings_json;
 
-let json = detect_findings_json(content, "tests/test_app.py", true, true);
+let json = detect_findings_json(content, "tests/test_app.py", None, true, true);
 ```
 
 The two toggles mirror comment-checker's `include_docstrings`: `include_commented_out_tests` gates
-the `commented-out-test` signal, and `include_body_tests` gates the body-based rules. The function
-applies the language and test-path gate (returning `"[]"` for a non-test path) but **not** the
-allow-list filters or the confidence gate; callers that need hook-equivalent output must apply
-those themselves.
+the `commented-out-test` signal, and `include_body_tests` gates the body-based rules. The third
+argument is the payload's `is_test_file` hint (`None` when the caller has none); admission then
+follows the same rule as the hook, accepting a hint, a test-path match, or a detected test body in
+`content`. The function applies the language and test-admission gate (returning `"[]"` for a
+non-analyzable or non-admitted path) but **not** the allow-list filters or the confidence gate;
+callers that need hook-equivalent output must apply those themselves.
 
 ## Development
 

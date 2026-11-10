@@ -19,6 +19,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "eval"))
+from path_predicates import is_test_path
+
 SKIP_DIRS = {
     ".git",
     "target",
@@ -30,23 +33,12 @@ SKIP_DIRS = {
     ".next",
     "coverage",
 }
-TEST_NAME = re.compile(
-    r"(^test_.*\.(py|rb|js|ts|tsx|jsx)$)"
-    r"|(_test\.(py|rb|go)$)"
-    r"|(\.(test|spec)\.(js|ts|tsx|jsx)$)"
-    r"|(^test.*\.(java|kt)$)"
-    r"|(^.*Test\.(java|kt)$)",
-    re.IGNORECASE,
-)
 REMOVED = re.compile(r"^\s+removed: (.+) \[([^\]]+)\]\s*$")
 KEPT = re.compile(r"^\s+kept awaiting approval: (.+) \[([^\]]+)\]\s*$")
 
 
 def is_test_file(path: Path, root: Path) -> bool:
-    if TEST_NAME.search(path.name):
-        return True
-    parts = set(path.relative_to(root).parts[:-1])
-    return bool(parts & {"tests", "test", "__tests__", "spec"})
+    return is_test_path(path.relative_to(root))
 
 
 def cleanup_file(binary: str, root: Path, path: Path) -> tuple[list, list, str]:
