@@ -45,7 +45,6 @@ Misfires found by the secondary corpus (`eval/README.md`).
 
 | # | Item | Status |
 |:-:|:-----|:------|
-| E1 | Performance baseline records on release tags instead of per source change, so ordinary PRs do not stale the gate. | next |
 | E2 | Non-blocking mutation job (`.cargo/mutants.toml` already scopes `src/rules.rs`). | next |
 | E3 | `npm run doctor` wrapper around `scripts/doctor.sh`, plus the setup skill. | later |
 
