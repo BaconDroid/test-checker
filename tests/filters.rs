@@ -40,6 +40,43 @@ fn directive_filter_given_directive_returns_true() {
 }
 
 #[test]
+fn directive_filter_given_code_line_starting_with_a_directive_prefix_returns_false() {
+    // given: a code line whose text merely starts with a directive prefix
+    let filter = DirectiveFilter;
+    let bdd = BddFilter;
+
+    // when / then: a directive or BDD keyword is a comment justification, so neither acquits it
+    for text in [
+        "allowed = compute()",
+        "warn!(\"deprecated\")",
+        "deny_all()",
+        "allow(pytest.raises(Exception))",
+        "noqa_call()",
+        "assert",
+        "given",
+    ] {
+        assert!(!filter.should_skip(&finding(text)), "{text}");
+        assert!(!bdd.should_skip(&finding(text)), "{text}");
+    }
+}
+
+#[test]
+fn apply_filters_given_no_assertion_on_a_code_line_keeps_the_finding() {
+    // given: a `no-assertion` finding anchored on a line such as `allowed = ...` or `warn!(...)`
+    let findings = vec![
+        rule_finding("no-assertion", "allowed = compute()"),
+        rule_finding("no-assertion", "warn!(\"deprecated path\")"),
+        rule_finding("no-assertion", "deny_all()"),
+    ];
+
+    // when
+    let result = apply_filters(&findings);
+
+    // then
+    assert_eq!(result.len(), 3);
+}
+
+#[test]
 fn suppression_filter_given_valid_marker_suppresses_only_its_rule() {
     // given
     let filter = SuppressionFilter;
@@ -117,6 +154,25 @@ fn apply_filters_given_bare_marker_keeps_the_finding() {
 
     // then
     assert_eq!(result.len(), 1);
+}
+
+#[test]
+fn apply_filters_given_comment_shaped_directive_finding_keeps_its_existing_sparing() {
+    // given: real comment lines, where a directive or BDD keyword is the whole justification
+    let findings = vec![
+        finding("# noqa: F401"),
+        finding("// @ts-ignore"),
+        finding("# given"),
+        rule_finding("commented-out-test", "# assert x == 1  # noqa"),
+    ];
+
+    // when
+    let result = apply_filters(&findings);
+
+    // then: the comment lines are spared; the commented-out assertion keeps its finding because
+    // its text is not the directive itself
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].rule, "commented-out-test");
 }
 
 #[test]

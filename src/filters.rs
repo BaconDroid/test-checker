@@ -4,6 +4,7 @@ use serde::Deserialize;
 
 use crate::engine;
 use crate::models::{Confidence, Finding};
+use crate::rules::is_comment_line;
 
 const SUPPRESSION_MARKER: &str = "test-checker: allow";
 /// The committed, human-owned file that owns file-wide suppression.
@@ -57,9 +58,41 @@ fn is_known_rule(rule: &str) -> bool {
         .any(|known| known.eq_ignore_ascii_case(rule))
 }
 
+/// Rules that prove a test was weakened or the guard was tampered with. A `.test-checker.json`
+/// `allow` entry may never silence one: only an in-file marker on the line, with a reason, is the
+/// escape hatch for these.
+const INTEGRITY_RULES: &[&str] = &[
+    "skip-added",
+    "weakened-assertion",
+    "assertion-removed",
+    "test-removed",
+    "config-edited",
+    "harness-edited",
+    "gate-weakened",
+];
+
+/// Whether `rule` is one of [`INTEGRITY_RULES`] (case-insensitive).
+#[must_use]
+fn is_integrity_rule(rule: &str) -> bool {
+    INTEGRITY_RULES
+        .iter()
+        .any(|integrity| integrity.eq_ignore_ascii_case(rule))
+}
+
 /// Comment prefixes stripped before BDD/directive matching. The five are pairwise non-prefixing,
 /// so a single shared order serves both filters.
 const COMMENT_PREFIXES: &[&str] = &["#", "//", "/*", "--", "*"];
+
+/// Whether the sparing rules may consider this finding's text at all.
+///
+/// A directive or a BDD keyword is a comment justification: it may acquit a finding whose evidence
+/// is a comment (a commented-out test, a docstring), never a provable weakening on a code line. A
+/// `code` line such as `allowed = True`, `warn!(...)`, or `deny_all()` merely starts with a
+/// directive prefix; without this gate it would drop the finding. The check reuses the line
+/// classifier the rules already use, so the comment prefix table has one home.
+fn is_comment_finding(finding: &Finding) -> bool {
+    is_comment_line(&finding.text)
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BddFilter;
@@ -67,6 +100,9 @@ pub struct BddFilter;
 impl BddFilter {
     #[must_use]
     pub fn should_skip(&self, finding: &Finding) -> bool {
+        if !is_comment_finding(finding) {
+            return false;
+        }
         let normalized = engine::strip_one_prefix(finding.text.trim(), COMMENT_PREFIXES);
         engine::BDD_KEYWORDS
             .iter()
@@ -80,6 +116,9 @@ pub struct DirectiveFilter;
 impl DirectiveFilter {
     #[must_use]
     pub fn should_skip(&self, finding: &Finding) -> bool {
+        if !is_comment_finding(finding) {
+            return false;
+        }
         let mut normalized = engine::strip_one_prefix(finding.text.trim(), COMMENT_PREFIXES);
         if let Some(rest) = normalized.strip_prefix('@') {
             normalized = rest.trim();
@@ -340,11 +379,40 @@ struct ConfigEntry {
     reason: String,
 }
 
+/// Why a `.test-checker.json` `allow` rule was refused. A refused rule suppresses nothing and is
+/// reported as `allow-invalid`, so a typo cannot sit silently inert.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ConfigRuleError {
+    /// The rule id is not in [`KNOWN_RULES`].
+    UnknownRule(String),
+    /// The rule is in [`INTEGRITY_RULES`]; only an in-file marker may suppress it.
+    IntegrityRule(String),
+}
+
+impl ConfigRuleError {
+    fn describe(&self) -> String {
+        match self {
+            Self::UnknownRule(rule) => format!("unknown rule `{rule}`"),
+            Self::IntegrityRule(rule) => format!(
+                "`{rule}` is an integrity rule that config may not suppress; use an in-file `test-checker: allow {rule} -- <reason>` marker on the line instead"
+            ),
+        }
+    }
+}
+
+/// One refused `allow` entry, kept with the glob it was declared for.
+#[derive(Clone, Debug)]
+struct InvalidConfigEntry {
+    glob: String,
+    description: String,
+}
+
 /// The committed file-wide suppression config, read from `<git root>/.test-checker.json`.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SuppressionConfig {
     entries: Vec<ConfigAllow>,
     remove_entries: Vec<ConfigAllow>,
+    invalid: Vec<InvalidConfigEntry>,
     cwd: Option<String>,
 }
 
@@ -355,8 +423,9 @@ impl SuppressionConfig {
     /// The hook walks up from the payload directory to the first directory containing `.git` and
     /// reads `.test-checker.json` only there. A config anywhere else (a subdirectory, a directory
     /// above the repository, or a directory without a `.git` ancestor) is ignored. A missing,
-    /// unreadable, or malformed file yields no suppression; an entry with an empty glob, no rules,
-    /// or a missing/empty reason is dropped.
+    /// unreadable, or malformed file yields no suppression; an entry with an empty glob or no rules
+    /// is dropped. An `allow` entry needs a reason at least [`MIN_REASON_CHARS`] long, and its
+    /// unknown or integrity rule ids are dropped and reported.
     #[must_use]
     pub(crate) fn load(cwd: Option<&str>) -> Self {
         let cwd = cwd
@@ -381,6 +450,7 @@ impl SuppressionConfig {
             return Self {
                 entries: Vec::new(),
                 remove_entries: Vec::new(),
+                invalid: Vec::new(),
                 cwd: Some(root),
             };
         }
@@ -388,6 +458,7 @@ impl SuppressionConfig {
             return Self {
                 entries: Vec::new(),
                 remove_entries: Vec::new(),
+                invalid: Vec::new(),
                 cwd: Some(root),
             };
         };
@@ -395,10 +466,16 @@ impl SuppressionConfig {
             return Self {
                 entries: Vec::new(),
                 remove_entries: Vec::new(),
+                invalid: Vec::new(),
                 cwd: Some(root),
             };
         };
-        let entries = config.allow.iter().filter_map(valid_config_entry).collect();
+        let mut invalid = Vec::new();
+        let entries = config
+            .allow
+            .iter()
+            .filter_map(|entry| valid_config_entry(entry, &mut invalid))
+            .collect();
         let remove_entries = config
             .remove
             .iter()
@@ -407,6 +484,7 @@ impl SuppressionConfig {
         Self {
             entries,
             remove_entries,
+            invalid,
             cwd: Some(root),
         }
     }
@@ -421,6 +499,27 @@ impl SuppressionConfig {
     #[must_use]
     pub(crate) fn removable(&self, file_path: &str, rule: &str) -> bool {
         matches_entry(&self.remove_entries, self.cwd.as_deref(), file_path, rule)
+    }
+
+    /// The `allow-invalid` findings for every refused `allow` entry.
+    #[must_use]
+    pub(crate) fn invalid_findings(&self) -> Vec<Finding> {
+        self.invalid
+            .iter()
+            .map(|entry| {
+                Finding::new(
+                    "allow-invalid",
+                    Confidence::High,
+                    format!(
+                        "Invalid {CONFIG_FILE_NAME} allow entry for `{}`: {}; it suppresses nothing.",
+                        entry.glob, entry.description
+                    ),
+                    1,
+                    CONFIG_FILE_NAME,
+                    "",
+                )
+            })
+            .collect()
     }
 }
 
@@ -449,30 +548,70 @@ fn git_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
     }
 }
 
-fn valid_config_entry(entry: &ConfigEntry) -> Option<ConfigAllow> {
+/// The glob and non-empty rule list of an entry, or `None` when either is missing.
+fn entry_shape(entry: &ConfigEntry) -> Option<(String, Vec<String>)> {
     let glob = entry.glob.trim();
-    let reason = entry.reason.trim();
     let rules: Vec<String> = entry
         .rules
         .iter()
         .map(|rule| rule.trim().to_owned())
         .filter(|rule| !rule.is_empty())
         .collect();
-    if glob.is_empty() || rules.is_empty() || reason.is_empty() {
+    if glob.is_empty() || rules.is_empty() {
+        return None;
+    }
+    Some((glob.to_owned(), rules))
+}
+
+fn valid_config_entry(
+    entry: &ConfigEntry,
+    invalid: &mut Vec<InvalidConfigEntry>,
+) -> Option<ConfigAllow> {
+    let (glob, rules) = entry_shape(entry)?;
+    let reason = entry.reason.trim();
+    if reason.chars().count() < MIN_REASON_CHARS {
+        invalid.push(InvalidConfigEntry {
+            glob,
+            description: format!("needs a reason of at least {MIN_REASON_CHARS} characters"),
+        });
+        return None;
+    }
+    let mut accepted = Vec::with_capacity(rules.len());
+    for rule in rules {
+        match config_rule_error(&rule) {
+            Some(error) => invalid.push(InvalidConfigEntry {
+                glob: glob.clone(),
+                description: error.describe(),
+            }),
+            None => accepted.push(rule),
+        }
+    }
+    if accepted.is_empty() {
         return None;
     }
     Some(ConfigAllow {
-        glob: glob.to_owned(),
-        rules,
+        glob,
+        rules: accepted,
     })
 }
 
-/// A `remove` entry additionally needs a reason at least as long as an in-file marker's.
+/// Why `rule` may not appear in an `allow` entry, if it may not.
+fn config_rule_error(rule: &str) -> Option<ConfigRuleError> {
+    if !is_known_rule(rule) {
+        return Some(ConfigRuleError::UnknownRule(rule.to_owned()));
+    }
+    is_integrity_rule(rule).then(|| ConfigRuleError::IntegrityRule(rule.to_owned()))
+}
+
+/// A `remove` entry additionally needs a reason at least as long as an in-file marker's. Its rule
+/// ids are left unvalidated: the removal pass intersects them with its own removable set, so a
+/// stale id there can only fail to remove, never silence a finding.
 fn valid_remove_entry(entry: &ConfigEntry) -> Option<ConfigAllow> {
     if entry.reason.trim().chars().count() < MIN_REASON_CHARS {
         return None;
     }
-    valid_config_entry(entry)
+    let (glob, rules) = entry_shape(entry)?;
+    Some(ConfigAllow { glob, rules })
 }
 
 /// Whether `file_path` names the committed suppression config.

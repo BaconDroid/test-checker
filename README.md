@@ -73,8 +73,12 @@ a high `config-edited` finding.
 - **Unit**: the whole enclosing test block, including its attribute/marker lines (Rust `#[test]`,
   Python decorators, Elixir tags, Groovy decorators). Overlapping removals collapse into one span;
   every other byte of the file stays identical.
-- **Write**: the new content is built in memory and written once. On an ambiguous span or a write
-  error nothing is touched, and the message says why.
+- **Write**: the new content is built in memory, written to a sibling temp file in the same
+  directory, given the target's permissions, then renamed over the target. An interrupted or failed
+  write therefore never truncates the target: it still holds the original bytes. On platforms that
+  cannot rename over an existing file the rename is retried after unlinking, and the original is
+  restored if that fails too. An ambiguous span or a write error changes nothing, and the message
+  says why.
 - **Output**: the normal report is followed by a cleanup summary listing removed items
   (`test name [rule]`) and candidates kept awaiting approval, plus the `.test-checker.json`
   `remove` pointer. Exit codes are unchanged: `0` clean, `2` findings, `1` did not run.
@@ -311,6 +315,10 @@ as an `Edit`.
   finding's line is exactly that keyword after a comment marker.
 - **Directives** (`noqa`, `ts-ignore`, `eslint-disable`, `clippy:`, `allow`, …) are allowed by
   prefix match.
+- **Neither acquits a code line.** Both rules apply only when the finding's text is a comment line,
+  using the classifier the line rules already use. `allowed = compute()`, `warn!(…)`, and
+  `deny_all()` merely start with a directive prefix, so their findings (including `no-assertion`)
+  stand. A directive is a comment justification, not an escape hatch for a weakening on code.
 - **Shebang lines** (`#!…`) are allowed.
 - **Scoped opt-out marker.** `test-checker: allow <rule> -- <reason>` suppresses that rule's finding
   on the marker's line or the line above. The marker is valid only when `<rule>` is a known rule id and
@@ -323,14 +331,23 @@ as an `Edit`.
   to `Edit`/`MultiEdit` fragments (above).
 - **File-wide suppression.** Commit a `.test-checker.json` at the repo root. The hook walks up from
   the payload `cwd` to the first directory containing `.git` and reads the config only there, so a
-  config in a subdirectory is ignored. Only entries with a glob, at least one rule id, and a non-empty
-  reason suppress anything:
+  config in a subdirectory is ignored. Only entries with a glob, at least one rule id, and a reason
+  of at least **12 characters** suppress anything - the same reason minimum an in-file marker needs:
 
   ```json
-  { "allow": [ { "glob": "tests/**", "rules": ["skip-added"], "reason": "legacy suite, tracked in #123" } ] }
+  { "allow": [ { "glob": "tests/**", "rules": ["duplicate-test"], "reason": "legacy suite, tracked in #123" } ] }
   ```
 
-  A file whose path matches a glob and whose rule is listed is suppressed. Editing `.test-checker.json`
+  A file whose path matches a glob and whose rule is listed is suppressed. Two kinds of rule id are
+  refused and reported as `allow-invalid`, so a typo cannot sit silently inert and an integrity rule
+  cannot be waved away in config:
+
+  - an **unknown** rule id (any id outside the catalog in `src/filters.rs`);
+  - an **integrity** rule: `skip-added`, `weakened-assertion`, `assertion-removed`, `test-removed`,
+    `config-edited`, `harness-edited`, `gate-weakened`. Only an in-file
+    `test-checker: allow <rule> -- <reason>` marker on the line may suppress one of these.
+
+  A refused id is dropped while the entry's other valid ids stay in force. Editing `.test-checker.json`
   itself is reported as a **high** `config-edited` finding. The reason is the human's approval of an
   intended removal; the agent must ask for the entry instead of adding one.
 
