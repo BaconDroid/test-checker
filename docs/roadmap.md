@@ -23,7 +23,6 @@ Misfires found by the secondary corpus (`eval/README.md`).
 
 | # | Item | Status |
 |:-:|:-----|:------|
-| B1 | Atomic write for `--strip`: sibling temp file, keep mode, rename, restore on failure. An interrupted run currently truncates the target test file. | now |
 | B2 | Drop the blank line a removed span leaves behind without touching pre-existing blank lines. | later |
 
 ## Block C - Configuration

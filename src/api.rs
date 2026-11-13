@@ -633,7 +633,7 @@ fn strip_report(
             );
         };
         if updated != content
-            && let Err(error) = std::fs::write(target, updated.as_bytes())
+            && let Err(error) = write_atomic(target, content, updated.as_bytes())
         {
             return HookOutcome::Failed(format!(
                 "cleanup pass could not write {}: {error}",
@@ -712,6 +712,55 @@ fn display_name(name: &str) -> String {
         "(unnamed)".to_owned()
     } else {
         name.trim().to_owned()
+    }
+}
+
+/// Replace `path` in one pass, keeping the old bytes intact until the new file is complete.
+///
+/// The new content goes to a sibling temporary first, so an interrupted or failed write never
+/// truncates the target. The target's permissions are copied to the temporary, and the rename is
+/// retried after removing the target on platforms that cannot rename over an existing file; if
+/// that second rename also fails, `original` is restored.
+fn write_atomic(path: &Path, original: &str, bytes: &[u8]) -> std::io::Result<()> {
+    let permissions = std::fs::metadata(path)
+        .ok()
+        .map(|metadata| metadata.permissions());
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map_or_else(|| Path::new("."), |parent| parent);
+    let name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("target has no file name"))?;
+    let temporary = parent.join(format!(
+        ".{}.{}.strip.tmp",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    if let Err(error) = std::fs::write(&temporary, bytes) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    if let Some(permissions) = permissions
+        && let Err(error) = std::fs::set_permissions(&temporary, permissions)
+    {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    match std::fs::rename(&temporary, path) {
+        Ok(()) => Ok(()),
+        Err(first_error) => {
+            if path.exists() && std::fs::remove_file(path).is_ok() {
+                if let Err(second_error) = std::fs::rename(&temporary, path) {
+                    let _ = std::fs::write(path, original);
+                    let _ = std::fs::remove_file(&temporary);
+                    return Err(second_error);
+                }
+                return Ok(());
+            }
+            let _ = std::fs::remove_file(&temporary);
+            Err(first_error)
+        }
     }
 }
 
@@ -1253,8 +1302,64 @@ fn skip(reason: &str) -> HookOutcome {
 mod tests {
     use std::sync::{Mutex, MutexGuard, PoisonError};
 
-    use super::check_hook_input;
+    use super::{check_hook_input, write_atomic};
     use crate::detector::{FORCE_BUDGET_EXCEEDED, FORCE_INTERNAL_FAILURE};
+
+    /// A unique directory for the atomic-write tests, removed by the caller.
+    fn scratch_dir(label: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let path = std::env::temp_dir().join(format!(
+            "test-checker-{label}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).expect("scratch directory");
+        path
+    }
+
+    #[test]
+    fn write_atomic_replaces_the_content() -> std::io::Result<()> {
+        // given: a target file with the old content
+        let dir = scratch_dir("atomic-ok");
+        let target = dir.join("test_app.py");
+        std::fs::write(&target, "old\n")?;
+
+        // when
+        write_atomic(&target, "old\n", b"new\n")?;
+
+        // then: the new bytes are in place and no temporary sibling is left behind
+        assert_eq!(std::fs::read_to_string(&target)?, "new\n");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)?
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".strip.tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftover temporaries: {leftovers:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn write_atomic_given_a_failing_temporary_write_leaves_the_original_byte_identical()
+    -> std::io::Result<()> {
+        // given: a directory squatting on the deterministic sibling temp path, so the temp write
+        // cannot succeed. A read-only parent would not fail when the tests run as root.
+        let dir = scratch_dir("atomic-fail");
+        let target = dir.join("test_app.py");
+        let original = "def test_a():\n    assert x == 1\n";
+        std::fs::write(&target, original)?;
+        let temporary = dir.join(format!(".test_app.py.{}.strip.tmp", std::process::id()));
+        std::fs::create_dir_all(&temporary)?;
+
+        // when
+        let error = write_atomic(&target, original, b"truncated").unwrap_err();
+
+        // then: the write failed and the target still holds the original bytes
+        assert_ne!(error.to_string(), "");
+        assert_eq!(std::fs::read_to_string(&target)?, original);
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
 
     /// The seams are process-wide, so the tests that flip them must not run concurrently: one test
     /// enabling a seam would otherwise force the other test's check down that same path.

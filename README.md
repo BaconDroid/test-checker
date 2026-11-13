@@ -73,8 +73,12 @@ a high `config-edited` finding.
 - **Unit**: the whole enclosing test block, including its attribute/marker lines (Rust `#[test]`,
   Python decorators, Elixir tags, Groovy decorators). Overlapping removals collapse into one span;
   every other byte of the file stays identical.
-- **Write**: the new content is built in memory and written once. On an ambiguous span or a write
-  error nothing is touched, and the message says why.
+- **Write**: the new content is built in memory, written to a sibling temp file in the same
+  directory, given the target's permissions, then renamed over the target. An interrupted or failed
+  write therefore never truncates the target: it still holds the original bytes. On platforms that
+  cannot rename over an existing file the rename is retried after unlinking, and the original is
+  restored if that fails too. An ambiguous span or a write error changes nothing, and the message
+  says why.
 - **Output**: the normal report is followed by a cleanup summary listing removed items
   (`test name [rule]`) and candidates kept awaiting approval, plus the `.test-checker.json`
   `remove` pointer. Exit codes are unchanged: `0` clean, `2` findings, `1` did not run.
