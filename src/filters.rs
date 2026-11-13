@@ -4,6 +4,7 @@ use serde::Deserialize;
 
 use crate::engine;
 use crate::models::{Confidence, Finding};
+use crate::rules::is_comment_line;
 
 const SUPPRESSION_MARKER: &str = "test-checker: allow";
 /// The committed, human-owned file that owns file-wide suppression.
@@ -61,12 +62,26 @@ fn is_known_rule(rule: &str) -> bool {
 /// so a single shared order serves both filters.
 const COMMENT_PREFIXES: &[&str] = &["#", "//", "/*", "--", "*"];
 
+/// Whether the sparing rules may consider this finding's text at all.
+///
+/// A directive or a BDD keyword is a comment justification: it may acquit a finding whose evidence
+/// is a comment (a commented-out test, a docstring), never a provable weakening on a code line. A
+/// `code` line such as `allowed = True`, `warn!(...)`, or `deny_all()` merely starts with a
+/// directive prefix; without this gate it would drop the finding. The check reuses the line
+/// classifier the rules already use, so the comment prefix table has one home.
+fn is_comment_finding(finding: &Finding) -> bool {
+    is_comment_line(&finding.text)
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BddFilter;
 
 impl BddFilter {
     #[must_use]
     pub fn should_skip(&self, finding: &Finding) -> bool {
+        if !is_comment_finding(finding) {
+            return false;
+        }
         let normalized = engine::strip_one_prefix(finding.text.trim(), COMMENT_PREFIXES);
         engine::BDD_KEYWORDS
             .iter()
@@ -80,6 +95,9 @@ pub struct DirectiveFilter;
 impl DirectiveFilter {
     #[must_use]
     pub fn should_skip(&self, finding: &Finding) -> bool {
+        if !is_comment_finding(finding) {
+            return false;
+        }
         let mut normalized = engine::strip_one_prefix(finding.text.trim(), COMMENT_PREFIXES);
         if let Some(rest) = normalized.strip_prefix('@') {
             normalized = rest.trim();

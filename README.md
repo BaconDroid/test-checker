@@ -311,6 +311,10 @@ as an `Edit`.
   finding's line is exactly that keyword after a comment marker.
 - **Directives** (`noqa`, `ts-ignore`, `eslint-disable`, `clippy:`, `allow`, …) are allowed by
   prefix match.
+- **Neither acquits a code line.** Both rules apply only when the finding's text is a comment line,
+  using the classifier the line rules already use. `allowed = compute()`, `warn!(…)`, and
+  `deny_all()` merely start with a directive prefix, so their findings (including `no-assertion`)
+  stand. A directive is a comment justification, not an escape hatch for a weakening on code.
 - **Shebang lines** (`#!…`) are allowed.
 - **Scoped opt-out marker.** `test-checker: allow <rule> -- <reason>` suppresses that rule's finding
   on the marker's line or the line above. The marker is valid only when `<rule>` is a known rule id and
