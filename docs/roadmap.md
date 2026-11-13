@@ -15,7 +15,6 @@ Misfires found by the secondary corpus (`eval/README.md`).
 
 | # | Item | Status |
 |:-:|:-----|:------|
-| A2 | Validate `.test-checker.json` `allow` entries: unknown rule ids report like `allow-invalid` instead of staying silently inert, and the allowed set excludes integrity rules (`skip-added`, `weakened-assertion`, `assertion-removed`, `test-removed`, `config-edited`, `harness-edited`, `gate-weakened`). | now |
 | A3 | Publish cited evidence in the verdict: `duplicate-test` reports the counterpart line it already computes, `test-removed` / `assertion-removed` report the removed subject and its old line instead of line 1 with an empty text. | next |
 | A4 | Report withheld findings: exit 0 for a genuinely clean write, a distinct message when findings were filtered by the confidence gate or suppressed by config. | next |
 | A5 | Matcher coverage: add testing-library matchers as the corpus surfaces them; the JS matcher set is gated per language (see `src/rules.rs`). | later |

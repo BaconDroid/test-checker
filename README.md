@@ -327,14 +327,23 @@ as an `Edit`.
   to `Edit`/`MultiEdit` fragments (above).
 - **File-wide suppression.** Commit a `.test-checker.json` at the repo root. The hook walks up from
   the payload `cwd` to the first directory containing `.git` and reads the config only there, so a
-  config in a subdirectory is ignored. Only entries with a glob, at least one rule id, and a non-empty
-  reason suppress anything:
+  config in a subdirectory is ignored. Only entries with a glob, at least one rule id, and a reason
+  of at least **12 characters** suppress anything - the same reason minimum an in-file marker needs:
 
   ```json
-  { "allow": [ { "glob": "tests/**", "rules": ["skip-added"], "reason": "legacy suite, tracked in #123" } ] }
+  { "allow": [ { "glob": "tests/**", "rules": ["duplicate-test"], "reason": "legacy suite, tracked in #123" } ] }
   ```
 
-  A file whose path matches a glob and whose rule is listed is suppressed. Editing `.test-checker.json`
+  A file whose path matches a glob and whose rule is listed is suppressed. Two kinds of rule id are
+  refused and reported as `allow-invalid`, so a typo cannot sit silently inert and an integrity rule
+  cannot be waved away in config:
+
+  - an **unknown** rule id (any id outside the catalog in `src/filters.rs`);
+  - an **integrity** rule: `skip-added`, `weakened-assertion`, `assertion-removed`, `test-removed`,
+    `config-edited`, `harness-edited`, `gate-weakened`. Only an in-file
+    `test-checker: allow <rule> -- <reason>` marker on the line may suppress one of these.
+
+  A refused id is dropped while the entry's other valid ids stay in force. Editing `.test-checker.json`
   itself is reported as a **high** `config-edited` finding. The reason is the human's approval of an
   intended removal; the agent must ask for the entry instead of adding one.
 

@@ -305,6 +305,7 @@ fn evaluate(
 
     findings.retain(|finding| !suppression_config.suppresses(file_path, &finding.rule));
     findings.extend(invalid_markers);
+    findings.extend(suppression_config.invalid_findings());
     if marker_added {
         findings.push(Finding::new(
             "allow-added",
@@ -499,6 +500,7 @@ fn evaluate_strip(
     };
     findings.retain(|finding| !suppression_config.suppresses(file_path, &finding.rule));
     findings.extend(invalid_markers);
+    findings.extend(suppression_config.invalid_findings());
     if marker_added {
         findings.push(Finding::new(
             "allow-added",
@@ -548,6 +550,7 @@ fn analyze_whole_file(
     let invalid_markers = index.invalid_findings(file_path);
     findings.retain(|finding| !suppression_config.suppresses(match_path, &finding.rule));
     findings.extend(invalid_markers);
+    findings.extend(suppression_config.invalid_findings());
     if has_marker_in_comments(content, None, &comment_ranges(content, file_path)) {
         findings.push(Finding::new(
             "allow-added",

@@ -1191,9 +1191,9 @@ fn check_hook_input_given_committed_config_suppresses_the_listed_rule() -> std::
     let repo = temp_repo("config-suppresses")?;
     std::fs::write(
         repo.join(".test-checker.json"),
-        r#"{"allow":[{"glob":"tests/**","rules":["skip-added"],"reason":"legacy suite migration tracked in #42"}]}"#,
+        r#"{"allow":[{"glob":"tests/**","rules":["no-assertion"],"reason":"legacy suite migration tracked in #42"}]}"#,
     )?;
-    let content = "def test_a():\n    @pytest.mark.skip\n    assert x == 1\n";
+    let content = "def test_a():\n    compute()\n";
 
     // when
     let result = check_hook_input(&write_payload(&repo, "tests/test_app.py", content), "");
@@ -1211,7 +1211,72 @@ fn check_hook_input_given_config_entry_without_a_reason_suppresses_nothing() -> 
     let repo = temp_repo("config-no-reason")?;
     std::fs::write(
         repo.join(".test-checker.json"),
-        r#"{"allow":[{"glob":"tests/**","rules":["skip-added"],"reason":""}]}"#,
+        r#"{"allow":[{"glob":"tests/**","rules":["no-assertion"],"reason":""}]}"#,
+    )?;
+    let content = "def test_a():\n    compute()\n";
+
+    // when
+    let result = check_hook_input(&write_payload(&repo, "tests/test_app.py", content), "");
+    let _ = std::fs::remove_dir_all(&repo);
+
+    // then: the entry is refused and reported, so the rule still blocks
+    assert_eq!(result.exit_code, 2);
+    assert!(
+        result.message.contains("no-assertion"),
+        "{}",
+        result.message
+    );
+    assert!(
+        result.message.contains("allow-invalid"),
+        "{}",
+        result.message
+    );
+    Ok(())
+}
+
+#[test]
+fn check_hook_input_given_config_allow_names_an_unknown_rule_reports_and_suppresses_nothing()
+-> std::io::Result<()> {
+    // given: a typo in a rule id would otherwise be silently inert
+    let repo = temp_repo("config-unknown-rule")?;
+    std::fs::write(
+        repo.join(".test-checker.json"),
+        r#"{"allow":[{"glob":"tests/**","rules":["no-assertions"],"reason":"legacy suite migration tracked in #42"}]}"#,
+    )?;
+    let content = "def test_a():\n    compute()\n";
+
+    // when
+    let result = check_hook_input(&write_payload(&repo, "tests/test_app.py", content), "");
+    let _ = std::fs::remove_dir_all(&repo);
+
+    // then: the typo is reported and suppresses nothing
+    assert_eq!(result.exit_code, 2);
+    assert!(
+        result.message.contains("allow-invalid"),
+        "{}",
+        result.message
+    );
+    assert!(
+        result.message.contains("unknown rule `no-assertions`"),
+        "{}",
+        result.message
+    );
+    assert!(
+        result.message.contains("no-assertion"),
+        "{}",
+        result.message
+    );
+    Ok(())
+}
+
+#[test]
+fn check_hook_input_given_config_allow_names_an_integrity_rule_reports_and_suppresses_nothing()
+-> std::io::Result<()> {
+    // given: an allow entry naming an integrity rule, on the file that triggers it
+    let repo = temp_repo("config-integrity-rule")?;
+    std::fs::write(
+        repo.join(".test-checker.json"),
+        r#"{"allow":[{"glob":"tests/**","rules":["skip-added"],"reason":"legacy suite migration tracked in #42"}]}"#,
     )?;
     let content = "def test_a():\n    @pytest.mark.skip\n    assert x == 1\n";
 
@@ -1219,9 +1284,89 @@ fn check_hook_input_given_config_entry_without_a_reason_suppresses_nothing() -> 
     let result = check_hook_input(&write_payload(&repo, "tests/test_app.py", content), "");
     let _ = std::fs::remove_dir_all(&repo);
 
+    // then: the entry is refused with a visible reason and the skip still blocks
+    assert_eq!(result.exit_code, 2);
+    assert!(
+        result.message.contains("allow-invalid"),
+        "{}",
+        result.message
+    );
+    assert!(
+        result.message.contains("integrity rule"),
+        "{}",
+        result.message
+    );
+    assert!(result.message.contains("skip-added"), "{}", result.message);
+    Ok(())
+}
+
+#[test]
+fn check_hook_input_given_config_allow_entry_with_a_short_reason_reports_and_suppresses_nothing()
+-> std::io::Result<()> {
+    // given: a reason below the 12-character marker minimum
+    let repo = temp_repo("config-short-reason")?;
+    std::fs::write(
+        repo.join(".test-checker.json"),
+        r#"{"allow":[{"glob":"tests/**","rules":["no-assertion"],"reason":"too short"}]}"#,
+    )?;
+    let content = "def test_a():\n    compute()\n";
+
+    // when
+    let result = check_hook_input(&write_payload(&repo, "tests/test_app.py", content), "");
+    let _ = std::fs::remove_dir_all(&repo);
+
     // then
     assert_eq!(result.exit_code, 2);
-    assert!(result.message.contains("skip-added"), "{}", result.message);
+    assert!(
+        result.message.contains("allow-invalid"),
+        "{}",
+        result.message
+    );
+    assert!(
+        result.message.contains("at least 12 characters"),
+        "{}",
+        result.message
+    );
+    assert!(
+        result.message.contains("no-assertion"),
+        "{}",
+        result.message
+    );
+    Ok(())
+}
+
+#[test]
+fn check_hook_input_given_config_allow_lists_a_mix_of_valid_and_refused_rules_keeps_the_valid_one()
+-> std::io::Result<()> {
+    // given: one entry listing a valid rule and an integrity rule for the same glob
+    let repo = temp_repo("config-mixed-rules")?;
+    std::fs::write(
+        repo.join(".test-checker.json"),
+        r#"{"allow":[{"glob":"tests/**","rules":["no-assertion","test-removed"],"reason":"legacy suite migration tracked in #42"}]}"#,
+    )?;
+    let content = "def test_a():\n    compute()\n";
+
+    // when
+    let result = check_hook_input(&write_payload(&repo, "tests/test_app.py", content), "");
+    let _ = std::fs::remove_dir_all(&repo);
+
+    // then: the valid rule still suppresses, and the integrity rule is reported as refused
+    assert_eq!(result.exit_code, 2, "{}", result.message);
+    assert!(
+        !result.message.contains("no-assertion"),
+        "{}",
+        result.message
+    );
+    assert!(
+        result.message.contains("allow-invalid"),
+        "{}",
+        result.message
+    );
+    assert!(
+        result.message.contains("test-removed"),
+        "{}",
+        result.message
+    );
     Ok(())
 }
 
@@ -1319,7 +1464,7 @@ fn check_hook_input_given_write_of_api_test_file_reports_no_allow_findings() -> 
     let repo = temp_repo("api-file")?;
     std::fs::write(
         repo.join(".test-checker.json"),
-        r#"{"allow":[{"glob":"tests/api.rs","rules":["skip-added","source-grep-test"],"reason":"payload text is string data in this file"}]}"#,
+        r#"{"allow":[{"glob":"tests/api.rs","rules":["source-grep-test"],"reason":"payload text is string data in this file"}]}"#,
     )?;
 
     // when: a default Write of the whole file
@@ -1403,9 +1548,9 @@ fn check_hook_input_given_config_at_git_root_found_from_subdirectory_cwd() -> st
     std::fs::create_dir_all(repo.join("tests/nested"))?;
     std::fs::write(
         repo.join(".test-checker.json"),
-        r#"{"allow":[{"glob":"tests/**","rules":["skip-added"],"reason":"legacy suite migration tracked in #42"}]}"#,
+        r#"{"allow":[{"glob":"tests/**","rules":["no-assertion"],"reason":"legacy suite migration tracked in #42"}]}"#,
     )?;
-    let content = "def test_a():\n    @pytest.mark.skip\n    assert x == 1\n";
+    let content = "def test_a():\n    compute()\n";
 
     // when: the cwd is below the root that owns the config
     let result = check_hook_input(
@@ -1500,12 +1645,12 @@ fn check_hook_input_given_git_root_without_a_config_file_makes_only_stats() -> s
     Ok(())
 }
 
-/// A config entry that lists only the two diff rules and whose reason is long enough.
+/// A config entry that lists a diff-aware rule and whose reason is long enough.
 const fn diff_rule_config() -> &'static str {
     r#"{"allow":[
-        {"glob":"npm/test-checker/*.test.js","rules":["assertion-removed","test-removed"],"reason":"payload fixtures intentionally drop assertions"},
-        {"glob":"tests/detector.rs","rules":["assertion-removed","test-removed"],"reason":"fixture text embeds assertion samples"},
-        {"glob":"tests/output.rs","rules":["assertion-removed","test-removed"],"reason":"fixture text embeds assertion samples"}
+        {"glob":"npm/test-checker/*.test.js","rules":["conditional-assertion"],"reason":"payload fixtures intentionally guard assertions"},
+        {"glob":"tests/detector.rs","rules":["conditional-assertion"],"reason":"fixture text embeds guarded assertion samples"},
+        {"glob":"tests/output.rs","rules":["conditional-assertion"],"reason":"fixture text embeds guarded assertion samples"}
     ]}"#
 }
 
@@ -1521,24 +1666,24 @@ fn edit_payload(cwd: &std::path::Path, file_path: &str, old: &str, new: &str) ->
 #[test]
 fn check_hook_input_given_config_diff_rules_suppress_the_three_known_shapes() -> std::io::Result<()>
 {
-    // given: the three files whose fixture text makes the diff rules fire on a benign edit
+    // given: the three files whose fixture text makes the guarded-assertion rule fire on a benign edit
     let repo = temp_repo("diff-rule-suppression")?;
     std::fs::write(repo.join(".test-checker.json"), diff_rule_config())?;
     let cases = [
         (
             "npm/test-checker/index.test.js",
-            "it('a', () => {\n  assert.equal(add(1, 2), 3);\n  assert.equal(add(2, 2), 4);\n});\n",
-            "it('a', () => {\n  assert.equal(add(1, 2), 3);\n});\n",
+            "it('a', () => {\n  expect(add(1, 2)).toBe(3);\n});\n",
+            "it('a', () => {\n  if (flag) {\n    expect(add(1, 2)).toBe(3);\n  }\n});\n",
         ),
         (
             "tests/detector.rs",
-            "#[test]\nfn a() {\n    assert_eq!(add(1, 2), 3);\n    assert_eq!(add(2, 2), 4);\n}\n",
             "#[test]\nfn a() {\n    assert_eq!(add(1, 2), 3);\n}\n",
+            "#[test]\nfn a() {\n    if flag {\n        assert_eq!(add(1, 2), 3);\n    }\n}\n",
         ),
         (
             "tests/output.rs",
-            "#[test]\nfn a() {\n    assert_eq!(add(1, 2), 3);\n    assert_eq!(add(2, 2), 4);\n}\n",
             "#[test]\nfn a() {\n    assert_eq!(add(1, 2), 3);\n}\n",
+            "#[test]\nfn a() {\n    if flag {\n        assert_eq!(add(1, 2), 3);\n    }\n}\n",
         ),
     ];
 
@@ -1546,7 +1691,7 @@ fn check_hook_input_given_config_diff_rules_suppress_the_three_known_shapes() ->
         // when
         let result = check_hook_input(&edit_payload(&repo, path, old, new), "");
 
-        // then: the committed reason suppresses the diff rules for this edit
+        // then: the committed reason suppresses the diff rule for this edit
         assert_eq!(result.exit_code, 0, "{path}: {}", result.message);
     }
     let _ = std::fs::remove_dir_all(&repo);
