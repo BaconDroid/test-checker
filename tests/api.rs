@@ -1758,6 +1758,13 @@ fn check_hook_input_given_removed_test_asks_the_human_for_a_config_entry() {
         "{}",
         result.message
     );
+    assert!(
+        result
+            .message
+            .contains("`test_a` (at line 1 before this edit)"),
+        "{}",
+        result.message
+    );
 }
 
 #[test]

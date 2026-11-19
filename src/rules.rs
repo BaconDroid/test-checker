@@ -2342,10 +2342,11 @@ pub fn diff_findings_on_views(
         .iter()
         .map(|assertion| assertion.subject.as_str())
         .collect();
-    let removed = old_assertions
+    let removed_assertions: Vec<&Assertion> = old_assertions
         .iter()
         .filter(|assertion| !new_subjects.contains(assertion.subject.as_str()))
-        .count();
+        .collect();
+    let removed = removed_assertions.len();
     if new_assertions.is_empty() {
         if !old_assertions.is_empty() {
             findings.push(Finding::new(
@@ -2358,15 +2359,18 @@ pub fn diff_findings_on_views(
             ));
         }
     } else if removed > 0 {
+        // The removed assertion is the evidence: cite the subject that lost its assertion and the
+        // line it used to sit on, so the verdict can be checked against the file before the edit.
+        let cited = cited_removals(&removed_assertions);
         findings.push(Finding::new(
             "assertion-removed",
             Confidence::High,
             format!(
-                "{removed} existing assertion subject(s) were removed without a replacement. STOP and ask the human to add a .test-checker.json entry with a reason if the removal is intended."
+                "{removed} existing assertion subject(s) were removed without a replacement: {cited}. STOP and ask the human to add a .test-checker.json entry with a reason if the removal is intended."
             ),
-            1,
+            removed_assertions[0].line,
             file_path,
-            "",
+            removed_assertions[0].subject.as_str(),
         ));
     }
 
@@ -2409,29 +2413,64 @@ pub fn diff_findings_on_views(
 /// operand of a language-level `assert`); `predicate` names the check. Whitespace inside the
 /// subject is collapsed so a moved or reindented assertion keeps the same identity. This does not
 /// cover renamed variables, expressions re-wrapped across lines, or table-driven loops: those can
-/// still read as a removal (the table fixture deliberately does).
+/// still read as a removal (the table fixture deliberately does). `line` is the 1-based line the
+/// assertion sits on, so a removal can cite where the assertion used to be.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Assertion {
     subject: String,
     predicate: String,
+    line: usize,
 }
 
 fn assertion_keys(lines: &[&str], original: &[&str]) -> Vec<Assertion> {
     lines
         .iter()
         .zip(original)
-        .filter_map(|(view_line, original_line)| assertion_of_line(view_line, original_line))
+        .enumerate()
+        .filter_map(|(index, (view_line, original_line))| {
+            assertion_of_line(index + 1, view_line, original_line)
+        })
         .collect()
 }
 
-fn assertion_of_line(view_line: &str, original_line: &str) -> Option<Assertion> {
+/// How many removed assertion subjects a single verdict cites before it summarizes the rest.
+const MAX_CITED_REMOVALS: usize = 5;
+
+/// The removed assertion subjects, each with the line it used to sit on.
+///
+/// Two assertions on one subject are one removed subject, so the citation lists the subject once,
+/// at the line of its first occurrence.
+fn cited_removals(removed: &[&Assertion]) -> String {
+    let mut cited: Vec<&Assertion> = Vec::new();
+    for assertion in removed {
+        if !cited.iter().any(|seen| seen.subject == assertion.subject) {
+            cited.push(assertion);
+        }
+    }
+    let mut text = cited
+        .iter()
+        .take(MAX_CITED_REMOVALS)
+        .map(|assertion| format!("`{}` (at line {})", assertion.subject, assertion.line))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if cited.len() > MAX_CITED_REMOVALS {
+        text = format!("{text}, and {} more", cited.len() - MAX_CITED_REMOVALS);
+    }
+    text
+}
+
+fn assertion_of_line(line: usize, view_line: &str, original_line: &str) -> Option<Assertion> {
     if !is_assertion_code_line(view_line) || view_line.len() != original_line.len() {
         return None;
     }
     let (subject, predicate) = assertion_call_subject(view_line, original_line)
         .or_else(|| python_assert_subject(view_line, original_line))?;
     let subject = normalize_assertion_subject(&subject);
-    (!subject.is_empty()).then_some(Assertion { subject, predicate })
+    (!subject.is_empty()).then_some(Assertion {
+        subject,
+        predicate,
+        line,
+    })
 }
 
 /// A call-shaped assertion: testify/unittest/JUnit/`assert_eq!`/`expect(...).toBe(...)`.
@@ -3168,6 +3207,29 @@ mod tests {
                 .any(|finding| finding.rule == "assertion-removed")
         );
         assert!(!findings.iter().any(|finding| finding.rule == "gutted-test"));
+    }
+
+    #[test]
+    fn diff_findings_given_removed_assertion_cites_subject_and_old_line() {
+        // given
+        let old = "def test_a():\n    assert add(1, 1) == 2\n    assert add(2, 2) == 4\n";
+        let new = "def test_a():\n    assert add(1, 1) == 2\n";
+
+        // when
+        let findings = diff_findings(old, new, "tests/test_app.py");
+
+        // then
+        let finding = findings
+            .iter()
+            .find(|finding| finding.rule == "assertion-removed")
+            .expect("the removed assertion must be reported");
+        assert_eq!(finding.line_number, 3);
+        assert_eq!(finding.text, "add(2, 2)");
+        assert!(
+            finding.message.contains("`add(2, 2)` (at line 3)"),
+            "{}",
+            finding.message
+        );
     }
 
     #[test]

@@ -219,6 +219,10 @@ fn cli_given_strip_and_missing_file_analyzes_payload_without_writing() -> std::i
         stderr.contains("kept awaiting approval: test_b [duplicate-test]"),
         "stderr: {stderr}"
     );
+    assert!(
+        stderr.contains("already defined at line 1: `def test_a():`"),
+        "stderr: {stderr}"
+    );
     assert!(!root.join("tests/test_missing.py").exists());
     let _ = std::fs::remove_dir_all(&root);
     Ok(())

@@ -480,6 +480,20 @@ struct RemovalAnalysis {
     metrics: (usize, usize, usize, usize),
 }
 
+/// The subject of a removed test: its name when the body carries one, else its declaration line.
+///
+/// A body without a name (a shell test, a table-driven case) still names itself by its first
+/// line, so the verdict never cites an empty subject.
+fn removed_test_subject(old_content: &str, body: &Body) -> String {
+    if let Some(name) = body.name.as_deref().filter(|name| !name.trim().is_empty()) {
+        return name.trim().to_owned();
+    }
+    old_content
+        .lines()
+        .nth(body.start_row)
+        .map_or_else(String::new, |line| line.trim().to_owned())
+}
+
 /// Compare old tests to added tests and report only bodies with no equivalent.
 ///
 /// A body is matched when it has the same name, when a new body's token multiset is at least
@@ -544,13 +558,19 @@ fn analyze_removals(input: RemovalInput<'_>) -> RemovalAnalysis {
             continue;
         }
         removed += 1;
+        // The removed test is the evidence: name it and point at the line it used to sit on, so the
+        // verdict can be checked against the file before the edit instead of taken on trust.
+        let old_line = old_body.start_row + 1;
+        let subject = removed_test_subject(old_content, old_body);
         findings.push(Finding::new(
             "test-removed",
             Confidence::High,
-            "A test present before this edit is gone; deleting a test is a strong tampering signal. STOP and ask the human to add a .test-checker.json entry with a reason if the removal is intended.",
-            1,
+            format!(
+                "The test `{subject}` (at line {old_line} before this edit) is gone; deleting a test is a strong tampering signal. STOP and ask the human to add a .test-checker.json entry with a reason if the removal is intended."
+            ),
+            old_line,
             file_path,
-            old_body.name.as_deref().unwrap_or(""),
+            subject,
         ));
     }
 
@@ -1491,8 +1511,18 @@ fn removed_lines<'a>(
 /// `duplicate-test` basis) and `comments` is comment-stripped (the `near-duplicate-test` basis).
 #[derive(Debug, Default)]
 struct DuplicateSignatures {
-    exact: HashMap<String, usize>,
+    exact: HashMap<String, DuplicateSite>,
     comments: HashMap<String, usize>,
+}
+
+/// Where an earlier body with the same signature sits, and the line it starts with.
+///
+/// The counterpart's declaration line is the evidence a `duplicate-test` verdict rests on, so it
+/// travels with the signature: a later body that matches can cite it.
+#[derive(Debug)]
+struct DuplicateSite {
+    line: usize,
+    declaration: String,
 }
 
 /// `duplicate-test` keys on the exact, comment-preserving body signature, so two tests that differ
@@ -1515,17 +1545,28 @@ fn push_duplicate(
         return None;
     }
     let signature = scoped_signature(scope, signature);
-    if let Some(first_line) = seen.exact.get(&signature) {
+    if let Some(counterpart) = seen.exact.get(&signature) {
+        // The counterpart's declaration line is the cited evidence: it names the test this one
+        // duplicates, so the verdict can be checked instead of taken on trust.
         return Some(Finding::new(
             "duplicate-test",
             Confidence::Medium,
-            format!("This test duplicates another test already defined at line {first_line}."),
+            format!(
+                "This test duplicates another test already defined at line {}: `{}`.",
+                counterpart.line, counterpart.declaration
+            ),
             start_line,
             file_path,
-            "",
+            counterpart.declaration.as_str(),
         ));
     }
-    seen.exact.insert(signature, start_line);
+    seen.exact.insert(
+        signature,
+        DuplicateSite {
+            line: start_line,
+            declaration: declaration_line(exact_lines),
+        },
+    );
 
     let comment_signature = body_signature(comment_lines);
     if comment_signature.is_empty() {
@@ -1544,6 +1585,17 @@ fn push_duplicate(
     }
     seen.comments.insert(comment_signature, start_line);
     None
+}
+
+/// The declaration line of a body: the first line of its raw text, trimmed.
+///
+/// It is the shortest text that names the test (its `def`/`fn`/`it(...)` line), so it can cite the
+/// body without quoting the whole of it.
+fn declaration_line(lines: &[AddedLine<'_>]) -> String {
+    lines
+        .first()
+        .map(|line| line.text.trim().to_owned())
+        .unwrap_or_default()
 }
 
 /// The raw body lines with their comments intact (`body_signature` still trims whitespace). This is
