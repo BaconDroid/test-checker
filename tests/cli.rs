@@ -442,6 +442,39 @@ fn cli_given_strip_remove_entry_with_a_short_reason_is_dropped() -> std::io::Res
 }
 
 #[test]
+fn cli_given_strip_approved_removal_writes_atomically_and_leaves_no_temporary()
+-> std::io::Result<()> {
+    // given: a human-approved removal for duplicate-test
+    let root = prepare_root("atomic")?;
+    let content =
+        "def test_a():\n    assert add(1, 2) == 3\ndef test_b():\n    assert add(1, 2) == 3\n";
+    write_test_file(&root, "tests/test_a.py", content)?;
+    write_remove_config(
+        &root,
+        r#"{"glob":"tests/*.py","rules":["duplicate-test"],"reason":"duplicate of an existing test"}"#,
+    )?;
+    let input = strip_payload(&root, "tests/test_a.py", content);
+
+    // when
+    let output = run_checker(&input, &["--strip", "--min-confidence", "low"])?;
+
+    // then: the rewrite happened through the sibling temp and left none behind
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "stderr: {stderr}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("tests/test_a.py"))?,
+        "def test_a():\n    assert add(1, 2) == 3\n\n"
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(root.join("tests"))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().contains(".strip.tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "leftover temporaries: {leftovers:?}");
+    let _ = std::fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[test]
 fn cleanup_pass_driver_removes_only_the_approved_candidate()
 -> Result<(), Box<dyn std::error::Error>> {
     // given: a repository-shaped root with one approved duplicate and no unapproved extra
