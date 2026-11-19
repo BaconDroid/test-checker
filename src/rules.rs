@@ -69,7 +69,7 @@ const FOCUS_MARKERS: &[&str] = &[
 ];
 
 /// JS/Vitest matcher strictness (higher is stricter). A decrease on the same `expect()` subject
-/// is a weakening; see `docs/diff-aware-and-query-expansion.md` A3.
+/// is a weakening.
 const JS_MATCHERS: &[(&str, u8)] = &[
     (".toStrictEqual(", 40),
     (".toEqual(", 30),
