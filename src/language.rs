@@ -267,6 +267,68 @@ mod tests {
     const PATH_PREDICATES_JSON: &str =
         concat!(env!("CARGO_MANIFEST_DIR"), "/eval/path-predicates.json");
 
+    /// Extensions the downstream language matrix resolves through this contract.
+    ///
+    /// Each key is probed against the pack at emit time, so a pack update that drops an extension
+    /// fails the contract test instead of drifting silently in the consumer. `.bats` publishes as
+    /// `bash` because [`language_for_path`] resolves it that way before the pack sees the path.
+    const CONTRACT_EXTENSION_KEYS: &[&str] = &[
+        "bash",
+        "sh",
+        "bats",
+        "c",
+        "h",
+        "cpp",
+        "cxx",
+        "cc",
+        "hpp",
+        "hxx",
+        "cs",
+        "css",
+        "cue",
+        "dart",
+        "dockerfile",
+        "ex",
+        "exs",
+        "elm",
+        "go",
+        "groovy",
+        "gradle",
+        "hs",
+        "hcl",
+        "html",
+        "htm",
+        "java",
+        "js",
+        "jsx",
+        "mjs",
+        "cjs",
+        "kt",
+        "kts",
+        "lua",
+        "ml",
+        "php",
+        "proto",
+        "py",
+        "pyi",
+        "pyw",
+        "r",
+        "rb",
+        "rs",
+        "scala",
+        "sql",
+        "svelte",
+        "swift",
+        "toml",
+        "ts",
+        "tsx",
+        "mts",
+        "cts",
+        "yaml",
+        "yml",
+        "zig",
+    ];
+
     fn path_predicates_document() -> serde_json::Value {
         let extension_test_name_rules = EXTENSION_TEST_NAME_RULES
             .iter()
@@ -278,12 +340,32 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
+        let extension_languages = CONTRACT_EXTENSION_KEYS
+            .iter()
+            .map(|extension| {
+                // Mirrors `language_for_path`: the pack has no `bats` mapping, and bats files
+                // parse with the bash grammar.
+                let language = if *extension == "bats" {
+                    "bash"
+                } else {
+                    tree_sitter_language_pack::detect_language_from_extension(extension)
+                        .unwrap_or_else(|| {
+                            panic!("tree-sitter-language-pack does not map extension `{extension}`")
+                        })
+                };
+                (
+                    format!(".{extension}"),
+                    serde_json::Value::String(language.to_owned()),
+                )
+            })
+            .collect::<serde_json::Map<String, serde_json::Value>>();
         serde_json::json!({
             "generated_from": "src/language.rs",
             "test_path_segments": TEST_PATH_SEGMENTS,
             "test_filename_prefixes": TEST_FILENAME_PREFIXES,
             "test_filename_infixes": TEST_FILENAME_INFIXES,
             "extension_test_name_rules": extension_test_name_rules,
+            "extension_languages": extension_languages,
             "harness_path_substrings": HARNESS_PATH_SUBSTRINGS,
             "harness_basenames": HARNESS_BASENAMES,
             "harness_filename_prefixes": HARNESS_FILENAME_PREFIXES,
