@@ -45,12 +45,6 @@ Misfires found by the secondary corpus (`eval/README.md`).
 | E2 | Non-blocking mutation job (`.cargo/mutants.toml` already scopes `src/rules.rs`). | next |
 | E3 | `npm run doctor` wrapper around `scripts/doctor.sh`, plus the setup skill. | later |
 
-## Coordinated with the sibling
-
-| # | Item | Status |
-|:-:|:-----|:------|
-| **[cc+tc]** X1 | Marker grammar for `comment-checker` gains rule and reason validation, comment-node anchoring, and inert-if-added; `parity/vectors.json`'s `suppression-marker` case changes with it. | later |
-
 ## Not adopted
 
 | Idea | Why |
