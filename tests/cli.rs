@@ -138,8 +138,12 @@ fn cli_given_medium_diff_finding_and_min_confidence_high_exits_zero() -> std::io
     // when
     let output = run_checker(input, &["--min-confidence", "high"])?;
 
-    // then
+    // then: exit 0, but the finding is reported as withheld rather than as a clean pass
     assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "[test-checker] Withheld: 1 finding(s) withheld by the confidence threshold (min-confidence: high); this is not a clean pass\n"
+    );
     Ok(())
 }
 

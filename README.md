@@ -194,7 +194,8 @@ command text does not claim native Windows support.
   the placeholder the custom text replaces the whole message, including the agent-memo banner.
 - `--min-confidence <low|medium|high>` (default `medium`) drops lower-confidence findings, so the
   hook only exits `2` for findings at or above that level. An unrecognised value silently falls back
-  to `medium`.
+  to `medium`. When the gate (or a `.test-checker.json` `allow` entry) removes every finding, the
+  hook still exits `0` but prints `[test-checker] Withheld: ...` instead of the clean success line.
 - `--version` prints `test-checker <version>` and exits `0`.
 - `--strip` runs the cleanup pass. It resolves `tool_input.file_path`/`filePath` against the payload
   `cwd` (the process cwd when absent). If the file exists, the whole file on disk is analyzed - the
