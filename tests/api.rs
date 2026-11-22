@@ -562,6 +562,26 @@ fn check_hook_input_given_clean_run_returns_the_exact_success_line() {
 }
 
 #[test]
+fn check_hook_input_from_reader_given_finding_below_min_confidence_reports_it_withheld() {
+    // given: a loosened matcher (diff-detected, medium confidence) and a `high` threshold
+    let input = r#"{"tool_name":"Edit","tool_input":{"file_path":"tests/app.test.js","old_string":"it('x', () => {\n  expect(a).toEqual(b);\n});\n","new_string":"it('x', () => {\n  expect(a).toBe(b);\n});\n"}}"#;
+    let options = Options {
+        min_confidence: Some("high".to_owned()),
+        ..Options::default()
+    };
+
+    // when
+    let result = check_hook_input_from_reader(input.as_bytes(), &options);
+
+    // then: the write passes, but the message says findings were withheld, not that none existed
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(
+        result.message,
+        "[test-checker] Withheld: 1 finding(s) withheld by the confidence threshold (min-confidence: high); this is not a clean pass\n"
+    );
+}
+
+#[test]
 fn check_hook_input_given_empty_input_skips_with_the_exact_reason() {
     // when
     let result = check_hook_input("", "");
@@ -1199,8 +1219,42 @@ fn check_hook_input_given_committed_config_suppresses_the_listed_rule() -> std::
     let result = check_hook_input(&write_payload(&repo, "tests/test_app.py", content), "");
     let _ = std::fs::remove_dir_all(&repo);
 
+    // then: the write passes, but the message says the finding was suppressed, not absent
+    assert_eq!(result.exit_code, 0, "{}", result.message);
+    assert_eq!(
+        result.message,
+        "[test-checker] Withheld: 1 finding(s) suppressed by .test-checker.json config; this is not a clean pass\n"
+    );
+    Ok(())
+}
+
+#[test]
+fn check_hook_input_from_reader_given_gated_and_suppressed_findings_reports_both()
+-> std::io::Result<()> {
+    // given: a config allowing `swallowed-error`, a `high` threshold, a swallowed error (suppressed)
+    // and a medium-confidence no-assertion test (below the threshold)
+    let repo = temp_repo("config-and-gate")?;
+    std::fs::write(
+        repo.join(".test-checker.json"),
+        r#"{"allow":[{"glob":"tests/**","rules":["swallowed-error"],"reason":"legacy suite migration tracked in #42"}]}"#,
+    )?;
+    let content = "def test_a():\n    try:\n        run()\n    except Exception:\n        pass\n    assert run() == 1\n\ndef test_b():\n    compute()\n";
+    let options = Options {
+        min_confidence: Some("high".to_owned()),
+        ..Options::default()
+    };
+
+    // when
+    let payload = write_payload(&repo, "tests/test_app.py", content);
+    let result = check_hook_input_from_reader(payload.as_bytes(), &options);
+    let _ = std::fs::remove_dir_all(&repo);
+
     // then
     assert_eq!(result.exit_code, 0, "{}", result.message);
+    assert_eq!(
+        result.message,
+        "[test-checker] Withheld: 1 finding(s) withheld by the confidence threshold (min-confidence: high) and 1 finding(s) suppressed by .test-checker.json config; this is not a clean pass\n"
+    );
     Ok(())
 }
 

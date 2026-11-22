@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::detector::{DetectError, DetectResult, TestDetector, TestSpan, comment_ranges};
 use crate::engine::{self, null_default};
 use crate::filters::{
-    SuppressionConfig, SuppressionIndex, apply_filters_without_suppression, has_marker_in_comments,
-    is_config_path,
+    CONFIG_FILE_NAME, SuppressionConfig, SuppressionIndex, apply_filters_without_suppression,
+    has_marker_in_comments, is_config_path,
 };
 use crate::language::{analyzable_language_for_path, is_harness_path, is_test_path};
 use crate::models::{Confidence, Edit, Finding};
@@ -89,14 +89,18 @@ impl HookCheckResult {
 
 /// The explicit outcome of one hook check, before it becomes a [`HookCheckResult`].
 ///
-/// `Clean` and `Skipped` exit 0, `Findings` exits 2, and `Failed` exits 1: a check that could not
-/// run is never reported as a pass.
+/// `Clean`, `Withheld`, and `Skipped` exit 0, `Findings` exits 2, and `Failed` exits 1: a check
+/// that could not run is never reported as a pass, and a check whose findings were all filtered or
+/// suppressed is reported as withheld rather than clean.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum HookOutcome {
     /// The check ran and found nothing.
     Clean,
     /// The check ran and found nothing, but the cleanup pass has context to report.
     CleanWith(String),
+    /// The check found weakening, but the confidence gate or the suppression config removed all of
+    /// it; the payload is the rendered notice. The write is allowed, yet it is not a clean pass.
+    Withheld(String),
     /// The check ran and found weakening; the payload is the rendered block message.
     Findings(String),
     /// The check did not apply to this write (unsupported language, non-edit tool, bad input).
@@ -110,10 +114,31 @@ impl HookOutcome {
     #[must_use]
     pub(crate) const fn exit_code(&self) -> i32 {
         match self {
-            Self::Clean | Self::CleanWith(_) | Self::Skipped(_) => EXIT_PASS,
+            Self::Clean | Self::CleanWith(_) | Self::Withheld(_) | Self::Skipped(_) => EXIT_PASS,
             Self::Findings(_) => EXIT_BLOCK,
             Self::Failed(_) => EXIT_INTERNAL_FAILURE,
         }
+    }
+
+    /// `Clean` when nothing was removed, otherwise the `Withheld` notice for what the confidence
+    /// gate (`gated`) and the suppression config (`suppressed`) removed.
+    fn from_withheld(gated: usize, suppressed: usize, min_confidence: Confidence) -> Self {
+        let threshold = min_confidence.as_str();
+        let notice = match (gated, suppressed) {
+            (0, 0) => return Self::Clean,
+            (gated, 0) => format!(
+                "{gated} finding(s) withheld by the confidence threshold (min-confidence: {threshold})"
+            ),
+            (0, suppressed) => {
+                format!("{suppressed} finding(s) suppressed by {CONFIG_FILE_NAME} config")
+            }
+            (gated, suppressed) => format!(
+                "{gated} finding(s) withheld by the confidence threshold (min-confidence: {threshold}) and {suppressed} finding(s) suppressed by {CONFIG_FILE_NAME} config"
+            ),
+        };
+        Self::Withheld(format!(
+            "[test-checker] Withheld: {notice}; this is not a clean pass\n"
+        ))
     }
 
     /// The hook's stderr message, including its trailing newline.
@@ -121,7 +146,9 @@ impl HookOutcome {
     pub(crate) fn message(&self) -> String {
         match self {
             Self::Clean => "[test-checker] Success: No problematic tests found\n".to_owned(),
-            Self::CleanWith(message) | Self::Findings(message) => message.clone(),
+            Self::CleanWith(message) | Self::Withheld(message) | Self::Findings(message) => {
+                message.clone()
+            }
             Self::Skipped(reason) => format!("[test-checker] Skipping: {reason}\n"),
             Self::Failed(reason) => {
                 format!("[test-checker] did not run — nothing checked this write.\n{reason}\n")
@@ -244,7 +271,7 @@ fn evaluate(
             file_path,
             "",
         )];
-        return gate_and_format(&findings, custom_prompt, min_confidence);
+        return gate_and_format(&findings, custom_prompt, min_confidence, 0);
     }
     // A harness path is recognised by its path and is checked without language resolution, so it
     // wins over the test gate. Otherwise a harness file that also matches a test path (for example
@@ -303,7 +330,7 @@ fn evaluate(
         Err(skip_result) => return skip_result,
     };
 
-    findings.retain(|finding| !suppression_config.suppresses(file_path, &finding.rule));
+    let suppressed = retain_unsuppressed(&mut findings, &suppression_config, file_path);
     findings.extend(invalid_markers);
     findings.extend(suppression_config.invalid_findings());
     if marker_added {
@@ -318,7 +345,7 @@ fn evaluate(
     }
 
     apply_baseline_note(
-        gate_and_format(&findings, custom_prompt, min_confidence),
+        gate_and_format(&findings, custom_prompt, min_confidence, suppressed),
         baseline_note,
     )
 }
@@ -426,7 +453,7 @@ fn evaluate_strip(
             || file_path.to_owned(),
             |path| path.to_string_lossy().into_owned(),
         );
-        let findings = match analyze_whole_file(
+        let (findings, suppressed) = match analyze_whole_file(
             content,
             file_path,
             &match_path,
@@ -435,11 +462,12 @@ fn evaluate_strip(
             include_commented_out_tests,
             include_body_tests,
         ) {
-            Ok(findings) => findings,
+            Ok(analysis) => analysis,
             Err(outcome) => return outcome,
         };
         return strip_report(
             &findings,
+            suppressed,
             Some(content),
             resolved.as_deref(),
             file_path,
@@ -456,7 +484,7 @@ fn evaluate_strip(
         if content.len() > MAX_CONTENT_BYTES {
             return skip("File too large");
         }
-        let findings = match analyze_whole_file(
+        let (findings, suppressed) = match analyze_whole_file(
             content,
             file_path,
             file_path,
@@ -465,11 +493,12 @@ fn evaluate_strip(
             include_commented_out_tests,
             include_body_tests,
         ) {
-            Ok(findings) => findings,
+            Ok(analysis) => analysis,
             Err(outcome) => return outcome,
         };
         return strip_report(
             &findings,
+            suppressed,
             Some(content),
             None,
             file_path,
@@ -498,7 +527,7 @@ fn evaluate_strip(
         Ok(change) => change,
         Err(skip_result) => return skip_result,
     };
-    findings.retain(|finding| !suppression_config.suppresses(file_path, &finding.rule));
+    let suppressed = retain_unsuppressed(&mut findings, suppression_config, file_path);
     findings.extend(invalid_markers);
     findings.extend(suppression_config.invalid_findings());
     if marker_added {
@@ -513,6 +542,7 @@ fn evaluate_strip(
     }
     strip_report(
         &findings,
+        suppressed,
         None,
         None,
         file_path,
@@ -534,7 +564,7 @@ fn analyze_whole_file(
     suppression_config: &SuppressionConfig,
     include_commented_out_tests: bool,
     include_body_tests: bool,
-) -> Result<Vec<Finding>, HookOutcome> {
+) -> Result<(Vec<Finding>, usize), HookOutcome> {
     let mut findings = detector
         .detect_checked(
             content,
@@ -548,7 +578,7 @@ fn analyze_whole_file(
         SuppressionIndex::from_content(content, &added, &comment_ranges(content, file_path));
     findings.retain(|finding| !index.is_suppressed(finding));
     let invalid_markers = index.invalid_findings(file_path);
-    findings.retain(|finding| !suppression_config.suppresses(match_path, &finding.rule));
+    let suppressed = retain_unsuppressed(&mut findings, suppression_config, match_path);
     findings.extend(invalid_markers);
     findings.extend(suppression_config.invalid_findings());
     if has_marker_in_comments(content, None, &comment_ranges(content, file_path)) {
@@ -561,13 +591,25 @@ fn analyze_whole_file(
             "",
         ));
     }
-    Ok(findings)
+    Ok((findings, suppressed))
+}
+
+/// Drop the findings a committed config entry suppresses for `path`; returns how many were dropped.
+fn retain_unsuppressed(
+    findings: &mut Vec<Finding>,
+    suppression_config: &SuppressionConfig,
+    path: &str,
+) -> usize {
+    let before = findings.len();
+    findings.retain(|finding| !suppression_config.suppresses(path, &finding.rule));
+    before - findings.len()
 }
 
 /// Build the normal report, apply approved removals, and append the cleanup summary.
 #[allow(clippy::too_many_arguments)]
 fn strip_report(
     findings: &[Finding],
+    suppressed: usize,
     content: Option<&str>,
     target: Option<&Path>,
     file_path: &str,
@@ -646,7 +688,7 @@ fn strip_report(
         approved_without_file.then_some("the target file is not on disk; nothing was rewritten");
     let summary = strip_summary(&removed, &kept, note);
     append_strip_summary(
-        gate_and_format(findings, custom_prompt, min_confidence),
+        gate_and_format(findings, custom_prompt, min_confidence, suppressed),
         &summary,
     )
 }
@@ -804,6 +846,7 @@ fn append_strip_summary(outcome: HookOutcome, summary: &str) -> HookOutcome {
         HookOutcome::Clean => HookOutcome::CleanWith(format!(
             "[test-checker] Success: No problematic tests found\n{summary}"
         )),
+        HookOutcome::Withheld(message) => HookOutcome::Withheld(format!("{message}{summary}")),
         HookOutcome::Findings(mut message) => {
             if !message.ends_with('\n') {
                 message.push('\n');
@@ -832,6 +875,9 @@ fn apply_baseline_note(outcome: HookOutcome, baseline_note: Option<&'static str>
     };
     match outcome {
         HookOutcome::Clean => skip(reason),
+        HookOutcome::Withheld(message) => {
+            HookOutcome::Withheld(format!("[test-checker] Skipping: {reason}\n{message}"))
+        }
         HookOutcome::Findings(message) => {
             HookOutcome::Findings(format!("[test-checker] Skipping: {reason}\n{message}"))
         }
@@ -1110,19 +1156,27 @@ fn detect_findings(detection: DetectResult) -> Result<Vec<Finding>, HookOutcome>
 }
 
 /// Apply the filters and the confidence gate, then render: the shared tail of every check path.
+///
+/// `config_suppressed` counts the findings the suppression config already removed. When nothing is
+/// left to report but the gate or the config removed something, the outcome is `Withheld`, never
+/// `Clean`.
 fn gate_and_format(
     findings: &[Finding],
     custom_prompt: &str,
     min_confidence: Confidence,
+    config_suppressed: usize,
 ) -> HookOutcome {
-    let filtered: Vec<Finding> = apply_filters_without_suppression(findings)
-        .into_iter()
+    let filtered = apply_filters_without_suppression(findings);
+    let kept: Vec<Finding> = filtered
+        .iter()
         .filter(|finding| confidence_rank(finding.confidence) >= confidence_rank(min_confidence))
+        .cloned()
         .collect();
-    if filtered.is_empty() {
-        return HookOutcome::Clean;
+    if !kept.is_empty() {
+        return HookOutcome::Findings(format_hook_message(&kept, custom_prompt));
     }
-    HookOutcome::Findings(format_hook_message(&filtered, custom_prompt))
+    let gated = filtered.len();
+    HookOutcome::from_withheld(gated, config_suppressed, min_confidence)
 }
 
 /// Score the added lines of a harness/config file (no test-file gate, no tree-sitter needed).
@@ -1159,7 +1213,7 @@ fn harness_result(
             findings.push(finding);
         }
     }
-    gate_and_format(&findings, custom_prompt, min_confidence)
+    gate_and_format(&findings, custom_prompt, min_confidence, 0)
 }
 
 /// Added lines (1-based line number, raw text) for the tool input.
