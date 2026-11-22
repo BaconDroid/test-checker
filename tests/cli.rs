@@ -3,7 +3,22 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 fn run_checker(input: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_test-checker"))
+    run_checker_with_min_confidence_env(input, args, None)
+}
+
+/// Runs the checker with `TEST_CHECKER_MIN_CONFIDENCE` set to `env_value`, or removed when `None`,
+/// so the result never depends on the caller's environment.
+fn run_checker_with_min_confidence_env(
+    input: &str,
+    args: &[&str],
+    env_value: Option<&str>,
+) -> std::io::Result<std::process::Output> {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_test-checker"));
+    match env_value {
+        Some(value) => command.env("TEST_CHECKER_MIN_CONFIDENCE", value),
+        None => command.env_remove("TEST_CHECKER_MIN_CONFIDENCE"),
+    };
+    let mut child = command
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -170,6 +185,71 @@ fn cli_given_min_confidence_equals_low_keeps_medium_finding() -> std::io::Result
 
     // then
     assert_eq!(output.status.code(), Some(2));
+    Ok(())
+}
+
+const LOW_FINDING_INPUT: &str = r#"{"tool_name":"Write","tool_input":{"file_path":"tests/test_app.py","content":"def test_reads_source():\n    text = Path(\"src/app.py\").read_text()\n    assert \"def \" in text\n"}}"#;
+const MEDIUM_FINDING_INPUT: &str = r#"{"tool_name":"Edit","tool_input":{"file_path":"tests/app.test.js","old_string":"it('x', () => {\n  expect(a).toEqual(b);\n});\n","new_string":"it('x', () => {\n  expect(a).toBe(b);\n});\n"}}"#;
+
+#[test]
+fn cli_given_env_min_confidence_low_and_no_flag_blocks_on_low_finding() -> std::io::Result<()> {
+    // given: a low-confidence source-grep-test finding, which the default medium gate hides
+    // when / then: the environment alone lowers the gate
+    let default = run_checker_with_min_confidence_env(LOW_FINDING_INPUT, &[], None)?;
+    let low = run_checker_with_min_confidence_env(LOW_FINDING_INPUT, &[], Some("low"))?;
+
+    assert_eq!(default.status.code(), Some(0));
+    assert_eq!(low.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&low.stderr).contains("source-grep-test"));
+    Ok(())
+}
+
+#[test]
+fn cli_given_empty_or_unknown_env_min_confidence_falls_back_to_medium() -> std::io::Result<()> {
+    for value in ["", "bogus"] {
+        // given / when
+        let low_finding = run_checker_with_min_confidence_env(LOW_FINDING_INPUT, &[], Some(value))?;
+        let medium_finding =
+            run_checker_with_min_confidence_env(MEDIUM_FINDING_INPUT, &[], Some(value))?;
+
+        // then: the medium gate hides the low finding and keeps the medium one
+        assert_eq!(low_finding.status.code(), Some(0), "value: {value:?}");
+        assert_eq!(medium_finding.status.code(), Some(2), "value: {value:?}");
+    }
+    Ok(())
+}
+
+#[test]
+fn cli_given_env_min_confidence_high_withholds_medium_finding() -> std::io::Result<()> {
+    // given / when
+    let output = run_checker_with_min_confidence_env(MEDIUM_FINDING_INPUT, &[], Some("high"))?;
+
+    // then
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "[test-checker] Withheld: 1 finding(s) withheld by the confidence threshold (min-confidence: high); this is not a clean pass\n"
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_given_valid_min_confidence_flag_overrides_env_min_confidence() -> std::io::Result<()> {
+    // given / when: the flag lowers the gate against a high environment, and raises it against a low one
+    let flag_low = run_checker_with_min_confidence_env(
+        MEDIUM_FINDING_INPUT,
+        &["--min-confidence", "low"],
+        Some("high"),
+    )?;
+    let flag_high = run_checker_with_min_confidence_env(
+        LOW_FINDING_INPUT,
+        &["--min-confidence", "high"],
+        Some("low"),
+    )?;
+
+    // then
+    assert_eq!(flag_low.status.code(), Some(2));
+    assert_eq!(flag_high.status.code(), Some(0));
     Ok(())
 }
 

@@ -645,7 +645,7 @@ fn retain_scoped_agent_memo(findings: &mut Vec<Finding>, allowed: &HashSet<usize
 
 /// Demote removal findings in a broad refactor.
 ///
-/// The hook's default gate is `--min-confidence medium` (`parse_min_confidence`), so a Medium
+/// The hook's default gate is `--min-confidence medium` (`parse_min_confidence`, overridable with `TEST_CHECKER_MIN_CONFIDENCE`), so a Medium
 /// finding would still exit 2. To keep a refactor from blocking while keeping the finding visible,
 /// this demotes to Low (shown only at `--min-confidence low`); no other rule's confidence changes.
 fn demote_removal_findings(findings: &mut [Finding], reason: &str) {
