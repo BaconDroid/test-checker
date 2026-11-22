@@ -216,7 +216,7 @@ pub fn check_hook_input_with_options(
             evaluate(
                 &hook_input,
                 custom_prompt,
-                Confidence::Medium,
+                parse_min_confidence(None),
                 include_commented_out_tests,
                 include_body_tests,
                 false,
@@ -1253,13 +1253,12 @@ fn raw_added_lines(tool: ToolKind, hook_input: &HookInput) -> Vec<(usize, String
     }
 }
 
-/// Minimum confidence from `--min-confidence` (default `medium`).
+/// Minimum confidence: a valid `--min-confidence` wins, otherwise `TEST_CHECKER_MIN_CONFIDENCE`,
+/// otherwise `medium`.
 fn parse_min_confidence(value: Option<&str>) -> Confidence {
-    match value.map(str::to_ascii_lowercase).as_deref() {
-        Some("low") => Confidence::Low,
-        Some("high") => Confidence::High,
-        _ => Confidence::Medium,
-    }
+    value
+        .and_then(Confidence::parse)
+        .unwrap_or_else(Confidence::min_from_env)
 }
 
 const fn confidence_rank(confidence: Confidence) -> u8 {

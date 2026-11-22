@@ -10,7 +10,32 @@ pub enum Confidence {
     Low,
 }
 
+/// Environment variable that sets the minimum confidence when no valid `--min-confidence` is given.
+pub(crate) const MIN_CONFIDENCE_ENV: &str = "TEST_CHECKER_MIN_CONFIDENCE";
+
 impl Confidence {
+    /// The confidence named by `value` (`low`, `medium` or `high`, case-insensitive).
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            _ => None,
+        }
+    }
+
+    /// The minimum confidence from [`MIN_CONFIDENCE_ENV`]; an absent, empty or unknown value is
+    /// `medium`.
+    pub(crate) fn min_from_env() -> Self {
+        Self::min_from_env_value(std::env::var(MIN_CONFIDENCE_ENV).ok().as_deref())
+    }
+
+    fn min_from_env_value(value: Option<&str>) -> Self {
+        value
+            .and_then(|value| Self::parse(value.trim()))
+            .unwrap_or(Self::Medium)
+    }
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -70,6 +95,34 @@ pub struct Edit {
 #[cfg(test)]
 mod tests {
     use super::{Confidence, Finding};
+
+    #[test]
+    fn min_from_env_value_maps_each_input_to_a_confidence() {
+        // given: absent, empty, blank, unknown and the three named values
+        let cases = [
+            (None, Confidence::Medium),
+            (Some(""), Confidence::Medium),
+            (Some("  "), Confidence::Medium),
+            (Some("critical"), Confidence::Medium),
+            (Some("low"), Confidence::Low),
+            (Some("medium"), Confidence::Medium),
+            (Some("high"), Confidence::High),
+            (Some(" HIGH "), Confidence::High),
+        ];
+
+        for (value, expected) in cases {
+            // when / then
+            assert_eq!(Confidence::min_from_env_value(value), expected, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn parse_given_unknown_or_empty_value_returns_none() {
+        // given / when / then: the CLI gate relies on `None` to defer to the environment
+        assert_eq!(Confidence::parse(""), None);
+        assert_eq!(Confidence::parse("bogus"), None);
+        assert_eq!(Confidence::parse("LOW"), Some(Confidence::Low));
+    }
 
     #[test]
     fn finding_round_trips_through_json() -> serde_json::Result<()> {
