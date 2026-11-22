@@ -27,7 +27,6 @@ Misfires found by the secondary corpus (`eval/README.md`).
 
 | # | Item | Status |
 |:-:|:-----|:------|
-| C1 | `TEST_CHECKER_MIN_CONFIDENCE` read in the domain layer, unknown or empty value falling back to `medium`, so a CI job can run `low` without the parity-locked CLI. | next |
 
 ## Block D - Evaluation
 
