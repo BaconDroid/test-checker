@@ -15,7 +15,6 @@ Misfires found by the secondary corpus (`eval/README.md`).
 
 | # | Item | Status |
 |:-:|:-----|:------|
-| A4 | Report withheld findings: exit 0 for a genuinely clean write, a distinct message when findings were filtered by the confidence gate or suppressed by config. | next |
 | A5 | Matcher coverage: add testing-library matchers as the corpus surfaces them; the JS matcher set is gated per language (see `src/rules.rs`). | later |
 
 ## Block B - Cleanup-pass safety
