@@ -732,3 +732,27 @@ fn cli_given_strip_propose_reports_without_writing() -> std::io::Result<()> {
     let _ = std::fs::remove_dir_all(&root);
     Ok(())
 }
+
+#[test]
+fn cli_given_remove_entry_with_the_rules_alias_still_approves() -> std::io::Result<()> {
+    // given: the pre-unification `rules` field name instead of the canonical `reasons`
+    let root = prepare_root("alias-rules")?;
+    let content = "def test_a():\n    assert value == value\n";
+    write_test_file(&root, "tests/test_a.py", content)?;
+    write_remove_config(
+        &root,
+        r#"{"glob":"tests/*.py","rules":["tautological-assertion"],"reason":"assertion compares the same value twice"}"#,
+    )?;
+    let input = strip_payload(&root, "tests/test_a.py", content);
+
+    // when
+    let output = run_checker(&input, &["--strip", "--min-confidence", "low"])?;
+
+    // then: the alias entry is honoured exactly like `reasons`
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cleanup pass (balanced): 1 removed, 0 kept awaiting approval."),
+        "stderr: {stderr}"
+    );
+    Ok(())
+}

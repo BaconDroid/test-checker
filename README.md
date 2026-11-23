@@ -360,8 +360,9 @@ as an `Edit`.
   intended removal; the agent must ask for the entry instead of adding one.
 
   A second top-level array, `"remove"`, is the human approval for the `--strip` cleanup pass. Its
-  entries have the same `{glob, rules, reason}` shape and the same git-root-only discovery, but the
-  reason must be at least **12 characters**; an entry that fails validation is dropped. A cleanup
+  entries have the same `{glob, reasons, reason}` shape (the legacy `rules` field is still accepted
+  as an alias) and the same git-root-only discovery, but the reason must be at least
+  **12 characters**; an entry that fails validation is dropped. A cleanup
   candidate is removed only when its file matches the glob and its rule is listed there. See
   [Removal policy](#removal-policy).
 - `scripts/doctor.sh` lists old bare `test-checker: allow` markers that no longer suppress.

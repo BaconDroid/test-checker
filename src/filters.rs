@@ -373,8 +373,9 @@ struct ConfigFile {
 struct ConfigEntry {
     #[serde(default)]
     glob: String,
-    #[serde(default)]
-    rules: Vec<String>,
+    /// Canonical name, shared with comment-checker. `rules` is the pre-unification alias.
+    #[serde(default, alias = "rules")]
+    reasons: Vec<String>,
     #[serde(default)]
     reason: String,
 }
@@ -552,7 +553,7 @@ fn git_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
 fn entry_shape(entry: &ConfigEntry) -> Option<(String, Vec<String>)> {
     let glob = entry.glob.trim();
     let rules: Vec<String> = entry
-        .rules
+        .reasons
         .iter()
         .map(|rule| rule.trim().to_owned())
         .filter(|rule| !rule.is_empty())
