@@ -360,6 +360,7 @@ as an `Edit`.
   candidate is removed only when its file matches the glob and its rule is listed there. See
   [Removal policy](#removal-policy).
 - `scripts/doctor.sh` lists old bare `test-checker: allow` markers that no longer suppress.
+- From a source checkout, `npm run doctor --prefix npm/test-checker` runs the same audit.
 
 `agent-memo-test` findings are additionally summarised under a dedicated banner, pointing at the test
 name/assertion message that describes a change instead of the behavior. `--prompt` replaces that

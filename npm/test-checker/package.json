@@ -9,10 +9,12 @@
   "files": [
     "index.js",
     "cli.js",
-    "postinstall.js"
+    "postinstall.js",
+    "doctor.js"
   ],
   "scripts": {
-    "postinstall": "node postinstall.js"
+    "postinstall": "node postinstall.js",
+    "doctor": "node doctor.js"
   },
   "optionalDependencies": {
     "@bacondroid/test-checker-darwin-arm64": "0.1.0",
