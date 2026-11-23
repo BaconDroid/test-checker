@@ -92,7 +92,7 @@ a high `config-edited` finding.
   "remove": [
     {
       "glob": "tests/**",
-      "rules": ["duplicate-test", "near-duplicate-test"],
+      "reasons": ["duplicate-test", "near-duplicate-test"],
       "reason": "legacy suite merged into the table-driven cases in #123"
     }
   ]
@@ -120,8 +120,8 @@ arguments are invalid.
 The workflow keeps the human in the loop:
 
 1. Report: run `scripts/cleanup-candidates --binary path/to/test-checker`.
-2. Approve: a human adds a `remove` entry (`glob`, `rules`, `reason`) to `.test-checker.json` and
-   commits it. The reason must be at least 12 characters.
+2. Approve: a human adds a `remove` entry (`glob`, `reasons`, `reason`) to `.test-checker.json` and
+   commits it. The reason must be at least 12 characters; the legacy `rules` key is still accepted.
 3. Remove: run `scripts/cleanup-pass --binary path/to/test-checker`. Anything without a matching
    `remove` entry is reported as kept and left in place.
 
@@ -347,7 +347,7 @@ as an `Edit`.
   of at least **12 characters** suppress anything - the same reason minimum an in-file marker needs:
 
   ```json
-  { "allow": [ { "glob": "tests/**", "rules": ["duplicate-test"], "reason": "legacy suite, tracked in #123" } ] }
+  { "allow": [ { "glob": "tests/**", "reasons": ["duplicate-test"], "reason": "legacy suite, tracked in #123" } ] }
   ```
 
   A file whose path matches a glob and whose rule is listed is suppressed. Two kinds of rule id are
