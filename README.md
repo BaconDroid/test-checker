@@ -70,6 +70,9 @@ a high `config-edited` finding.
 - **Approval**: a candidate is removable only when its file matches the glob and its rule is listed
   in a valid `remove` entry. No matching entry means no removal, always. For a duplicate pair, the
   flagged copy (the later body) is the one removed.
+- **Policy**: `--strip-policy` narrows what an approval may remove by confidence tier
+  (`conservative` high only, `balanced` high and medium, `aggressive` everything flagged); a kept
+  candidate stays in the report. See [strip policy](#strip-policy).
 - **Unit**: the whole enclosing test block, including its attribute/marker lines (Rust `#[test]`,
   Python decorators, Elixir tags, Groovy decorators). Overlapping removals collapse into one span;
   every other byte of the file stays identical.
@@ -79,9 +82,10 @@ a high `config-edited` finding.
   cannot rename over an existing file the rename is retried after unlinking, and the original is
   restored if that fails too. An ambiguous span or a write error changes nothing, and the message
   says why.
-- **Output**: the normal report is followed by a cleanup summary listing removed items
-  (`test name [rule]`) and candidates kept awaiting approval, plus the `.test-checker.json`
-  `remove` pointer. Exit codes are unchanged: `0` clean, `2` findings, `1` did not run.
+- **Output**: the normal report is followed by a cleanup summary naming the policy, the removed
+  items (`test name [rule]`) and candidates kept awaiting approval, plus the `.test-checker.json`
+  `remove` pointer. Under `--propose` the same lines say `proposed` and nothing is written.
+- **Exit codes**: unchanged - `0` clean, `2` findings, `1` did not run.
 
 ```json
 {
@@ -384,8 +388,8 @@ banner as well.
 | `aggressive` | everything flagged, including low confidence | a bulk dump you are ready to review |
 
 An approval is still required: the policy narrows what a `remove` entry may remove, it never replaces
-the entry. `--propose` pairs with any level and prints the list plus the exact approval shape, so the
-automation is "propose the config, then apply it", not "delete without telling anyone".
+the entry. `--propose` pairs with any level and prints the count and policy that `--strip` would
+apply, so the review happens before the run rather than after it.
 
 ## Limits and false-positive risks
 
