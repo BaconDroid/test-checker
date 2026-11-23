@@ -10,6 +10,46 @@ pub enum Confidence {
     Low,
 }
 
+/// How much `--strip` may remove on its own, shared with comment-checker.
+///
+/// `conservative` removes only proven structural problems, `balanced` adds the audited
+/// heuristics, and `aggressive` removes everything the detector flags.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StripPolicy {
+    Conservative,
+    Balanced,
+    Aggressive,
+}
+
+impl StripPolicy {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "conservative" => Some(Self::Conservative),
+            "balanced" => Some(Self::Balanced),
+            "aggressive" => Some(Self::Aggressive),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Conservative => "conservative",
+            Self::Balanced => "balanced",
+            Self::Aggressive => "aggressive",
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn allows(self, confidence: Confidence) -> bool {
+        match self {
+            Self::Aggressive => true,
+            Self::Balanced => matches!(confidence, Confidence::High | Confidence::Medium),
+            Self::Conservative => matches!(confidence, Confidence::High),
+        }
+    }
+}
+
 /// Environment variable that sets the minimum confidence when no valid `--min-confidence` is given.
 pub(crate) const MIN_CONFIDENCE_ENV: &str = "TEST_CHECKER_MIN_CONFIDENCE";
 

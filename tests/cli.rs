@@ -460,7 +460,7 @@ fn cli_given_strip_merges_overlapping_approvals_into_one_removal() -> std::io::R
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(2), "stderr: {stderr}");
     assert!(
-        stderr.contains("cleanup pass: 2 removed, 0 kept awaiting approval."),
+        stderr.contains("cleanup pass (balanced): 2 removed, 0 kept awaiting approval."),
         "stderr: {stderr}"
     );
     assert_eq!(
@@ -634,6 +634,100 @@ fn cleanup_candidates_never_modifies_a_file() -> Result<(), Box<dyn std::error::
         before,
         std::fs::read(std::path::Path::new(&file))?,
         "cleanup-candidates must not write to any file"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[test]
+fn cli_given_strip_policy_balanced_keeps_low_confidence_candidates() -> std::io::Result<()> {
+    // given: a test whose only finding is low confidence (source-grep-test), approved for removal
+    let root = prepare_root("policy-balanced")?;
+    let content = "def test_a():\n    assert add(1, 2) == 3\n\ndef test_b():\n    # only a comment differs\n    assert add(1, 2) == 3\n";
+    write_test_file(&root, "tests/test_a.py", content)?;
+    write_remove_config(
+        &root,
+        r#"{"glob":"tests/*.py","rules":["near-duplicate-test"],"reason":"near duplicate differs only by a comment"}"#,
+    )?;
+    let input = strip_payload(&root, "tests/test_a.py", content);
+
+    // when
+    let output = run_checker(&input, &["--strip", "--min-confidence", "low"])?;
+
+    // then: balanced keeps low-confidence candidates awaiting approval
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cleanup pass (balanced): 0 removed, 1 kept awaiting approval."),
+        "stderr: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("tests/test_a.py"))?,
+        content
+    );
+    let _ = std::fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[test]
+fn cli_given_strip_policy_aggressive_removes_low_confidence_candidates() -> std::io::Result<()> {
+    // given: the same approved low-confidence candidate
+    let root = prepare_root("policy-aggressive")?;
+    let content = "def test_a():\n    assert add(1, 2) == 3\n\ndef test_b():\n    # only a comment differs\n    assert add(1, 2) == 3\n";
+    write_test_file(&root, "tests/test_a.py", content)?;
+    write_remove_config(
+        &root,
+        r#"{"glob":"tests/*.py","rules":["near-duplicate-test"],"reason":"near duplicate differs only by a comment"}"#,
+    )?;
+    let input = strip_payload(&root, "tests/test_a.py", content);
+
+    // when
+    let output = run_checker(
+        &input,
+        &[
+            "--strip",
+            "--strip-policy",
+            "aggressive",
+            "--min-confidence",
+            "low",
+        ],
+    )?;
+
+    // then: aggressive removes it
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cleanup pass (aggressive): 1 removed, 0 kept awaiting approval."),
+        "stderr: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[test]
+fn cli_given_strip_propose_reports_without_writing() -> std::io::Result<()> {
+    // given: an approved high-confidence candidate (tautological assertion)
+    let root = prepare_root("policy-propose")?;
+    let content = "def test_a():\n    assert value == value\n";
+    write_test_file(&root, "tests/test_a.py", content)?;
+    write_remove_config(
+        &root,
+        r#"{"glob":"tests/*.py","rules":["tautological-assertion"],"reason":"assertion compares the same value twice"}"#,
+    )?;
+    let input = strip_payload(&root, "tests/test_a.py", content);
+
+    // when
+    let output = run_checker(&input, &["--strip", "--propose", "--min-confidence", "low"])?;
+
+    // then: the proposal names the candidate and the file stays byte-identical
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cleanup pass (balanced): 1 proposed, 0 kept awaiting approval."),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("proposed: "), "stderr: {stderr}");
+    assert!(!stderr.contains("proposed a removal"), "stderr: {stderr}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("tests/test_a.py"))?,
+        content
     );
     let _ = std::fs::remove_dir_all(&root);
     Ok(())

@@ -202,8 +202,13 @@ command text does not claim native Windows support.
 - `--strip` runs the cleanup pass. It resolves `tool_input.file_path`/`filePath` against the payload
   `cwd` (the process cwd when absent). If the file exists, the whole file on disk is analyzed - the
   payload only names it; if the file is missing, the payload content is analyzed and never rewritten.
-  Only candidates approved by a `remove` entry in `<git root>/.test-checker.json` are removed; the
-  message appends a cleanup summary, and exit codes stay `0`/`2`/`1` as below.
+  A candidate is removed when its `remove` entry in `<git root>/.test-checker.json` covers it **and**
+  the [strip policy](#strip-policy) allows its confidence; the message appends a cleanup summary,
+  and exit codes stay `0`/`2`/`1` as below.
+- `--strip-policy <level>` picks how much the cleanup pass may remove on its own; see
+  [strip policy](#strip-policy).
+- `--propose` reports what the cleanup pass would remove and writes nothing, so a reviewer sees the
+  same list before approving.
 - **Write baseline (opt-in, off by default)**: set `TEST_CHECKER_WRITE_BASELINE=1` in the `env` block
   of `.claude/settings.json` (or the hook's environment) to let a whole-file `Write` diff against
   `git show HEAD:<path>`. Enabling it adds about **7 ms p95** to a `Write`; nothing is spawned when it
@@ -365,6 +370,21 @@ as an `Edit`.
 `agent-memo-test` findings are additionally summarised under a dedicated banner, pointing at the test
 name/assertion message that describes a change instead of the behavior. `--prompt` replaces that
 banner as well.
+
+## Strip policy
+
+`--strip-policy` decides which confidence tiers the cleanup pass may remove on its own, in both
+`test-checker` and `comment-checker`:
+
+| Level | Removes | Use |
+|:--|:--|:--|
+| `conservative` | high confidence only | proven structural problems; the safest default for a legacy tree |
+| `balanced` (default) | high and medium | proven problems plus audited heuristics |
+| `aggressive` | everything flagged, including low confidence | a bulk dump you are ready to review |
+
+An approval is still required: the policy narrows what a `remove` entry may remove, it never replaces
+the entry. `--propose` pairs with any level and prints the list plus the exact approval shape, so the
+automation is "propose the config, then apply it", not "delete without telling anyone".
 
 ## Limits and false-positive risks
 
