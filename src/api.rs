@@ -10,7 +10,7 @@ use crate::filters::{
     has_marker_in_comments, is_config_path,
 };
 use crate::language::{analyzable_language_for_path, is_harness_path, is_test_path};
-use crate::models::{Confidence, Edit, Finding};
+use crate::models::{Confidence, Edit, Finding, StripPolicy};
 use crate::output::format_hook_message;
 use crate::rules::{self, AddedLine};
 
@@ -219,7 +219,11 @@ pub fn check_hook_input_with_options(
                 parse_min_confidence(None),
                 include_commented_out_tests,
                 include_body_tests,
-                false,
+                StripRequest {
+                    strip: false,
+                    policy: StripPolicy::Balanced,
+                    propose: false,
+                },
             )
             .into_result()
         },
@@ -240,11 +244,23 @@ pub fn check_hook_input_from_reader<R: std::io::Read>(
                 parse_min_confidence(options.min_confidence.as_deref()),
                 true,
                 true,
-                options.strip,
+                StripRequest {
+                    strip: options.strip,
+                    policy: parse_strip_policy(options.strip_policy.as_deref()),
+                    propose: options.propose,
+                },
             )
             .into_result()
         },
     )
+}
+
+/// The removal-pass knobs, kept together so `evaluate` keeps a short signature.
+#[derive(Clone, Copy, Debug)]
+struct StripRequest {
+    strip: bool,
+    policy: StripPolicy,
+    propose: bool,
 }
 
 fn evaluate(
@@ -253,7 +269,7 @@ fn evaluate(
     min_confidence: Confidence,
     include_commented_out_tests: bool,
     include_body_tests: bool,
-    strip: bool,
+    removal: StripRequest,
 ) -> HookOutcome {
     let Some(tool) = classify_tool(&hook_input.tool_name) else {
         return skip("Unsupported tool");
@@ -299,9 +315,11 @@ fn evaluate(
     let cwd = Some(hook_input.cwd.as_str()).filter(|value| !value.is_empty());
     let suppression_config = SuppressionConfig::load(cwd);
     let detector = TestDetector::new();
-    if strip {
+    if removal.strip {
         return evaluate_strip(
             tool,
+            removal.policy,
+            removal.propose,
             hook_input,
             &detector,
             file_path,
@@ -433,6 +451,8 @@ fn read_target(path: &Path) -> Option<String> {
 #[allow(clippy::too_many_arguments)]
 fn evaluate_strip(
     tool: ToolKind,
+    policy: StripPolicy,
+    propose: bool,
     hook_input: &HookInput,
     detector: &TestDetector,
     file_path: &str,
@@ -476,6 +496,8 @@ fn evaluate_strip(
             suppression_config,
             custom_prompt,
             min_confidence,
+            policy,
+            propose,
         );
     }
 
@@ -507,6 +529,8 @@ fn evaluate_strip(
             suppression_config,
             custom_prompt,
             min_confidence,
+            policy,
+            propose,
         );
     }
 
@@ -551,6 +575,8 @@ fn evaluate_strip(
         suppression_config,
         custom_prompt,
         min_confidence,
+        policy,
+        propose,
     )
 }
 
@@ -618,6 +644,8 @@ fn strip_report(
     suppression_config: &SuppressionConfig,
     custom_prompt: &str,
     min_confidence: Confidence,
+    policy: StripPolicy,
+    propose: bool,
 ) -> HookOutcome {
     let candidates: Vec<&Finding> = findings
         .iter()
@@ -636,15 +664,21 @@ fn strip_report(
 
     let mut removable_spans = Vec::new();
     let mut removed = Vec::new();
+    let mut proposed = Vec::new();
     let mut kept = Vec::new();
     let mut seen_spans = HashSet::new();
     for candidate in &candidates {
-        let approved = suppression_config.removable(match_path, &candidate.rule);
+        let approved = suppression_config.removable(match_path, &candidate.rule)
+            && policy.allows(candidate.confidence);
         let span = enclosing_span(&spans, candidate.line_number);
         let name = span
             .and_then(|span| span.name.clone())
             .unwrap_or_else(|| candidate.text.trim().to_owned());
         if approved && target.is_some() {
+            if propose {
+                proposed.push((display_name(&name), candidate.rule.clone()));
+                continue;
+            }
             let Some(span) = span else {
                 let reason = span_error.as_deref().unwrap_or("no enclosing test block");
                 return HookOutcome::Failed(format!(
@@ -661,11 +695,13 @@ fn strip_report(
         }
     }
 
-    let approved_without_file = target.is_none()
+    let approved_without_file = !propose
+        && target.is_none()
         && candidates
             .iter()
             .any(|candidate| suppression_config.removable(match_path, &candidate.rule));
-    if let (Some(target), Some(content)) = (target, content)
+    if !propose
+        && let (Some(target), Some(content)) = (target, content)
         && !removable_spans.is_empty()
     {
         let merged = merge_spans(removable_spans);
@@ -686,7 +722,13 @@ fn strip_report(
 
     let note =
         approved_without_file.then_some("the target file is not on disk; nothing was rewritten");
-    let summary = strip_summary(&removed, &kept, note);
+    let summary = strip_summary(
+        if propose { &proposed } else { &removed },
+        &kept,
+        note,
+        policy,
+        propose,
+    );
     append_strip_summary(
         gate_and_format(findings, custom_prompt, min_confidence, suppressed),
         &summary,
@@ -810,14 +852,23 @@ fn strip_summary(
     removed: &[(String, String)],
     kept: &[(String, String)],
     note: Option<&str>,
+    policy: StripPolicy,
+    propose: bool,
 ) -> String {
+    let verb = if propose { "proposed" } else { "removed" };
     let mut summary = format!(
-        "[test-checker] cleanup pass: {} removed, {} kept awaiting approval.\n",
+        "[test-checker] cleanup pass ({}): {} {}, {} kept awaiting approval.\n",
+        policy.as_str(),
         removed.len(),
+        verb,
         kept.len()
     );
     for (name, rule) in removed {
-        summary.push_str("  removed: ");
+        summary.push_str(if propose {
+            "  proposed: "
+        } else {
+            "  removed: "
+        });
         summary.push_str(name);
         summary.push_str(" [");
         summary.push_str(rule);
@@ -1259,6 +1310,13 @@ fn parse_min_confidence(value: Option<&str>) -> Confidence {
     value
         .and_then(Confidence::parse)
         .unwrap_or_else(Confidence::min_from_env)
+}
+
+/// The requested `--strip-policy`, defaulting to balanced on absent or unknown values.
+fn parse_strip_policy(value: Option<&str>) -> StripPolicy {
+    value
+        .and_then(|value| StripPolicy::parse(value.trim()))
+        .unwrap_or(StripPolicy::Balanced)
 }
 
 const fn confidence_rank(confidence: Confidence) -> u8 {
