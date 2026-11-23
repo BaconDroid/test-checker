@@ -39,7 +39,7 @@ Misfires found by the secondary corpus (`eval/README.md`).
 
 | # | Item | Status |
 |:-:|:-----|:------|
-| E3 | `npm run doctor` wrapper around `scripts/doctor.sh`, plus the setup skill. | later |
+| E3 | Setup skill for the published hook wiring (the `npm run doctor` wrapper shipped in test-checker#110 and comment-checker#66). | later |
 
 ## Not adopted
 
