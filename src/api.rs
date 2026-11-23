@@ -887,7 +887,7 @@ fn strip_summary(
         summary.push('\n');
     }
     summary.push_str(
-        "  approve a removal with a \"remove\" entry ({\"glob\",\"rules\",\"reason\"}) in .test-checker.json\n",
+        "  approve a removal with a \"remove\" entry ({\"glob\",\"reasons\",\"reason\"}; the legacy \"rules\" key is accepted) in .test-checker.json\n",
     );
     summary
 }
