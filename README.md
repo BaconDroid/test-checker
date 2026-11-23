@@ -387,9 +387,12 @@ banner as well.
 | `balanced` (default) | high and medium | proven problems plus audited heuristics |
 | `aggressive` | everything flagged, including low confidence | a bulk dump you are ready to review |
 
-An approval is still required: the policy narrows what a `remove` entry may remove, it never replaces
-the entry. `--propose` pairs with any level and prints the count and policy that `--strip` would
-apply, so the review happens before the run rather than after it.
+The ladder is identical in both binaries; only the default differs. `test-checker` defaults to
+`balanced` because its low tier is telemetry, while `comment-checker` defaults to `aggressive` because
+the residual prose it flags is its normal cleanup target. An approval is still required: the policy
+narrows what a `remove` entry may remove, it never replaces the entry. `--propose` pairs with any
+level and prints the count and policy that `--strip` would apply, so the review happens before the
+run rather than after it.
 
 ## Limits and false-positive risks
 
